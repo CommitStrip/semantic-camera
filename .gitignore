@@ -1,0 +1,25 @@
+# ---- 构建产物 / 缓存（不入库）----
+.hvigor/
+**/build/
+**/.preview/
+**/.gradle/
+**/local.properties
+**/*.iml
+.idea/
+node_modules/
+
+# ---- 系统/编辑器 ----
+.DS_Store
+Thumbs.db
+
+# ---- 日志 ----
+*.log
+# ---- 签名材料与构建产物（不入库）----
+release/*.p12
+release/*.csr
+release/*.hap
+.mimosa/
+
+# ---- 签名材料（不入库）----
+harmony/signing/*.p12
+harmony/signing/*.csr

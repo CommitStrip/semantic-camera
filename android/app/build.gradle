@@ -1,0 +1,57 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+// 共享 Web 检测核心的源文件（位于 android 目录同级的 web/ 下）
+def sharedWebDir = rootProject.file('../web')          // /workspace/drone-monitor-app/web
+def stagedWebDir = new File(projectDir, 'src/main/assets/web')  // app/src/main/assets/web
+
+android {
+    namespace 'com.example.dronemonitor'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.example.dronemonitor"
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+    kotlinOptions { jvmTarget = '1.8' }
+
+    // 让 assets 直接指向分阶段拷贝目录，保证 index.html 可被 WebView 以
+    // file:///android_asset/web/index.html 访问
+    sourceSets {
+        main {
+            assets.srcDirs = [ stagedWebDir ]
+        }
+    }
+}
+
+// 把共享 Web 核心拷贝进 assets
+tasks.register('copyWebApp', Copy) {
+    group = 'build'
+    description = 'Copy the shared web core (web/index.html) into app/src/main/assets/web'
+    from sharedWebDir
+    into stagedWebDir
+    include 'index.html'
+}
+
+// 编译前确保 assets 里已有 Web 核心
+preBuild.dependsOn tasks.named('copyWebApp')
+
+dependencies {
+    // 无额外依赖：纯 WebView 封装，遥测落盘用原生 File API
+}

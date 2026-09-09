@@ -1,0 +1,8 @@
+{
+  "modelVersion": "5.0.0",
+  "description": "反无人机监控 · HarmonyOS NEXT 演示工程骨架",
+  "dependencies": {},
+  "devDependencies": {
+    "@ohos/hypium": "1.0.6"
+  }
+}

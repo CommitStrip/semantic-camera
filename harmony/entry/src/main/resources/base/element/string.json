@@ -1,0 +1,20 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "反无人机监控演示模块"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "ArkWeb 加载共享检测核心并桥接遥测"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "反无人机监控"
+    },
+    {
+      "name": "camera_reason",
+      "value": "用于访问相机实现实时反无人机检测演示"
+    }
+  ]
+}

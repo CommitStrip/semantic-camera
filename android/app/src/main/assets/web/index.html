@@ -1,0 +1,937 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>语义摄像头 · 场所模式演示</title>
+<!-- ONNX Runtime Web（纯 wasm 后端，挂载 window.ort）-->
+<script src="./ort.wasm.js"></script>
+<script src="./whep-client.js"></script>
+<script src="./hls.min.js"></script>
+<script src="./core.js"></script>
+<style>
+:root{
+  --bg:#070b12; --panel:#0d1420; --panel2:#111a29; --line:#1e2b3f;
+  --txt:#d7e3f4; --dim:#7e8ea6; --accent:#35e0a1; --accent2:#ffb454;
+  --warn:#ff5d5d; --cyan:#4fd2ff; --grid:rgba(78,140,200,.08);
+  --safe:env(safe-area-inset-bottom,0px);
+}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;overscroll-behavior:none}
+body{
+  background:var(--bg);color:var(--txt);font-family:"PingFang SC","HarmonyOS Sans SC","Noto Sans SC",system-ui,sans-serif;
+  display:flex;flex-direction:column;height:100dvh;overflow:hidden;user-select:none;
+}
+/* ===== 顶栏 ===== */
+.topbar{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:calc(10px + env(safe-area-inset-top)) 14px 10px;border-bottom:1px solid var(--line);
+  background:linear-gradient(180deg,rgba(13,20,32,.9),rgba(7,11,18,.6));
+}
+.topbar .logo{display:flex;align-items:center;gap:9px;font-weight:700;letter-spacing:.5px;font-size:15px}
+.topbar .logo .dot{width:10px;height:10px;border-radius:50%;background:var(--accent);box-shadow:0 0 10px var(--accent);animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+.topbar .status{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--dim)}
+.topbar .status .rec{width:8px;height:8px;border-radius:50%;background:var(--warn);display:none}
+.topbar .status.recording .rec{display:block;animation:pulse 1s infinite}
+/* ===== 视频区 ===== */
+.stage{position:relative;flex:1;background:#000;overflow:hidden;touch-action:none}
+#scan{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
+#overlay{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+/* 准星 */
+.cross{position:absolute;left:50%;top:50%;width:120px;height:120px;transform:translate(-50%,-50%);opacity:.35;pointer-events:none}
+.cross::before,.cross::after{content:"";position:absolute;background:var(--accent)}
+.cross::before{left:50%;top:0;width:1px;height:100%;transform:translateX(-50%)}
+.cross::after{top:50%;left:0;height:1px;width:100%;transform:translateY(-50%)}
+/* 变焦 HUD */
+.zoom-hud{position:absolute;right:12px;top:12px;background:rgba(7,11,18,.7);border:1px solid var(--line);border-radius:10px;padding:8px 10px;text-align:center;backdrop-filter:blur(4px)}
+.zoom-hud .val{font-size:20px;font-weight:700;color:var(--accent2);line-height:1}
+.zoom-hud .lab{font-size:9px;color:var(--dim);margin-top:2px}
+/* 遥测浮层 */
+.tele{position:absolute;left:12px;top:12px;background:rgba(7,11,18,.72);border:1px solid var(--line);border-radius:10px;padding:8px 10px;font-size:10px;line-height:1.7;min-width:120px;backdrop-filter:blur(4px)}
+.tele b{color:var(--accent);font-family:ui-monospace,Menlo,monospace}
+.tele .t-dim{color:var(--dim)}
+/* 检测框动画 */
+.det{position:absolute;border:2px solid var(--accent);transition:all .15s ease;pointer-events:none}
+.det.confirmed{border-color:var(--warn);box-shadow:0 0 12px rgba(255,93,93,.4)}
+.det .tag{position:absolute;left:-2px;top:-18px;background:var(--accent);color:#04120c;font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;white-space:nowrap}
+.det.confirmed .tag{background:var(--warn);color:#fff}
+.det .tag small{font-weight:400;opacity:.8}
+/* 提示条 */
+.toast{position:absolute;left:50%;bottom:14px;transform:translateX(-50%);background:rgba(7,11,18,.85);border:1px solid var(--line);padding:7px 14px;border-radius:20px;font-size:12px;opacity:0;transition:opacity .3s;pointer-events:none;white-space:nowrap;z-index:5}
+.toast.show{opacity:1}
+/* ===== 控制区 ===== */
+.controls{background:var(--panel);border-top:1px solid var(--line);padding:10px 12px calc(10px + var(--safe));display:flex;flex-direction:column;gap:10px}
+.row{display:flex;gap:10px;align-items:center}
+.row label{font-size:11px;color:var(--dim);min-width:52px}
+.btn{
+  flex:1;background:var(--panel2);border:1px solid var(--line);color:var(--txt);border-radius:10px;
+  padding:11px 0;font-size:13px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px;
+}
+.btn:active{transform:scale(.97)}
+.btn.primary{background:linear-gradient(135deg,#0e7a56,var(--accent));color:#03241a;border:none}
+.btn.on{background:var(--accent2);color:#2a1a00;border:none}
+.btn.small{flex:0 0 auto;padding:11px 14px}
+/* 滑块 */
+input[type=range]{flex:1;-webkit-appearance:none;appearance:none;height:34px;background:transparent}
+input[type=range]::-webkit-slider-runnable-track{height:4px;border-radius:2px;background:var(--line)}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;border-radius:50%;background:var(--accent2);margin-top:-8px;box-shadow:0 0 8px rgba(255,180,84,.5)}
+.zoom-val{min-width:46px;text-align:right;font-size:13px;font-weight:700;color:var(--accent2);font-family:ui-monospace,monospace}
+/* 记录面板 */
+.recpanel{display:none;flex-direction:column;gap:8px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px;max-height:40vh;overflow:hidden}
+.recpanel.open{display:flex}
+.recpanel .rp-head{display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--dim)}
+.recpanel .rp-head b{color:var(--accent)}
+.recpanel .log{flex:1;overflow-y:auto;font-family:ui-monospace,Menlo,monospace;font-size:10px;line-height:1.8;color:var(--txt);background:#05080d;border:1px solid var(--line);border-radius:6px;padding:6px 8px;min-height:60px}
+.recpanel .log .ev{display:flex;gap:8px}
+.recpanel .log .ev .ts{color:var(--dim)}
+.recpanel .log .ev .ty{color:var(--accent2)}
+.recpanel .log .ev.det .ty{color:var(--accent)}
+.recpanel .log .ev.conf .ty{color:var(--warn)}
+.iconrow{display:flex;gap:8px}
+.iconbtn{flex:1;background:var(--panel2);border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:8px 0;font-size:11px;cursor:pointer}
+.iconbtn:active{background:var(--panel)}
+/* 海康接入面板 */
+.hikpanel{display:none;flex-direction:column;gap:8px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px}
+.hikpanel.open{display:flex}
+.hk-row{display:flex;gap:8px;align-items:center}
+.hk-row label{font-size:11px;color:var(--dim);min-width:34px}
+.hk-row input{flex:1;background:#05080d;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:8px 10px;font-size:12px;min-width:0}
+.hk-row input::placeholder{color:var(--dim)}
+.hk-hint{font-size:9px;color:var(--dim);line-height:1.5}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="logo"><span class="dot"></span>语义摄像头</div>
+  <div class="status" id="status"><span class="rec"></span><span id="statusTxt">待机</span></div>
+</div>
+
+<div class="stage" id="stage">
+  <video id="scan" playsinline muted></video>
+  <canvas id="overlay"></canvas>
+  <div class="cross"></div>
+  <div class="zoom-hud"><div class="val" id="zoomVal">1.0×</div><div class="lab">变焦</div></div>
+  <div class="tele" id="tele"></div>
+  <div class="toast" id="toast"></div>
+</div>
+
+<div class="controls">
+  <div class="row">
+    <input type="file" id="fileInput" accept="video/mp4,video/*" style="display:none">
+    <button class="btn primary" id="btnStart">▶ 开始监控</button>
+    <button class="btn small" id="btnFile">📁 视频</button>
+    <button class="btn small" id="btnHik">🔌 海康</button>
+    <button class="btn small" id="btnRec">⏺ 记录</button>
+  </div>
+  <div class="hikpanel" id="hikpanel">
+    <div class="hk-row">
+      <button class="btn primary" id="btnHikGo" style="flex:2">连接并开始监控</button>
+      <button class="btn small" id="btnHikClose">✕</button>
+    </div>
+    <div class="hk-row">
+      <label>网关</label><input id="hkHost" placeholder="http://192.168.1.10:8889">
+    </div>
+    <div class="hk-row">
+      <label>路径</label><input id="hkPath" placeholder="cam1">
+    </div>
+    <div class="hk-row">
+      <label>账号</label><input id="hkUser" placeholder="(可选)">
+      <label>密码</label><input id="hkPass" type="password" placeholder="(可选)">
+    </div>
+    <div class="hk-row">
+      <label>方式</label>
+      <button class="btn on small" id="hkModeWhep" style="flex:1">WebRTC 低延迟</button>
+      <button class="btn small" id="hkModeHls" style="flex:1">HLS 兼容</button>
+    </div>
+    <div class="hk-row hk-hint">网关为本机 MediaMTX：海康 RTSP → WebRTC/HLS。WHEP 失败会自动回退 HLS。流路径见 gateway/mediamtx.yml。</div>
+  </div>
+  <div class="row">
+    <label>变焦</label>
+    <button class="btn small" id="zoomOut">−</button>
+    <input type="range" id="zoomRange" min="1" max="8" step="0.1" value="1">
+    <span class="zoom-val" id="zoomVal2">1.0×</span>
+    <button class="btn small" id="zoomIn">＋</button>
+  </div>
+  <div class="row">
+    <label>模式</label>
+    <button class="btn on small" id="modeFollow" style="flex:1">目标跟随</button>
+    <button class="btn small" id="modeManual" style="flex:1">手动</button>
+  </div>
+  <div class="row">
+    <label>模式</label>
+    <span id="modeName" style="flex:1;font-size:11px;color:var(--dim)"></span>
+    <button class="btn small" id="btnProbeReset">重置学习</button>
+  </div>
+  <div class="recpanel" id="recpanel">
+    <div class="rp-head"><span>遥测记录 <b id="evCount">0 条</b></span><span>已记录 <b id="recTime">00:00</b></span></div>
+    <div class="log" id="log"></div>
+    <div class="iconrow">
+      <button class="iconbtn" id="btnExpCSV">导出 CSV</button>
+      <button class="iconbtn" id="btnExpJSON">导出 JSON</button>
+      <button class="iconbtn" id="btnClear">清空</button>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+/* ============================================================
+   语义摄像头 · 场所模式核心（首包：净空防黑飞）
+   共享于 Android WebView 与鸿蒙 ArkWeb。
+   功能：实时检测管线(帧差门控→检测→跟踪→多帧确认→目标跟随)
+        + JEPA 四态全自动判别(裁决/灰区仲裁/自训练，无人工环节)
+        + 丝滑数字变焦(捏合/滑块/目标跟随)
+        + 运行时性能与效果全量记录(IndexedDB + CSV/JSON 导出)
+   ============================================================ */
+
+// CFG / estimateDist / iou / Tracker / MotionGate 已抽取到 web/core.js（head 处 <script src> 共享）
+
+// ---------- 遥测记录器：性能 + 效果 ----------
+class Telemetry {
+  constructor(){ this.events=[]; this.recording=false; this.t0=0; this.periodic=[];
+    this.db=null; this._initDB(); }
+  async _initDB(){
+    try{ const req=indexedDB.open('droneMonitor',1);
+      req.onupgradeneeded=e=>{ const d=e.target.result;
+        if(!d.objectStoreNames.contains('sessions'))
+          d.createObjectStore('sessions',{keyPath:'id',autoIncrement:true}); };
+      this.db=await new Promise((res,rej)=>{ req.onsuccess=()=>res(req.result); req.onerror=()=>rej(req.error); });
+    }catch(e){ /* WebView 无 IndexedDB 时降级内存 */ }
+  }
+  start(){ this.recording=true; this.t0=performance.now(); this.events=[]; this.periodic=[];
+    this._log({ty:'sys',msg:'监控开始'}); }
+  stop(){ this.recording=false; this._log({ty:'sys',msg:'监控结束'}); this._saveSession(); }
+  _log(ev){ ev.t=performance.now()-this.t0; this.events.push(ev); this._render(ev);
+    // 原生桥接：Android WebView / 鸿蒙 ArkWeb 通过 window.nativeBridge 接收落盘
+    try{ if(window.nativeBridge && window.nativeBridge.pushTelemetry)
+      window.nativeBridge.pushTelemetry(JSON.stringify(ev)); }catch(e){}};
+  // 周期性性能采样(每帧)
+  perf(frame,bootstrap,ff,bootstrapMs,detMs,trackMs,totalMs,zoom,detN,confN,mr){
+    if(!this.recording) return;
+    this.periodic.push({t:performance.now()-this.t0,frame,ff,bootstrap,ffMs:bootstrapMs,
+      detMs,trackMs,totalMs,zoom,detN,confN,mr});
+    // 每 30 帧归档一条性能记录
+    if(this.periodic.length>=30){ this._log({ty:'perf',frame,ff,bootstrap,
+        ffMs:bootstrapMs,detMs,trackMs,totalMs,zoom,detN,confN,mr}); this.periodic=[]; }
+  }
+  det(ev){ if(this.recording) this._log({ty:'det',cls:ev.cls,conf:ev.conf,dist:ev.dist||null,zoom:ev.zoom}); }
+  conf(ev){ if(this.recording) this._log({ty:'conf',id:ev.id,dist:ev.dist||null}); }
+  err(msg){ if(this.recording) this._log({ty:'err',msg}); }
+  async _saveSession(){
+    const s={id:Date.now(),ts:new Date().toISOString(),duration:performance.now()-this.t0,
+      events:this.events.slice(),summary:this.summary()};
+    try{ if(this.db){ const tx=this.db.transaction('sessions','readwrite'); tx.objectStore('sessions').add(s); } }catch(e){}
+    return s;
+  }
+  summary(){
+    const det=this.events.filter(e=>e.ty==='det').length;
+    const conf=this.events.filter(e=>e.ty==='conf').length;
+    const perfs=this.events.filter(e=>e.ty==='perf');
+    const ff=perfs.length?perfs.reduce((a,e)=>a+e.ff,0)/perfs.length:0;
+    const detMs=perfs.length?perfs.reduce((a,e)=>a+(e.detMs||0),0)/perfs.filter(e=>e.detMs).length:0;
+    return {det,conf,fps:ff,detMs,events:this.events.length};
+  }
+  _render(ev){
+    const log=document.getElementById('log');
+    const el=document.createElement('div');
+    el.className='ev '+ev.ty;
+    const ts=(ev.t/1000).toFixed(1);
+    let body;
+    if(ev.ty==='perf') body=`<span class="tp">ff=${ev.ff.toFixed(1)} 检=${ev.detN} 确=${ev.confN} 变焦=${ev.zoom.toFixed(1)} 运动=${ev.mr!==undefined?(ev.mr*100).toFixed(1)+'%':'—'}</span>`;
+    else if(ev.ty==='det') body=`<span class="ty">检出</span> ${ev.cls} conf=${ev.conf} 距离=${ev.dist?ev.dist+'m':'—'} 变焦=${ev.zoom.toFixed(1)}`;
+    else if(ev.ty==='conf') body=`<span class="ty">确认</span> 目标#${ev.id} 距离=${ev.dist?ev.dist+'m':'—'}`;
+    else body=`<span class="ty">${ev.ty==='sys'?'系统':'错误'}</span> ${ev.msg||''}`;
+    el.innerHTML=`<span class="ts">${ts}s</span> ${body}`;
+    log.prepend(el);
+    document.getElementById('evCount').textContent=this.events.length+' 条';
+  }
+  exportCSV(){
+    const rows=[['t_s','type','detail']];
+    this.events.forEach(e=>{ rows.push([(e.t/1000).toFixed(2),e.ty,JSON.stringify(e)]); });
+    this._download('drone_telemetry.csv','\ufeff'+rows.map(r=>r.join(',')).join('\n'));
+  }
+  exportJSON(){
+    this._saveSession().then(s=>{ this._download('drone_session_'+s.id+'.json',JSON.stringify(s,null,2)); });
+  }
+  _download(name,content){
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(new Blob([content],{type:'text/plain;charset=utf-8'}));
+    a.download=name; a.click(); URL.revokeObjectURL(a.href);
+  }
+}
+const tele=new Telemetry();
+
+// 几何/跟踪/门控逻辑见 web/core.js
+
+// ---------- 真实无人机检测器（onnxruntime-web 加载 yolov8s-drone.onnx）----------
+// 复用 Python 管线验证过的真实模型：letterbox 预处理 + YOLOv8 NMS 后处理。
+class YoloDroneDetector{
+  constructor(modelPath){
+    this.ort=null; this.session=null; this.imgsz=640; this.conf=0.25;
+    this.modelPath=modelPath||'./yolov8s-drone.onnx';
+    this.names={0:'drone'}; this.loaded=false; this.loading=false;
+    this._off=document.createElement('canvas');   // letterbox 画布复用（每帧新建会拖垮 GC）
+    this._offCtx=this._off.getContext('2d',{willReadFrequently:true}); }
+  async load(){
+    // 可等待的加载：并发调用共享同一个 promise（此前 loading 时直接 return，
+    // 调用方在 session 尚未就绪时继续执行，首检必崩）
+    if(this.loaded) return true;
+    if(!this._loadPromise){
+      this.loading=true;
+      this._loadPromise=(async()=>{
+        try{
+          // onnxruntime-web 已通过 <script> 挂载到 window.ort（UMD）
+          this.ort=window.ort || globalThis.ort;
+          if(!this.ort) throw new Error('onnxruntime-web 未加载');
+          const wasmDir='.';
+          this.ort.env.wasm.wasmPaths=wasmDir+'/';
+          // 多线程 wasm 需要 SharedArrayBuffer（跨域隔离）；WebView file:// 下不可用，自动回退 1 线程
+          this.ort.env.wasm.numThreads =
+            (typeof SharedArrayBuffer!=='undefined')
+              ? Math.min(4, navigator.hardwareConcurrency||1) : 1;
+          this.session = await this.ort.InferenceSession.create(this.modelPath,{
+            executionProviders:['wasm'],
+            graphOptimizationLevel:'all'
+          });
+          this.loaded=true;
+          return true;
+        }finally{
+          this.loading=false;
+        }
+      })();
+    }
+    try{
+      return await this._loadPromise;
+    }catch(e){
+      this._loadPromise=null;  // 失败允许重试
+      throw e;
+    }
+  }
+  // letterbox 预处理：返回 normalized tensor array
+  _preprocess(canvas){
+    const s=this.imgsz;
+    const srcW=canvas.width, srcH=canvas.height;
+    const r=Math.min(s/srcW, s/srcH);
+    const nw=Math.round(srcW*r), nh=Math.round(srcH*r);
+    const dw=Math.floor((s-nw)/2), dh=Math.floor((s-nh)/2);
+    const off=this._off; off.width=nw; off.height=nh;
+    const octx=this._offCtx;
+    octx.drawImage(canvas,0,0,nw,nh);
+    const img=octx.getImageData(0,0,nw,nh).data;
+    // 填充灰底画布 114
+    const data=new Float32Array(3*s*s);
+    for(let k=0;k<3;k++) for(let i=0;i<s;i++) for(let j=0;j<s;j++) data[k*s*s+i*s+j]=114/255;
+    for(let y=0;y<nh;y++) for(let x=0;x<nw;x++){
+      const si=(y*nw+x)*4;
+      const outY=y+dh, outX=x+dw;
+      data[0*s*s+outY*s+outX]=img[si]/255;
+      data[1*s*s+outY*s+outX]=img[si+1]/255;
+      data[2*s*s+outY*s+outX]=img[si+2]/255;
+    }
+    return {data, r, dw, dh, srcW, srcH};
+  }
+  // 纯 JS NMS（类内 IoU 抑制）
+  _nms(dets,iouTh){
+    dets.sort((a,b)=>b.conf-a.conf);
+    const keep=[];
+    for(const d of dets){
+      let ok=true;
+      for(const k of keep){
+        const ix1=Math.max(d.x1,k.x1),iy1=Math.max(d.y1,k.y1);
+        const ix2=Math.min(d.x2,k.x2),iy2=Math.min(d.y2,k.y2);
+        const iw=Math.max(0,ix2-ix1),ih=Math.max(0,iy2-iy1);
+        const inter=iw*ih, ua=(d.x2-d.x1)*(d.y2-d.y1)+(k.x2-k.x1)*(k.y2-k.y1)-inter;
+        if(ua>0 && inter/ua>iouTh){ ok=false; break; }
+      }
+      if(ok) keep.push(d);
+    }
+    return keep;
+  }
+  // 输入: 彩色 canvas 帧; 输出 [{cls,conf,bbox:[x,y,w,h](原图像素)}]
+  async predict(canvas){
+    if(!this.loaded) await this.load();
+    const s=this.imgsz;
+    const {data,r,dw,dh,srcW,srcH}=this._preprocess(canvas);
+    const tensor=new this.ort.Tensor('float32',data,[1,3,s,s]);
+    const feeds={}; feeds[this.session.inputNames[0]]=tensor;
+    const out=await this.session.run(feeds);
+    const outName=this.session.outputNames[0];
+    let box=out[outName].data;
+    // 输出 shape [1,4+nc,8400] 或 [1,8400,4+nc]
+    const shape=out[outName].dims;
+    let nc;
+    if(shape[1]<shape[2]){ nc=shape[1]-4; }
+    else { nc=shape[2]-4; }
+    const N=Math.max(shape[1],shape[2]);
+    // 若 [1,4+nc,N]: 转置访问
+    const CHW = shape[1]<shape[2];
+    const dets=[];
+    for(let c=0;c<N;c++){
+      let cx,cy,bw,bh;
+      if(CHW){
+        cx=box[0*N+c]; cy=box[1*N+c]; bw=box[2*N+c]; bh=box[3*N+c];
+      }else{
+        cx=box[c*shape[2]+0]; cy=box[c*shape[2]+1]; bw=box[c*shape[2]+2]; bh=box[c*shape[2]+3];
+      }
+      // 类别分数
+      let bestCls=-1,bestSc=-1;
+      for(let k=0;k<nc;k++){
+        const sc=CHW? box[(4+k)*N+c] : box[c*shape[2]+4+k];
+        if(sc>bestSc){bestSc=sc;bestCls=k;}
+      }
+      if(bestSc<this.conf) continue;
+      const x1=(cx-bw/2-dw)/r, y1=(cy-bh/2-dh)/r;
+      const x2=(cx+bw/2-dw)/r, y2=(cy+bh/2-dh)/r;
+      const X1=Math.max(0,Math.min(srcW,x1)), Y1=Math.max(0,Math.min(srcH,y1));
+      const X2=Math.max(0,Math.min(srcW,x2)), Y2=Math.max(0,Math.min(srcH,y2));
+      if(X2<=X1||Y2<=Y1) continue;
+      dets.push({cls:this.names[bestCls]||'drone',conf:bestSc,x1:X1,y1:Y1,x2:X2,y2:Y2});
+    }
+    const picked=this._nms(dets,0.45);
+    return picked.map(d=>({cls:d.cls,conf:Math.round(d.conf*1000)/1000,
+      bbox:[Math.round(d.x1),Math.round(d.y1),Math.round(d.x2-d.x1),Math.round(d.y2-d.y1)]}));
+  }
+}
+
+// ---------- JEPA 特征判别 + 全自动在线进化 ----------
+// 设计：YOLO 负责定位（沿用现有 YoloDroneDetector），DINOv2(JEPA 风格) 负责判别。
+// onnxruntime-web 只支持推理，无法微调 backbone；故"进化"落地为冻结特征之上的
+// 探针头更新，且标签来源全自动——边缘自训练（logreg 头与原型距离双信号一致）+
+// 慢脑仲裁回灌（M2，经 core.js 的 probeLearn 同一路径）。设计红线：判别流水线
+// 任何环节不得依赖人工判定，🕊/🛸 人工反馈按钮已废除；"重置学习"保留为运维操作。
+class JepaDiscriminator{
+  constructor(pack){
+    this.ort=null; this.session=null; this.imgsz=224;
+    this.loaded=false; this.loading=false;
+    this.task=pack.discriminators.main;
+    this.probe=null;  // 归一化形态 {logreg_w,logreg_b,protos:[负类质心,正类质心],ns:[负类数,正类数]}
+    this.rid=0;       // 自动学习更新计数
+    this._cropCv=document.createElement('canvas');  // crop 画布复用
+    this._cropCtx=this._cropCv.getContext('2d',{willReadFrequently:true});
+  }
+  async load(){
+    // 与 YoloDroneDetector 同款可等待加载（并发调用共享同一 promise）
+    if(this.loaded) return true;
+    if(!this._loadPromise){
+      this.loading=true;
+      this._loadPromise=(async()=>{
+        try{
+          this.ort=window.ort||globalThis.ort;
+          if(!this.ort) throw new Error('onnxruntime-web 未加载');
+          this.ort.env.wasm.wasmPaths='./';
+          this.ort.env.wasm.numThreads =
+            (typeof SharedArrayBuffer!=='undefined')
+              ? Math.min(4, navigator.hardwareConcurrency||1) : 1;
+          this.session=await this.ort.InferenceSession.create('./dinov2_vits14_feat.onnx',{
+            executionProviders:['wasm'], graphOptimizationLevel:'all'});
+          // 加载探针头（优先本地持久化的已学习探针，否则用初始化权重）
+          await this.loadProbe();
+          this.loaded=true;
+          return true;
+        }finally{
+          this.loading=false;
+        }
+      })();
+    }
+    try{
+      return await this._loadPromise;
+    }catch(e){
+      this._loadPromise=null;  // 失败允许重试
+      throw e;
+    }
+  }
+  // 加载/持久化探针头（兼容旧版 proto_bird/proto_drone 字段命名）
+  async loadProbe(){
+    const classes=this.task.classes;
+    try{
+      const saved=localStorage.getItem('jepa_probe_v2');
+      if(saved){ this.probe=normalizeProbe(JSON.parse(saved),classes); return; }
+      const legacy=localStorage.getItem('jepa_probe');
+      if(legacy){ this.probe=normalizeProbe(JSON.parse(legacy),classes); this.saveProbe(); return; }
+    }catch(e){}
+    const r=await fetch(this.task.probe);
+    this.probe=normalizeProbe(await r.json(),classes);
+  }
+  saveProbe(){
+    try{ localStorage.setItem('jepa_probe_v2',JSON.stringify(this.probe)); }catch(e){}
+  }
+  // 从图像 canvas 中裁剪出 bbox 区域并缩放到 224
+  _crop(canvas, bx, by, bw, bh){
+    const c=this._cropCv; c.width=this.imgsz; c.height=this.imgsz;
+    const ctx=this._cropCtx;
+    const pad=0.15, nw=bw*(1+2*pad), nh=bh*(1+2*pad);
+    const sx=Math.max(0,bx-bw*pad), sy=Math.max(0,by-bh*pad);
+    const sw=Math.min(canvas.width-sx,nw), sh=Math.min(canvas.height-sy,nh);
+    ctx.drawImage(canvas,sx,sy,sw,sh,0,0,this.imgsz,this.imgsz);
+    return c;
+  }
+  // 归一化到 [0,1] CHW 张量
+  _preprocess(canvas){
+    const ctx=canvas.getContext('2d',{willReadFrequently:true});
+    const img=ctx.getImageData(0,0,this.imgsz,this.imgsz).data;
+    const data=new Float32Array(3*this.imgsz*this.imgsz);
+    for(let i=0;i<this.imgsz*this.imgsz;i++){
+      data[i]=img[i*4]/255;
+      data[this.imgsz*this.imgsz+i]=img[i*4+1]/255;
+      data[2*this.imgsz*this.imgsz+i]=img[i*4+2]/255;
+    }
+    return data;
+  }
+  // 提取 DINOv2 特征(768 维 L2 归一化)
+  async features(canvas, bx,by,bw,bh){
+    if(!this.loaded) await this.load();
+    const crop=this._crop(canvas,bx,by,bw,bh);
+    const data=this._preprocess(crop);
+    const tensor=new this.ort.Tensor('float32',data,[1,3,this.imgsz,this.imgsz]);
+    const feeds={}; feeds[this.session.inputNames[0]]=tensor;
+    const out=await this.session.run(feeds);
+    const f=Array.from(out['feat'].data);
+    const norm=Math.sqrt(f.reduce((a,v)=>a+v*v,0))+1e-8;
+    return f.map(v=>v/norm);
+  }
+  // P(正类)——四态裁决(JepaPolicy)的输入
+  score(feat){ return logregScore(this.probe,feat); }
+  // 自动学习（label: 0=负类 1=正类）：质心增量 + logreg 单步 SGD，纯数学在 core.js
+  learn(feat, label, lr){
+    probeLearn(this.probe,feat,label,lr);
+    this.rid++;
+    this.saveProbe();
+    return this.probe.ns[0]+this.probe.ns[1];
+  }
+  async resetProbe(){
+    try{ localStorage.removeItem('jepa_probe_v2'); localStorage.removeItem('jepa_probe'); this.probe=null; }catch(e){}
+    return this.loadProbe();
+  }
+}
+
+// ---------- 主控制器 ----------
+const video=document.getElementById('scan');
+const overlay=document.getElementById('overlay');
+const octx=overlay.getContext('2d');
+const stage=document.getElementById('stage');
+const teleOut=document.getElementById('tele');
+
+// 场所模式包：?mode= 参数选择，缺省净空防黑飞（详见 docs/semantic-camera-design.md）
+const pack=getModePack(new URLSearchParams(location.search).get('mode'));
+// 配置治理 fail-closed：模式包不合法则拒绝布防（startLoop 拒绝启动），不带病上线
+const packErrs=validatePack(pack);
+let policy=new JepaPolicy(pack);          // 四态全自动裁决（无人工判定环节）
+let arb=new ArbitrationQueue(pack.arb);   // 慢脑仲裁队列（预算硬上限 + 轨迹去重）
+let stream=null, running=false, raf=null;
+let srcCanvas=document.createElement('canvas');
+let sctx=srcCanvas.getContext('2d');
+let zoom=1, zoomTarget=1, modeFollow=true;
+let tracker=new Tracker();
+let motionGate=new MotionGate();
+let detector=new YoloDroneDetector(pack.detector);
+let jepa=new JepaDiscriminator(pack);   // JEPA 特征判别 + 全自动在线进化
+let lastDet=0;
+let detecting=false;                // 慢系统在飞标志：wasm 推理期间 raf 重入不重复派发
+let frameCount=0, flip=false;
+let pendingJepa=null;      // 最近一次 JEPA 裁决(供 HUD 显示)
+document.getElementById('modeName').textContent=packErrs.length
+  ? '⚠ 模式包非法：'+packErrs[0]+'（拒绝布防）'
+  : pack.name+' · JEPA 全自动判别'+(pack.schedule?' · 定时布防':'');
+
+// 变焦状态(平滑)
+let smZoom=1;
+
+function toast(msg){
+  const t=document.getElementById('toast'); t.textContent=msg; t.classList.add('show');
+  clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove('show'),1800);
+}
+
+// ---------- 变焦控制(丝滑) ----------
+function setZoom(v){ v=Math.max(1,Math.min(8,v)); zoomTarget=v; updateZoomUI(); }
+function updateZoomUI(){
+  document.getElementById('zoomVal').textContent=zoomTarget.toFixed(1)+'×';
+  document.getElementById('zoomVal2').textContent=zoomTarget.toFixed(1)+'×';
+  document.getElementById('zoomRange').value=zoomTarget;
+}
+document.getElementById('zoomIn').onclick=()=>setZoom(zoomTarget+0.5);
+document.getElementById('zoomOut').onclick=()=>setZoom(zoomTarget-0.5);
+document.getElementById('zoomRange').oninput=e=>setZoom(parseFloat(e.target.value));
+document.getElementById('modeFollow').onclick=()=>{modeFollow=true;
+  document.getElementById('modeFollow').classList.add('on');
+  document.getElementById('modeManual').classList.remove('on'); toast('目标跟随变焦开启');};
+document.getElementById('modeManual').onclick=()=>{modeFollow=false;
+  document.getElementById('modeManual').classList.add('on');
+  document.getElementById('modeFollow').classList.remove('on'); toast('手动变焦');};
+
+// 捏合变焦：记住起手时的 zoom 与指距，按"初始zoom × 当前距/起始距"缩放
+// （此前每个 touchmove 都用已更新的 zoomTarget 再乘比例，手指停在 2 倍距离时会持续放大失控）
+let pinchD=0, pinchStartZoom=1;
+stage.addEventListener('touchstart',e=>{ if(e.touches.length===2){ pinchD=Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY); pinchStartZoom=zoomTarget; } },{passive:true});
+stage.addEventListener('touchmove',e=>{ if(e.touches.length===2){ e.preventDefault(); const d=Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY); if(pinchD>0) setZoom(pinchStartZoom*d/pinchD); } },{passive:false});
+
+// ---------- 输入源 ----------
+document.getElementById('btnStart').onclick=async()=>{
+  if(running){ stop(); return; }
+  stopNetSource();
+  try{
+    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}});
+    video.srcObject=stream; await video.play(); startLoop();
+    setStatus('运行中','recording'); toast('已接入相机');
+  }catch(e){ toast('相机不可用,请选视频文件'); }
+};
+document.getElementById('btnFile').onclick=()=>document.getElementById('fileInput').click();
+document.getElementById('fileInput').onchange=e=>{
+  const f=e.target.files[0]; if(!f)return;
+  video.srcObject=null; video.src=URL.createObjectURL(f); video.muted=true;
+  video.play().then(()=>{ startLoop(); setStatus('回放中','recording'); toast('载入视频: '+f.name); }).catch(()=>{});
+};
+
+// ---------- 海康威视接入 (RTSP -> MediaMTX 网关 -> WebRTC(WHEP)/HLS) ----------
+let whep=null, hls=null, hikMode='whep';
+document.getElementById('btnHik').onclick=()=>{
+  const p=document.getElementById('hikpanel');
+  p.classList.toggle('open');
+  if(p.classList.contains('open')){
+    // 回填上次配置
+    ['hkHost','hkPath','hkUser','hkPass'].forEach(id=>{
+      const v=localStorage.getItem('hik_'+id);
+      if(v!==null) document.getElementById(id).value=v;
+    });
+  }
+};
+document.getElementById('btnHikClose').onclick=()=>document.getElementById('hikpanel').classList.remove('open');
+function setHikMode(m){
+  hikMode=m;
+  document.getElementById('hkModeWhep').classList.toggle('on',m==='whep');
+  document.getElementById('hkModeHls').classList.toggle('on',m==='hls');
+}
+document.getElementById('hkModeWhep').onclick=()=>setHikMode('whep');
+document.getElementById('hkModeHls').onclick=()=>setHikMode('hls');
+// 断开网络流资源
+function stopNetSource(){
+  if(whep){ try{whep.close();}catch(e){} whep=null; }
+  if(hls){ try{hls.destroy();}catch(e){} hls=null; }
+  video.src=''; video.srcObject=null;
+}
+// WHEP 连接（主，低延迟）：失败必 reject + 超时兜底
+// （此前 Promise 只在 onTrack 才 resolve、onError 只 toast——网关挂起时"连接并
+//  开始监控"会永远卡住，下面的 6s 首帧超时根本走不到）
+function startWhep(url,user,pass,timeoutMs=8000){
+  return new Promise((resolve,reject)=>{
+    let settled=false;
+    const to=setTimeout(()=>{
+      if(settled) return;
+      settled=true;
+      if(whep){ try{whep.close();}catch(e){} whep=null; }
+      reject(new Error('WHEP 连接超时'));
+    }, timeoutMs);
+    whep=new WhepClient({
+      url, user, pass, video,
+      onTrack:()=>{ if(!settled){ settled=true; clearTimeout(to); resolve(true); } },
+      onError:(e)=>{
+        if(settled) return;
+        settled=true; clearTimeout(to);
+        if(whep){ try{whep.close();}catch(e2){} whep=null; }
+        reject(new Error(String(e)));
+      }
+    });
+    whep.start();
+  });
+}
+// HLS 连接（回退）
+function startHls(url){
+  return new Promise((resolve,reject)=>{
+    video.srcObject=null;
+    if(window.Hls && Hls.isSupported()){
+      const h=new Hls({ enableWorker:false, lowLatencyMode:true });
+      hls=h;
+      h.loadSource(url); h.attachMedia(video);
+      h.on(Hls.Events.MANIFEST_PARSED,()=>{ video.play().catch(()=>{}); resolve(true); });
+      h.on(Hls.Events.ERROR,(e,d)=>{ if(d&&d.fatal) reject(new Error('HLS fatal '+d.type)); });
+    } else if(video.canPlayType('application/vnd.apple.mpegurl')){
+      video.src=url; video.play().catch(()=>{}); resolve(true);
+    } else {
+      reject(new Error('当前环境不支持 HLS'));
+    }
+  });
+}
+// 异源：把 WHEP 端口 8889 换成 HLS 端口 8888
+function hlsUrlFrom(host,path){
+  const h=(host||'').replace(/\/+$/,'').replace(/:8889$/,'').replace(/:8888$/,'');
+  return h + ':8888/' + path + '/index.m3u8';
+}
+document.getElementById('btnHikGo').onclick=async()=>{
+  if(running){ toast('请先停止当前监控'); return; }
+  const host=document.getElementById('hkHost').value.trim();
+  const path=document.getElementById('hkPath').value.trim().replace(/^\/+|\/+$/g,'');
+  const user=document.getElementById('hkUser').value.trim();
+  const pass=document.getElementById('hkPass').value;
+  if(!host||!path){ toast('请填写网关地址与流路径'); return; }
+  ['hkHost','hkPath','hkUser','hkPass'].forEach(id=>localStorage.setItem('hik_'+id,document.getElementById(id).value));
+  stopNetSource();
+  toast('正在连接海康流 '+path+' …');
+  const base=host.replace(/\/+$/,'');
+  const whepUrl=base + '/' + path + '/whep';
+  const hlsUrl=hlsUrlFrom(host,path);
+  let ok=false;
+  if(hikMode==='whep'){
+    try{
+      await startWhep(whepUrl,user,pass);
+      // 等首帧可用即算成功
+      const t0=Date.now();
+      while(Date.now()-t0<6000 && !video.videoWidth){ await new Promise(r=>setTimeout(r,120)); }
+      ok = video.videoWidth>0;
+      if(!ok){
+        // 回退 HLS
+        if(whep){try{whep.close();}catch(e){} whep=null; }
+        try{ await startHls(hlsUrl); ok=true; toast('已回退到 HLS'); }
+        catch(e3){ toast('WHEP 与 HLS 均连接失败'); }
+      }
+    }catch(e){
+      try{ await startHls(hlsUrl); ok=true; toast('已回退到 HLS'); }
+      catch(e2){ toast('连接失败: '+(e&&e.message?e.message:e)); }
+    }
+  }else{
+    try{ await startHls(hlsUrl); ok=true; }
+    catch(e){ toast('HLS 连接失败: '+(e&&e.message?e.message:e)); }
+  }
+  if(ok){
+    video.muted=true;
+    video.play().then(()=>{ startLoop(); setStatus('海康在线','recording'); toast('海康流已接入: '+path); })
+      .catch(()=>{ toast('播放失败'); });
+  }
+};
+document.getElementById('btnRec').onclick=()=>{
+  document.getElementById('recpanel').classList.toggle('open');
+};
+document.getElementById('btnExpCSV').onclick=()=>tele.exportCSV();
+document.getElementById('btnExpJSON').onclick=()=>tele.exportJSON();
+document.getElementById('btnClear').onclick=()=>{ tele.events=[]; document.getElementById('log').innerHTML=''; document.getElementById('evCount').textContent='0 条'; };
+
+// ---------- JEPA 运维：重置学习（恢复初始化权重，非判定环节） ----------
+document.getElementById('btnProbeReset').onclick=async()=>{
+  await jepa.resetProbe(); pendingJepa=null;
+  toast('JEPA 探针已重置为初始化权重');
+};
+
+function setStatus(t,rec){ document.getElementById('statusTxt').textContent=t;
+  document.getElementById('status').classList.toggle('recording',rec==='recording'); }
+
+function stop(){
+  running=false; if(raf)cancelAnimationFrame(raf);
+  if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;}
+  stopNetSource();
+  video.pause(); tele.stop(); setStatus('已停止',''); toast('监控已停止');
+}
+
+// ---------- 主循环 ----------
+function startLoop(){
+  // fail-closed：模式包校验不过拒绝布防（渲染层仍可预览画面，但不进流水线）
+  if(packErrs.length){ toast('模式包配置非法，拒绝布防'); return; }
+  running=true;
+  if(!tele.recording) tele.start();
+  const resize=()=>{ const r=overlay.getBoundingClientRect();
+    overlay.width=r.width*devicePixelRatio; overlay.height=r.height*devicePixelRatio; };
+  resize(); window.addEventListener('resize',resize);
+  // 预加载真实模型（onnxruntime-web + wasm），避免首帧推理卡顿
+  toast('正在加载识别模型…');
+  detector.load().then(()=>{
+    toast('模型已加载，开始检测');
+    tele._log({ty:'sys',msg:'模型加载完成 '+JSON.stringify(detector.names)});
+  }).catch(e=>{ tele.err('模型加载失败:'+e.message); toast('模型加载失败'); });
+  // JEPA 懒加载：首次确认目标时才加载 DINOv2（features() 内部处理），避免开场白载 85MB
+  loop();
+}
+
+const DS=96; // 检测降采样宽度(快系统)
+const grayCv=document.createElement('canvas');  // 门控画布复用（每帧新建会拖垮 GC）
+const grayCtx=grayCv.getContext('2d',{willReadFrequently:true});
+async function loop(){
+  if(!running) return;
+  raf=requestAnimationFrame(loop);
+  const t0=performance.now();
+  if(video.readyState<2) return;
+
+  // 取帧
+  const vw=video.videoWidth,vh=video.videoHeight;
+  if(!vw||!vh) return;
+  srcCanvas.width=vw; srcCanvas.height=vh;
+  sctx.drawImage(video,0,0,vw,vh);
+
+  // 平滑过渡变焦
+  smZoom+=(zoomTarget-smZoom)*0.25;
+  zoom=smZoom;
+
+  // 快系统：降采样灰度 + 帧差门控（逐帧、廉价，不触发任何重活）
+  const gw=DS, gh=Math.max(1,Math.round(DS*vh/vw));
+  if(grayCv.width!==gw||grayCv.height!==gh){ grayCv.width=gw; grayCv.height=gh; }
+  grayCtx.drawImage(srcCanvas,0,0,gw,gh);
+  const gdata=grayCtx.getImageData(0,0,gw,gh).data;
+  const gray=new Uint8Array(gw*gh);
+  for(let i=0;i<gray.length;i++) gray[i]=gdata[i*4];
+  const motion=motionGate.detect(gray,gw,gh);
+  const t1=performance.now();
+
+  // 慢系统：触发式检测——有运动即检（间隔≥motionDetInterval），无运动按巡检间隔兜底
+  const now=performance.now();
+  let dets=[];
+  const due = motion.length>0
+    ? now-lastDet>=CFG.motionDetInterval
+    : now-lastDet>=CFG.patrolInterval;
+  if(due && !detecting){
+    detecting=true;
+    // 布防状态：非布防时段告警降级为记录、仲裁不占预算（判别与自训练照常，保持探针温热）
+    const armed=isArmed(pack);
+    try{
+      const t2=performance.now();
+      const raw=await detector.predict(srcCanvas).catch(e=>{ tele.err('推理失败:'+e.message); return []; });
+      const t3=performance.now();
+      // 转换：原图像素 → 归一化坐标 + 距离 + 变焦（bbox 统一 [x,y,w,h] 数组）
+      dets=raw.map(d=>{
+        const b=d.bbox;
+        const bx=b[0]/vw, by=b[1]/vh, bw=b[2]/vw, bh=b[3]/vh;
+        return {cls:d.cls,conf:d.conf,bbox:[bx,by,bw,bh],cx:bx+bw/2,cy:by+bh/2,
+          dist:estimateDist(b[3],vh,d.cls),zoom};
+      });
+      // 跟踪
+      const t4=performance.now();
+      tracker.update(dets,now);
+      lastDet=now;
+      // JEPA 自动判别：只对已确认目标提特征并节流（DINOv2 是重活，且懒加载——
+      // 首次确认时才拉起模型，features() 内部 await load）；此后每 reconfirmInterval 重复。
+      // 四态全自动裁决：alert 告警 / escalate 灰区弃权入仲裁队列 / clear·suppress 不告警；
+      // 高置信且双信号一致时自动自训练探针（标签来源为机器一致性，无人工环节）。
+      if(!jepa.loading){
+        let top=null;
+        for(const d of dets){
+          const trk=d.trackId!==undefined? tracker.tracks.get(d.trackId):null;
+          if(!trk||!trk.confirmed) continue;
+          if(trk.lastJepaAt!==undefined && now-trk.lastJepaAt<CFG.reconfirmInterval) continue;
+          if(top===null || d.conf>top.conf) top=d;
+        }
+        if(top){
+          try{
+            const bx=top.bbox[0]*vw, by=top.bbox[1]*vh, bw=top.bbox[2]*vw, bh=top.bbox[3]*vh;
+            const feat=await jepa.features(srcCanvas, bx,by,bw,bh);
+            const verdict=policy.decide(jepa.score(feat));
+            pendingJepa=verdict;
+            const trk2=tracker.tracks.get(top.trackId);
+            if(trk2){ trk2.lastJepaAt=now; trk2.verdict=verdict; }  // 裁决挂轨迹（告警语义用）
+            if(verdict.action==='alert'||verdict.action==='clear'){
+              // 边缘自训练：logreg 头与原型距离双信号一致才更新，防止错误自我强化
+              if(shouldSelfTrain(jepa.probe,feat,pack.selfTrain)
+                 && (!trk2 || now-(trk2.autoLearnedAt||0)>pack.selfTrain.cooldownMs)){
+                const n=jepa.learn(feat,
+                  verdict.label===pack.discriminators.main.classes[1]?1:0, pack.selfTrain.lr);
+                if(trk2) trk2.autoLearnedAt=now;
+                tele._log({ty:'sys',msg:'JEPA 自训练 '+verdict.label+' conf='+
+                  verdict.conf.toFixed(2)+' 样本='+n});
+              }
+              tele._log({ty:'det',cls:verdict.label,conf:Math.round(verdict.conf*1000)/1000,
+                act:verdict.action,dist:top.dist,zoom});
+            }else if(verdict.action==='escalate'){
+              // 灰区弃权：宁可待仲裁不可虚报；队列带预算硬上限+轨迹去重，
+              // vus 桥未接入时事件落遥测，导出后供离线消费/复训。
+              // 非布防时段不入队（预算留给布防时段），仅记录。
+              const r=armed? arb.request(top.trackId,now) : 'disarmed';
+              tele._log({ty:'sys',msg:'判别灰区 conf='+verdict.conf.toFixed(2)+
+                ' → 待仲裁['+r+'] #'+top.trackId});
+            }
+          }catch(e){ tele.err('JEPA 判别失败:'+e.message); }
+        }
+      }
+      // 确认事件：每个目标首次确认立即出事件，此后按 reconfirmInterval 重复。
+      // 告警语义由裁决决定：判别未出前检测器权威（防漏报）；alert 告警、
+      // escalate 挂牌待仲裁不虚报、clear/suppress 判明非目标静默。
+      for(const t of tracker.tracks.values()){
+        if(t.confirmed && (t.lastConfirmAt===undefined ||
+                           now-t.lastConfirmAt>=CFG.reconfirmInterval)){
+          const v=t.verdict;
+          const act=v?v.action:'alert';
+          tele.conf({id:t.id,dist:estimateDist(t.box[3]*vh,vh,t.cls),act,armed});
+          if(act==='alert' && armed)
+            toast('⚠ 已确认'+(v?v.label+' '+(v.conf*100).toFixed(0)+'%':'目标')+' #'+t.id);
+          else if(act==='escalate' && armed)
+            toast('⏳ 疑似目标 #'+t.id+' 待仲裁');
+          else if(act==='alert' && !t.disarmLogged){
+            // 非布防时段：告警降级为记录（记录不删，语义只降不丢）
+            tele._log({ty:'sys',msg:'非布防时段，告警降级为记录 #'+t.id});
+            t.disarmLogged=true;
+          }
+          t.lastConfirmAt=now;
+        }
+      }
+      const t5=performance.now();
+      if(dets.length) tele.det(dets[0]);
+      tele.perf(frameCount,video.currentTime,frameCount?1000/(performance.now()-t1):0,
+        t1-t0,t3-t2,t5-t4,t5-t0,zoom,dets.length,tracker.getConfirmed().length,motionGate.lastRatio);
+    }finally{
+      detecting=false;
+    }
+  }
+  frameCount++;
+
+  // 渲染叠加
+  drawOverlay(vw,vh,t0);
+}
+
+function drawOverlay(vw,vh,t0){
+  const r=overlay.getBoundingClientRect();
+  const scale=Math.min(overlay.width/vw,overlay.height/vh);
+  const ow=vw*scale, oh=vh*scale;
+  const ox=(overlay.width-ow)/2, oy=(overlay.height-oh)/2;
+  octx.clearRect(0,0,overlay.width,overlay.height);
+
+  // 变焦裁剪视口
+  const zw=vw/zoom, zh=vh/zoom;
+  let cx=vw/2, cy=vh/2;
+  if(modeFollow){
+    // 主目标选择：确认目标优先，同级取画框最大者（通常最近/最显著）
+    let focus=null;
+    for(const t of tracker.tracks.values()){
+      if(!focus){ focus=t; continue; }
+      const fc=focus.confirmed?1:0, tc=t.confirmed?1:0;
+      if(tc>fc || (tc===fc && t.box[2]*t.box[3]>focus.box[2]*focus.box[3])) focus=t;
+    }
+    if(focus) cx=focus.cx*vw,cy=focus.cy*vh;   // 目标跟随
+  }
+  const sx=Math.max(0,Math.min(vw-zw,cx-zw/2));
+  const sy=Math.max(0,Math.min(vh-zh,cy-zh/2));
+
+  // 绘制变焦后画面(以中心裁剪实现数字变焦)
+  octx.save();
+  octx.beginPath(); octx.rect(0,0,overlay.width,overlay.height); octx.clip();
+  octx.drawImage(srcCanvas,sx,sy,zw,zh, ox,oy, ow,oh);
+  octx.restore();
+
+  // 检测框(映射到视口坐标)，直接绘制到 overlay canvas（canvas 无法承载子元素）
+  octx.lineWidth=2;
+  for(const t of tracker.tracks.values()){
+    const bx=t.box[0]*ow, by=t.box[1]*oh, bw=t.box[2]*ow, bh=t.box[3]*oh;
+    // 视口偏移(变焦中心)
+    const vx=bx - (sx/vw)*ow, vy=by - (sy/vh)*oh;
+    if(vx+ox<0||vy+oy<0||vx>ow||vy>oh) continue;
+    const px=ox+vx, py=oy+vy;
+    const d=estimateDist(t.box[3]*vh,vh,t.cls);
+    octx.strokeStyle=t.confirmed?'#ff5d5d':'#35e0a1';
+    octx.strokeRect(px,py,bw,bh);
+    // 标签：跟随裁决类别（无裁决时用检测类别）
+    const label=`${(t.verdict?t.verdict.label:t.cls).toUpperCase()} #${t.id} ${d?d.toFixed(1)+'m':''} conf${t.dup}`;
+    octx.font='9px sans-serif';
+    const tw=octx.measureText(label).width;
+    const ty=(py-16)<0?(py+2):(py-16);
+    octx.fillStyle=t.confirmed?'#ff5d5d':'#35e0a1';
+    octx.fillRect(px,ty,tw+8,14);
+    octx.fillStyle=t.confirmed?'#ffffff':'#04120c';
+    octx.fillText(label,px+4,ty+10);
+  }
+
+  // 遥测 HUD
+  teleOut.innerHTML=`<div>帧率 <b>${(1000/(performance.now()-t0+1)).toFixed(1)}</b></div>
+    <div>变焦 <b>${zoom.toFixed(1)}×</b></div>
+    <div>目标 <b>${[...tracker.tracks.values()].length}</b> <span style="color:var(--dim)">确认</span> <b style="color:var(--warn)">${tracker.getConfirmed().length}</b></div>
+    <div style="color:var(--dim)">JEPA<sup>${jepa.loading?'load…':(jepa.loaded?'ON':'off')}</sup>
+      <span style="color:${!jepa.loaded||!pendingJepa?'var(--dim)':({alert:'var(--warn)',escalate:'var(--accent2)',clear:'var(--accent)',suppress:'var(--dim)'})[pendingJepa.action]}">
+        ${pendingJepa?({alert:'⚠',escalate:'⏳',clear:'✓',suppress:'·'})[pendingJepa.action]+pendingJepa.label+' '+(pendingJepa.conf*100).toFixed(0)+'%':'—'}
+      </span></div>`;
+}
+</script>
+</body>
+</html>

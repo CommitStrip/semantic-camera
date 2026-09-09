@@ -1,0 +1,24 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Syntax check
+        run: |
+          node --check web/core.js
+          node --check web/whep-client.js
+      - name: Unit tests
+        run: node --test tests/core.test.mjs
+      - name: Packaged copies consistency
+        run: bash scripts/sync-web.sh --check

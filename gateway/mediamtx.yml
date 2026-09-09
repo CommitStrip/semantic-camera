@@ -1,0 +1,52 @@
+# ============================================================
+# 反无人机监控 · 海康威视接入网关 (MediaMTX)
+# ------------------------------------------------------------
+# 作用：把海康摄像头的 RTSP 流拉进来，再以两种浏览器可播放的
+#       协议对外提供：
+#         WebRTC (WHEP)  -> 低延迟 (<1s)，优先使用
+#         HLS            -> 高兼容回退，延迟 ~2-5s
+# 浏览器/鸿蒙 ArkWeb 无法直接播放 RTSP，必须经过本网关。
+#
+# 端口约定：
+#   WebRTC/WHEP : 8889   (App 里填 http://<网关IP>:8889)
+#   HLS         : 8888   (App 里 HLS 回退 http://<网关IP>:8888)
+#   RTSP 对外   : 8554
+#   RTMP 对外   : 1935
+# ============================================================
+
+# 对外监听
+rtsp: true
+rtmp: true
+hls: true
+webrtc: true
+
+# ---- 日志 ----
+logLevel: info
+
+# ============================================================
+# 海康摄像头 RTSP 源（按需填写）
+# ------------------------------------------------------------
+# 海康地址格式：
+#   主码流  rtsp://<用户>:<密码>@<相机IP>:554/Streaming/Channels/101
+#   子码流  rtsp://<用户>:<密码>@<相机IP>:554/Streaming/Channels/102
+#   ISAPI  rtsp://<用户>:<密码>@<相机IP>:554/ISAPI/Streaming/channels/101
+#
+# 每个 path 对应一路流，App 端"流路径"填 path 名（如 cam1 / cam2）。
+# 主码流通常为 1080p H.264，建议用主码流检测以提高精度。
+# ============================================================
+paths:
+  # 示例：第 1 台海康相机（主码流）
+  cam1:
+    source: rtsp://admin:your_password@192.168.1.64:554/Streaming/Channels/101
+    # 若相机为 H.265 且目标浏览器不支持 HEVC，可开转码（需系统安装 ffmpeg）：
+    # runOnDemand: ffmpeg -rtsp_transport tcp -i rtsp://admin:your_password@192.168.1.64:554/Streaming/Channels/101 -c:v libx264 -preset veryfast -tune zerolatency -g 30 -an -f rtsp rtsp://localhost:$MTX_RTSP_PORT/$MTX_PATH
+    # runOnDemandRestart: yes
+
+  # 示例：第 2 台海康相机（子码流，带宽小、延迟略低）
+  # cam2:
+  #   source: rtsp://admin:your_password@192.168.1.65:554/Streaming/Channels/102
+
+  # 本地测试流（无相机时用下面命令生成，验证链路用）：
+  #   ffmpeg -re -stream_loop -1 -i /path/to/test.mp4 -c copy -f rtsp rtsp://localhost:8554/test
+  test:
+    source: publisher
