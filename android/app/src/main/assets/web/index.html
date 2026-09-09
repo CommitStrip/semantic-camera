@@ -9,6 +9,7 @@
 <script src="./whep-client.js"></script>
 <script src="./hls.min.js"></script>
 <script src="./core.js"></script>
+<script src="./mode-packs.js"></script>
 <style>
 :root{
   --bg:#070b12; --panel:#0d1420; --panel2:#111a29; --line:#1e2b3f;
@@ -193,7 +194,7 @@ class Telemetry {
   constructor(){ this.events=[]; this.recording=false; this.t0=0; this.periodic=[];
     this.db=null; this._initDB(); }
   async _initDB(){
-    try{ const req=indexedDB.open('droneMonitor',1);
+    try{ const req=indexedDB.open('semanticCamera',1);
       req.onupgradeneeded=e=>{ const d=e.target.result;
         if(!d.objectStoreNames.contains('sessions'))
           d.createObjectStore('sessions',{keyPath:'id',autoIncrement:true}); };
@@ -250,10 +251,10 @@ class Telemetry {
   exportCSV(){
     const rows=[['t_s','type','detail']];
     this.events.forEach(e=>{ rows.push([(e.t/1000).toFixed(2),e.ty,JSON.stringify(e)]); });
-    this._download('drone_telemetry.csv','\ufeff'+rows.map(r=>r.join(',')).join('\n'));
+    this._download('sc_telemetry.csv','\ufeff'+rows.map(r=>r.join(',')).join('\n'));
   }
   exportJSON(){
-    this._saveSession().then(s=>{ this._download('drone_session_'+s.id+'.json',JSON.stringify(s,null,2)); });
+    this._saveSession().then(s=>{ this._download('sc_session_'+s.id+'.json',JSON.stringify(s,null,2)); });
   }
   _download(name,content){
     const a=document.createElement('a');
@@ -265,13 +266,15 @@ const tele=new Telemetry();
 
 // 几何/跟踪/门控逻辑见 web/core.js
 
-// ---------- 真实无人机检测器（onnxruntime-web 加载 yolov8s-drone.onnx）----------
-// 复用 Python 管线验证过的真实模型：letterbox 预处理 + YOLOv8 NMS 后处理。
-class YoloDroneDetector{
-  constructor(modelPath){
-    this.ort=null; this.session=null; this.imgsz=640; this.conf=0.25;
-    this.modelPath=modelPath||'./yolov8s-drone.onnx';
-    this.names={0:'drone'}; this.loaded=false; this.loading=false;
+// ---------- ONNX 检测器（模型/类别/阈值全部由模式包给出）----------
+// letterbox 预处理 + 检测头 NMS 后处理；核心不感知具体场所类别。
+class OnnxDetector{
+  constructor(pack){
+    const det=pack.detector;
+    this.ort=null; this.session=null; this.imgsz=det.inputSize||640; this.conf=det.confThresh;
+    this.modelPath=det.model;
+    this.names=det.classes;   // 索引→类名（来自模式包，核心不含领域词）
+    this.loaded=false; this.loading=false;
     this._off=document.createElement('canvas');   // letterbox 画布复用（每帧新建会拖垮 GC）
     this._offCtx=this._off.getContext('2d',{willReadFrequently:true}); }
   async load(){
@@ -387,7 +390,7 @@ class YoloDroneDetector{
       const X1=Math.max(0,Math.min(srcW,x1)), Y1=Math.max(0,Math.min(srcH,y1));
       const X2=Math.max(0,Math.min(srcW,x2)), Y2=Math.max(0,Math.min(srcH,y2));
       if(X2<=X1||Y2<=Y1) continue;
-      dets.push({cls:this.names[bestCls]||'drone',conf:bestSc,x1:X1,y1:Y1,x2:X2,y2:Y2});
+      dets.push({cls:this.names[bestCls]||this.names[0],conf:bestSc,x1:X1,y1:Y1,x2:X2,y2:Y2});
     }
     const picked=this._nms(dets,0.45);
     return picked.map(d=>({cls:d.cls,conf:Math.round(d.conf*1000)/1000,
@@ -396,7 +399,7 @@ class YoloDroneDetector{
 }
 
 // ---------- JEPA 特征判别 + 全自动在线进化 ----------
-// 设计：YOLO 负责定位（沿用现有 YoloDroneDetector），DINOv2(JEPA 风格) 负责判别。
+// 设计：YOLO 负责定位（沿用 OnnxDetector），DINOv2(JEPA 风格) 负责判别。
 // onnxruntime-web 只支持推理，无法微调 backbone；故"进化"落地为冻结特征之上的
 // 探针头更新，且标签来源全自动——边缘自训练（logreg 头与原型距离双信号一致）+
 // 慢脑仲裁回灌（M2，经 core.js 的 probeLearn 同一路径）。设计红线：判别流水线
@@ -405,14 +408,15 @@ class JepaDiscriminator{
   constructor(pack){
     this.ort=null; this.session=null; this.imgsz=224;
     this.loaded=false; this.loading=false;
-    this.task=pack.discriminators.main;
+    this.task=pack.discriminator;
+    this.storageKey=probeStorageKey(pack.id);   // 学习状态按模式包隔离
     this.probe=null;  // 归一化形态 {logreg_w,logreg_b,protos:[负类质心,正类质心],ns:[负类数,正类数]}
     this.rid=0;       // 自动学习更新计数
     this._cropCv=document.createElement('canvas');  // crop 画布复用
     this._cropCtx=this._cropCv.getContext('2d',{willReadFrequently:true});
   }
   async load(){
-    // 与 YoloDroneDetector 同款可等待加载（并发调用共享同一 promise）
+    // 与 OnnxDetector 同款可等待加载（并发调用共享同一 promise）
     if(this.loaded) return true;
     if(!this._loadPromise){
       this.loading=true;
@@ -442,11 +446,11 @@ class JepaDiscriminator{
       throw e;
     }
   }
-  // 加载/持久化探针头（兼容旧版 proto_bird/proto_drone 字段命名）
+  // 加载/持久化探针头（键按模式包隔离；兼容旧版类别命名质心字段）
   async loadProbe(){
     const classes=this.task.classes;
     try{
-      const saved=localStorage.getItem('jepa_probe_v2');
+      const saved=localStorage.getItem(this.storageKey);
       if(saved){ this.probe=normalizeProbe(JSON.parse(saved),classes); return; }
       const legacy=localStorage.getItem('jepa_probe');
       if(legacy){ this.probe=normalizeProbe(JSON.parse(legacy),classes); this.saveProbe(); return; }
@@ -455,7 +459,7 @@ class JepaDiscriminator{
     this.probe=normalizeProbe(await r.json(),classes);
   }
   saveProbe(){
-    try{ localStorage.setItem('jepa_probe_v2',JSON.stringify(this.probe)); }catch(e){}
+    try{ localStorage.setItem(this.storageKey,JSON.stringify(this.probe)); }catch(e){}
   }
   // 从图像 canvas 中裁剪出 bbox 区域并缩放到 224
   _crop(canvas, bx, by, bw, bh){
@@ -501,7 +505,7 @@ class JepaDiscriminator{
     return this.probe.ns[0]+this.probe.ns[1];
   }
   async resetProbe(){
-    try{ localStorage.removeItem('jepa_probe_v2'); localStorage.removeItem('jepa_probe'); this.probe=null; }catch(e){}
+    try{ localStorage.removeItem(this.storageKey); localStorage.removeItem('jepa_probe'); this.probe=null; }catch(e){}
     return this.loadProbe();
   }
 }
@@ -513,8 +517,8 @@ const octx=overlay.getContext('2d');
 const stage=document.getElementById('stage');
 const teleOut=document.getElementById('tele');
 
-// 场所模式包：?mode= 参数选择，缺省净空防黑飞（详见 docs/semantic-camera-design.md）
-const pack=getModePack(new URLSearchParams(location.search).get('mode'));
+// 场所模式包：?mode= 参数选择，缺省首包（注册表在 mode-packs.js——领域数据唯一居所）
+const pack=window.SEMANTIC_GET_MODE_PACK(new URLSearchParams(location.search).get('mode'));
 // 配置治理 fail-closed：模式包不合法则拒绝布防（startLoop 拒绝启动），不带病上线
 const packErrs=validatePack(pack);
 let policy=new JepaPolicy(pack);          // 四态全自动裁决（无人工判定环节）
@@ -525,15 +529,17 @@ let sctx=srcCanvas.getContext('2d');
 let zoom=1, zoomTarget=1, modeFollow=true;
 let tracker=new Tracker();
 let motionGate=new MotionGate();
-let detector=new YoloDroneDetector(pack.detector);
-let jepa=new JepaDiscriminator(pack);   // JEPA 特征判别 + 全自动在线进化
+// 检测器可插拔：mock（确定性脚本/无模型演示）或 onnx（模式包指定模型）
+let detector=pack.detector.engine==='mock' ? new MockDetector(pack) : new OnnxDetector(pack);
+let jepa=pack.discriminator ? new JepaDiscriminator(pack) : null;   // null=检测器权威模式
 let lastDet=0;
 let detecting=false;                // 慢系统在飞标志：wasm 推理期间 raf 重入不重复派发
 let frameCount=0, flip=false;
-let pendingJepa=null;      // 最近一次 JEPA 裁决(供 HUD 显示)
+let pendingJepa=null;      // 最近一次裁决(供 HUD 显示)
 document.getElementById('modeName').textContent=packErrs.length
   ? '⚠ 模式包非法：'+packErrs[0]+'（拒绝布防）'
-  : pack.name+' · JEPA 全自动判别'+(pack.schedule?' · 定时布防':'');
+  : pack.name+' · '+(pack.status==='design'?'设计态(mock 演示)':'JEPA 全自动判别')
+    +(pack.schedule?' · 定时布防':'');
 
 // 变焦状态(平滑)
 let smZoom=1;
@@ -705,10 +711,11 @@ document.getElementById('btnExpCSV').onclick=()=>tele.exportCSV();
 document.getElementById('btnExpJSON').onclick=()=>tele.exportJSON();
 document.getElementById('btnClear').onclick=()=>{ tele.events=[]; document.getElementById('log').innerHTML=''; document.getElementById('evCount').textContent='0 条'; };
 
-// ---------- JEPA 运维：重置学习（恢复初始化权重，非判定环节） ----------
+// ---------- 判别头运维：重置学习（恢复初始化权重，非判定环节） ----------
 document.getElementById('btnProbeReset').onclick=async()=>{
+  if(!jepa){ toast('本模式无判别头（检测器权威）'); return; }
   await jepa.resetProbe(); pendingJepa=null;
-  toast('JEPA 探针已重置为初始化权重');
+  toast('判别头已重置为初始化权重');
 };
 
 function setStatus(t,rec){ document.getElementById('statusTxt').textContent=t;
@@ -788,17 +795,17 @@ async function loop(){
         const b=d.bbox;
         const bx=b[0]/vw, by=b[1]/vh, bw=b[2]/vw, bh=b[3]/vh;
         return {cls:d.cls,conf:d.conf,bbox:[bx,by,bw,bh],cx:bx+bw/2,cy:by+bh/2,
-          dist:estimateDist(b[3],vh,d.cls),zoom};
+          dist:estimateDist(b[3],vh,sizeForClass(pack,d.cls)),zoom};
       });
       // 跟踪
       const t4=performance.now();
       tracker.update(dets,now);
       lastDet=now;
-      // JEPA 自动判别：只对已确认目标提特征并节流（DINOv2 是重活，且懒加载——
-      // 首次确认时才拉起模型，features() 内部 await load）；此后每 reconfirmInterval 重复。
+      // JEPA 自动判别（有判别头的模式包）：只对已确认目标提特征并节流（懒加载——
+      // 首次确认时才拉起模型）；此后每 reconfirmInterval 重复。
       // 四态全自动裁决：alert 告警 / escalate 灰区弃权入仲裁队列 / clear·suppress 不告警；
       // 高置信且双信号一致时自动自训练探针（标签来源为机器一致性，无人工环节）。
-      if(!jepa.loading){
+      if(jepa && !jepa.loading){
         let top=null;
         for(const d of dets){
           const trk=d.trackId!==undefined? tracker.tracks.get(d.trackId):null;
@@ -810,7 +817,7 @@ async function loop(){
           try{
             const bx=top.bbox[0]*vw, by=top.bbox[1]*vh, bw=top.bbox[2]*vw, bh=top.bbox[3]*vh;
             const feat=await jepa.features(srcCanvas, bx,by,bw,bh);
-            const verdict=policy.decide(jepa.score(feat));
+            const verdict=policy.decideDiscriminated(jepa.score(feat));
             pendingJepa=verdict;
             const trk2=tracker.tracks.get(top.trackId);
             if(trk2){ trk2.lastJepaAt=now; trk2.verdict=verdict; }  // 裁决挂轨迹（告警语义用）
@@ -819,7 +826,7 @@ async function loop(){
               if(shouldSelfTrain(jepa.probe,feat,pack.selfTrain)
                  && (!trk2 || now-(trk2.autoLearnedAt||0)>pack.selfTrain.cooldownMs)){
                 const n=jepa.learn(feat,
-                  verdict.label===pack.discriminators.main.classes[1]?1:0, pack.selfTrain.lr);
+                  verdict.label===pack.discriminator.classes[1]?1:0, pack.selfTrain.lr);
                 if(trk2) trk2.autoLearnedAt=now;
                 tele._log({ty:'sys',msg:'JEPA 自训练 '+verdict.label+' conf='+
                   verdict.conf.toFixed(2)+' 样本='+n});
@@ -838,18 +845,52 @@ async function loop(){
         }
       }
       // 确认事件：每个目标首次确认立即出事件，此后按 reconfirmInterval 重复。
-      // 告警语义由裁决决定：判别未出前检测器权威（防漏报）；alert 告警、
-      // escalate 挂牌待仲裁不虚报、clear/suppress 判明非目标静默。
+      // 告警语义由裁决决定：有判别头用其裁决；判别未出/无判别头走检测器权威
+      // （防漏报）；escalate 挂牌待仲裁不虚报、clear/suppress 判明非目标静默。
       for(const t of tracker.tracks.values()){
         if(t.confirmed && (t.lastConfirmAt===undefined ||
                            now-t.lastConfirmAt>=CFG.reconfirmInterval)){
           const v=t.verdict;
-          const act=v?v.action:'alert';
-          tele.conf({id:t.id,dist:estimateDist(t.box[3]*vh,vh,t.cls),act,armed});
+          const dec=v || policy.decideDetector(t.cls, t.conf===undefined?0:t.conf);
+          const act=dec.action;
+          const dist=estimateDist(t.box[3]*vh,vh,sizeForClass(pack,t.cls));
+          tele.conf({id:t.id,dist,act,armed});
+          // 版本化证据事件（sc.evidence/v1）：检测置信与判别置信分立，
+          // 告警级事件附裁剪帧——供机器消费、审计与回放
+          let cropJpeg=null;
+          if(act==='alert' && armed){
+            try{
+              const bx=t.box[0]*vw, by=t.box[1]*vh, bw=t.box[2]*vw, bh=t.box[3]*vh;
+              const pad=0.15;
+              const cw=document.createElement('canvas'); cw.width=224; cw.height=224;
+              cw.getContext('2d').drawImage(srcCanvas,
+                Math.max(0,bx-bw*pad), Math.max(0,by-bh*pad),
+                Math.min(vw,bw*(1+2*pad)), Math.min(vh,bh*(1+2*pad)), 0,0,224,224);
+              cropJpeg=cw.toDataURL('image/jpeg',0.6);
+            }catch(e){}
+          }
+          tele._log({ty:'ev',ev:buildEvidenceEvent({
+            kind: act==='alert'?'alert':(act==='escalate'?'arbitration':'record'),
+            timeIso:new Date().toISOString(),
+            mode:pack.id, modeVersion:pack.version,
+            trackId:t.id, cls:t.cls, clsConf:t.conf===undefined?null:t.conf,
+            bbox:t.box, dist,
+            belief: v ? {label:v.label, conf:v.conf, probeVersion:jepa?jepa.rid:null} : null,
+            decision:{action:dec.action, via:dec.via, armed,
+              reason: v ? 'discriminator-verdict' : 'detector-authority'},
+            models:{ detector: pack.detector.engine==='onnx'?pack.detector.model:'mock',
+              discriminator: pack.discriminator?pack.discriminator.probe:null,
+              probeState: probeStorageKey(pack.id) },
+            evidence:{videoTs:video.currentTime, frame:frameCount, cropJpeg},
+          })});
           if(act==='alert' && armed)
             toast('⚠ 已确认'+(v?v.label+' '+(v.conf*100).toFixed(0)+'%':'目标')+' #'+t.id);
-          else if(act==='escalate' && armed)
-            toast('⏳ 疑似目标 #'+t.id+' 待仲裁');
+          else if(act==='escalate' && armed){
+            // 灰区弃权：宁可待仲裁不可虚报；预算硬上限+轨迹去重（无判别头模式同样适用）
+            const r=arb.request(t.id,now);
+            toast('⏳ 疑似目标 #'+t.id+' 待仲裁['+r+']');
+            tele._log({ty:'sys',msg:'判别灰区 conf='+(dec.conf||0).toFixed(2)+' → 待仲裁['+r+'] #'+t.id});
+          }
           else if(act==='alert' && !t.disarmLogged){
             // 非布防时段：告警降级为记录（记录不删，语义只降不丢）
             tele._log({ty:'sys',msg:'非布防时段，告警降级为记录 #'+t.id});
@@ -909,7 +950,7 @@ function drawOverlay(vw,vh,t0){
     const vx=bx - (sx/vw)*ow, vy=by - (sy/vh)*oh;
     if(vx+ox<0||vy+oy<0||vx>ow||vy>oh) continue;
     const px=ox+vx, py=oy+vy;
-    const d=estimateDist(t.box[3]*vh,vh,t.cls);
+    const d=estimateDist(t.box[3]*vh,vh,sizeForClass(pack,t.cls));
     octx.strokeStyle=t.confirmed?'#ff5d5d':'#35e0a1';
     octx.strokeRect(px,py,bw,bh);
     // 标签：跟随裁决类别（无裁决时用检测类别）
@@ -927,9 +968,9 @@ function drawOverlay(vw,vh,t0){
   teleOut.innerHTML=`<div>帧率 <b>${(1000/(performance.now()-t0+1)).toFixed(1)}</b></div>
     <div>变焦 <b>${zoom.toFixed(1)}×</b></div>
     <div>目标 <b>${[...tracker.tracks.values()].length}</b> <span style="color:var(--dim)">确认</span> <b style="color:var(--warn)">${tracker.getConfirmed().length}</b></div>
-    <div style="color:var(--dim)">JEPA<sup>${jepa.loading?'load…':(jepa.loaded?'ON':'off')}</sup>
-      <span style="color:${!jepa.loaded||!pendingJepa?'var(--dim)':({alert:'var(--warn)',escalate:'var(--accent2)',clear:'var(--accent)',suppress:'var(--dim)'})[pendingJepa.action]}">
-        ${pendingJepa?({alert:'⚠',escalate:'⏳',clear:'✓',suppress:'·'})[pendingJepa.action]+pendingJepa.label+' '+(pendingJepa.conf*100).toFixed(0)+'%':'—'}
+    <div style="color:var(--dim)">判别<sup>${!jepa?'—':(jepa.loading?'load…':(jepa.loaded?'ON':'off'))}</sup>
+      <span style="color:${!jepa||!jepa.loaded||!pendingJepa?'var(--dim)':({alert:'var(--warn)',escalate:'var(--accent2)',clear:'var(--accent)',suppress:'var(--dim)'})[pendingJepa.action]}">
+        ${pendingJepa?({alert:'⚠',escalate:'⏳',clear:'✓',suppress:'·'})[pendingJepa.action]+pendingJepa.label+' '+(pendingJepa.conf*100).toFixed(0)+'%':(!jepa?'检测器权威':'—')}
       </span></div>`;
 }
 </script>

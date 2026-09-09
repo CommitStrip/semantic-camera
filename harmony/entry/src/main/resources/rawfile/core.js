@@ -1,14 +1,16 @@
 /* ============================================================
-   core.js - 反无人机监控 · 纯逻辑核心（零 DOM 依赖，可单测）
+   core.js - 语义摄像头 · 纯逻辑核心（零 DOM 依赖，可单测）
    ------------------------------------------------------------
-   从 index.html 内联脚本抽取：配置 / 距离估算 / IoU / 目标跟踪 /
-   帧差运动门控。浏览器端由 index.html 以 <script src> 先行加载
-   （经典 script 顶层 const 跨 script 可见）；Node 端经文件尾部的
-   module.exports 直接 require，供 node:test 单元测试使用。
+   本文件是领域无关的通用运行时：配置 / 几何 / 跟踪 / 门控 /
+   模式包校验 / 布防时间表 / 四态裁决 / 仲裁队列 / 探针学习数学 /
+   mock 检测器 / 证据事件。领域词（类别、模型、阈值）只允许出现
+   在模式包数据（web/mode-packs.js）中，并有源码洁净度单测把守。
+   浏览器端由 index.html 以 <script src> 先行加载；Node 端经
+   module.exports 供 node:test 单元测试使用。
    ============================================================ */
 "use strict";
 
-// ---------- 配置(与 Python 管线对齐) ----------
+// ---------- 运行时配置（领域无关） ----------
 const CFG = {
   motionThresh: 25,        // 帧差阈值
   minAreaRatio: 0.003,     // 运动面积门槛(占门控网格)：~15px@96×54，抑制传感器噪声/AE 抖动
@@ -23,21 +25,23 @@ const CFG = {
   iouThresh: 0.1,
   focalMeters: 4.4e-3,     // 手机等效焦距(米)
   sensorHM: 3.6e-3,        // 传感器高度(米)
-  droneSizeM: 0.35,        // 兜底目标实际尺寸(米, Mavic级)
-  // 距离估算按类别取目标实际尺寸（粗估口径：尺寸假设直接决定绝对距离）
-  sizeByClass: { drone: 0.35, bird: 0.20 },
 };
 
-// ---------- 几何：距离估算(针孔模型) ----------
-function estimateDist(bboxHpx, frameHpx, cls){
+// ---------- 几何：距离估算(针孔模型，目标实际尺寸由模式包给出) ----------
+function estimateDist(bboxHpx, frameHpx, sizeM){
   // D = (f * H_obj * frameH) / (h_px * sensorH)
   // 注意：数字变焦只是 canvas 中心裁剪，检测始终在全帧上进行，
   // 目标在全帧中的像素高度不随 zoom 变化——故这里不能除以 zoom
-  const sizeM = (cls && CFG.sizeByClass[cls]) || CFG.droneSizeM;
   const normalized = bboxHpx / frameHpx;          // 占画面高度比例
   const apparent = normalized * CFG.sensorHM;      // 像平面高度(米)
-  if(apparent<=0) return null;
+  if(apparent<=0 || !(sizeM>0)) return null;
   return (CFG.focalMeters * sizeM) / apparent;
+}
+// 模式包查尺寸：按类取 sizeByClass，缺类回退 defaultSizeM
+function sizeForClass(pack, cls){
+  const d = pack && pack.detector;
+  if(!d) return 0;
+  return (d.sizeByClass && d.sizeByClass[cls]) || d.defaultSizeM || 0;
 }
 
 // ---------- IoU（框格式统一为 [x,y,w,h] 归一化数组） ----------
@@ -78,7 +82,7 @@ class Tracker{
           const vx=(d.cx-t.cx)/dt, vy=(d.cy-t.cy)/dt;
           t.vx=(t.vx||0)*0.6+vx*0.4; t.vy=(t.vy||0)*0.6+vy*0.4;  // 速度一阶平滑
         }
-        t.box=d.bbox.slice(); t.cx=d.cx; t.cy=d.cy; t.cls=d.cls;
+        t.box=d.bbox.slice(); t.cx=d.cx; t.cy=d.cy; t.cls=d.cls; t.conf=d.conf;
         t.last=now; t.count++;
         active.add(best);
         if(t.count>=CFG.confirmCount) t.confirmed=true;
@@ -86,7 +90,7 @@ class Tracker{
       }else{
         const id=this.nextId++;
         this.tracks.set(id,{id,box:d.bbox.slice(),cx:d.cx,cy:d.cy,vx:0,vy:0,
-          cls:d.cls,last:now,count:1,confirmed:false});
+          cls:d.cls,conf:d.conf,last:now,count:1,confirmed:false});
         active.add(id); d.trackId=id; d.dup=1;
       }
     }
@@ -126,33 +130,6 @@ class MotionGate{
   }
 }
 
-// ---------- 场所模式包（语义摄像头核心抽象，详见 docs/semantic-camera-design.md） ----------
-// 模式包 = 纯数据 + 校验器：换场所不改流水线代码，只换检测模型/判别头/规则。
-// 首包 airfield（净空防黑飞）即前身反无人机能力的模式化收编。
-// schema：id/name/detector/discriminators.main{classes,probe,alertConf}/alertCls/
-//         schedule[{from,to}](布防时间表,可跨零点,缺省7×24)/arb/selfTrain
-const MODE_PACKS = {
-  airfield: {
-    id: 'airfield',
-    name: '净空防黑飞',
-    detector: './yolov8s-drone.onnx',
-    discriminators: {
-      main: {
-        classes: ['bird', 'drone'],   // [负类, 正类]；探针 logreg 输出 P(正类)
-        probe: './jepa_probe_init.json',
-        alertConf: 0.80,              // 胜出侧置信 ≥ 此值才允许机器下结论
-      },
-    },
-    alertCls: 'drone',
-    arb: { budgetPerHour: 20, ttlMs: 15000 },  // 慢脑仲裁预算 + 按轨迹去重窗
-    selfTrain: { minConf: 0.90, marginRatio: 0.80, cooldownMs: 60000, lr: 0.05 },
-  },
-};
-
-function getModePack(name) {
-  return MODE_PACKS[name || 'airfield'] || MODE_PACKS.airfield;
-}
-
 // ---------- 模式包校验（fail-closed：坏配置拒绝布防，不带病上线） ----------
 // 返回错误串数组；空数组 = 通过。与安全告警的 fail-open 相对：
 // 配置与模型装载必须 fail-closed（设计文档 §9 两条红线不混用）。
@@ -160,26 +137,54 @@ function validatePack(pack) {
   if (!pack || typeof pack !== 'object') return ['模式包缺失'];
   const errs = [];
   if (!pack.id || !pack.name) errs.push('缺少 id/name');
-  if (!pack.detector || typeof pack.detector !== 'string') errs.push('缺少 detector 模型路径');
-  const task = pack.discriminators && pack.discriminators.main;
-  if (!task) {
-    errs.push('缺少 discriminators.main');
-  } else {
-    if (!Array.isArray(task.classes) || task.classes.length !== 2 ||
-        task.classes.some(c => typeof c !== 'string' || !c)) errs.push('判别类别必须为二类');
-    if (!task.probe || typeof task.probe !== 'string') errs.push('缺少 probe 探针路径');
-    if (typeof task.alertConf !== 'number' || !(task.alertConf > 0.5) || !(task.alertConf < 1))
-      errs.push('alertConf 必须在 (0.5,1)');
-    if (pack.alertCls && Array.isArray(task.classes) && !task.classes.includes(pack.alertCls))
-      errs.push('alertCls 不在判别类别中');
+  if (typeof pack.version !== 'number' || pack.version < 1) errs.push('缺少 version');
+  const det = pack.detector;
+  if (!det || typeof det !== 'object') errs.push('缺少 detector');
+  else {
+    if (det.engine !== 'onnx' && det.engine !== 'mock') errs.push('detector.engine 必须为 onnx|mock');
+    if (det.engine === 'onnx' && (!det.model || typeof det.model !== 'string'))
+      errs.push('onnx 检测器必须给出 model 路径');
+    if (!Array.isArray(det.classes) || det.classes.length === 0 ||
+        det.classes.some(c => typeof c !== 'string' || !c)) errs.push('detector.classes 非法');
+    if (typeof det.confThresh !== 'number' || !(det.confThresh > 0) || !(det.confThresh < 1))
+      errs.push('detector.confThresh 必须在 (0,1)');
+    if (!(det.defaultSizeM > 0)) errs.push('detector.defaultSizeM 必须为正数');
+    if (det.mockScript !== undefined && !Array.isArray(det.mockScript))
+      errs.push('mockScript 必须为时间线数组');
+  }
+  if (typeof pack.detectorAlertConf !== 'number' ||
+      !(pack.detectorAlertConf > 0) || !(pack.detectorAlertConf < 1))
+    errs.push('detectorAlertConf 必须在 (0,1)');
+  const disc = pack.discriminator;
+  if (disc !== null && disc !== undefined) {
+    if (typeof disc !== 'object') errs.push('discriminator 非法');
+    else {
+      if (!Array.isArray(disc.classes) || disc.classes.length !== 2 ||
+          disc.classes.some(c => typeof c !== 'string' || !c)) errs.push('判别类别必须为二类');
+      if (!disc.probe || typeof disc.probe !== 'string') errs.push('缺少 probe 探针路径');
+      if (typeof disc.alertConf !== 'number' || !(disc.alertConf > 0.5) || !(disc.alertConf < 1))
+        errs.push('discriminator.alertConf 必须在 (0.5,1)');
+    }
+  }
+  if (det && Array.isArray(det.classes)) {
+    if (!pack.alertCls || !det.classes.includes(pack.alertCls))
+      errs.push('alertCls 必须在检测类别中');
+    if (disc && typeof disc === 'object' && Array.isArray(disc.classes) &&
+        !disc.classes.includes(pack.alertCls))
+      errs.push('有判别器时 alertCls 必须可被判别器分辨');
   }
   if (!pack.arb || !(pack.arb.budgetPerHour > 0) || !(pack.arb.ttlMs > 0))
     errs.push('arb 预算/去重窗非法');
+  const floor = disc && typeof disc === 'object' && typeof disc.alertConf === 'number'
+    ? disc.alertConf : 0.5;
   const st = pack.selfTrain;
-  const floor = task && typeof task.alertConf === 'number' ? task.alertConf : 0.5;
-  if (!st || !(st.minConf > floor) || !(st.marginRatio > 0 && st.marginRatio <= 1) ||
-      !(st.cooldownMs > 0) || !(st.lr > 0))
-    errs.push('selfTrain 闸门非法或未严于告警闸门');
+  if (st !== null && st !== undefined) {
+    if (typeof st !== 'object' || !(st.minConf > floor) ||
+        !(st.marginRatio > 0 && st.marginRatio <= 1) || !(st.cooldownMs > 0) || !(st.lr > 0))
+      errs.push('selfTrain 闸门非法或未严于判别告警闸门');
+  } else if (disc && typeof disc === 'object' && st === undefined) {
+    errs.push('有判别器时必须显式声明 selfTrain（可为 null 禁用）');
+  }
   if (pack.schedule !== undefined) {
     const ok = Array.isArray(pack.schedule) && pack.schedule.length > 0 && pack.schedule.every(w =>
       w && typeof w.from === 'string' && typeof w.to === 'string' &&
@@ -205,26 +210,39 @@ function isArmed(pack, date) {
   return false;
 }
 
-// ---------- 判别裁决策略：四态全自动，流水线无人工判定环节 ----------
-// score: 探针输出的 P(正类)。目标侧置信不足宁可弃权（escalate 待仲裁）也不虚报；
-// 非目标侧一律 clear/suppress，不告警。
+// ---------- 四态裁决策略：全自动，流水线无人工判定环节 ----------
+// 两条路径：判别路径（有判别头，输入 P(判别正类)）与检测器权威路径
+// （无判别头或判别未出，输入检测类别+置信）。目标侧置信不足宁可
+// 弃权（escalate 待仲裁）也不虚报；非目标侧一律 clear/suppress。
 class JepaPolicy {
   constructor(pack) {
-    this.task = pack.discriminators.main;
+    this.disc = (pack.discriminator && typeof pack.discriminator === 'object')
+      ? pack.discriminator : null;
     this.alertCls = pack.alertCls;
+    this.detectorAlertConf = pack.detectorAlertConf;
   }
-  decide(score) {
-    const neg = this.task.classes[0], pos = this.task.classes[1];
+  // 判别路径。score: P(disc.classes[1])
+  decideDiscriminated(score) {
+    if (!this.disc) return this.decideDetector(this.alertCls, score);
+    const neg = this.disc.classes[0], pos = this.disc.classes[1];
     const isPos = score >= 0.5;
     const label = isPos ? pos : neg;
     const conf = isPos ? score : 1 - score;
+    return this._fourState(label, conf, 'discriminator');
+  }
+  // 检测器权威路径（无判别头 / 判别未出——防漏报）
+  decideDetector(cls, conf) {
+    return this._fourState(cls, conf, 'detector');
+  }
+  _fourState(label, conf, via) {
     if (label === this.alertCls) {
-      if (conf >= this.task.alertConf) return { action: 'alert', label, conf };
-      return { action: 'escalate', label, conf };   // 灰区：弃权待仲裁，不虚报
+      const gate = via === 'detector' ? this.detectorAlertConf : this.disc.alertConf;
+      if (conf >= gate) return { action: 'alert', label, conf, via };
+      return { action: 'escalate', label, conf, via };   // 灰区：弃权待仲裁，不虚报
     }
-    return conf >= this.task.alertConf
-      ? { action: 'clear', label, conf }
-      : { action: 'suppress', label, conf };
+    return conf >= (via === 'detector' ? this.detectorAlertConf : this.disc.alertConf)
+      ? { action: 'clear', label, conf, via }
+      : { action: 'suppress', label, conf, via };
   }
 }
 
@@ -279,7 +297,7 @@ function shouldSelfTrain(probe, feat, opts) {
   if (loser <= 0 || winner / loser > opts.marginRatio) return false;
   return true;
 }
-// 兼容旧版探针字段（proto_bird/proto_drone 等）→ 归一化形态；classes[i] 给出第 i 类类名
+// 兼容旧版探针字段（类别命名质心）→ 归一化形态；classes[i] 给出第 i 类类名
 function normalizeProbe(raw, classes) {
   if (raw.protos && raw.ns) {
     return { logreg_w: raw.logreg_w, logreg_b: raw.logreg_b,
@@ -294,10 +312,72 @@ function normalizeProbe(raw, classes) {
   return { logreg_w: raw.logreg_w, logreg_b: raw.logreg_b,
            protos: [a.m, b.m], ns: [a.n, b.n] };
 }
+// 学习状态按模式包隔离（场所 A 的伪标签不得污染场所 B），键含 pack.id
+function probeStorageKey(packId) { return 'jepa_probe_v2:' + packId; }
+
+// ---------- mock 检测器：确定性时间线脚本（测试/无模型演示用） ----------
+// pack.detector.mockScript: [{fromMs, everyMs?, count?, untilMs?,
+//   det:{cls, conf, bbox:[x,y,w,h] 归一化}}]
+// predict(canvas, nowMs) 返回该时刻所有生效检出（bbox 已换算为画布像素），
+// 不读画布像素，Node 端可传 {width,height} 假画布——保证 CI 确定性。
+class MockDetector {
+  constructor(pack) {
+    this.engine = 'mock';
+    this.classes = pack.detector.classes;
+    this.script = pack.detector.mockScript || [];
+    this.loaded = true; this.loading = false;
+  }
+  async load() { return true; }
+  predict(_canvas, nowMs) {
+    const now = (nowMs === undefined) ? performance.now() : nowMs;
+    const cw = _canvas.width || 1, ch = _canvas.height || 1;
+    const dets = [];
+    for (const seg of this.script) {
+      if (now < (seg.fromMs || 0)) continue;
+      if (seg.untilMs !== undefined && now >= seg.untilMs) continue;
+      const period = seg.everyMs || 1e9;
+      const elapsed = now - (seg.fromMs || 0);
+      if (elapsed % period > 50) continue;    // 触发后 50ms 窗口内有效（确定性）
+      const fired = Math.floor(elapsed / period);
+      if (seg.count !== undefined && fired >= seg.count) continue;
+      const d = seg.det;
+      dets.push({ cls: d.cls, conf: d.conf,
+        bbox: [Math.round(d.bbox[0] * cw), Math.round(d.bbox[1] * ch),
+               Math.round(d.bbox[2] * cw), Math.round(d.bbox[3] * ch)] });
+    }
+    return Promise.resolve(dets);
+  }
+}
+
+// ---------- 证据事件（机器可消费的版本化事件，从"帧"到"有证据的事件"） ----------
+const EVIDENCE_SCHEMA = 'sc.evidence/v1';
+// o: {kind, timeIso, cameraId, mode, modeVersion,
+//     trackId, cls, clsConf, bbox, dist,
+//     belief:{label,conf,score,probeVersion}|null,      // 判别器置信——独立于检测置信
+//     decision:{action, via:'discriminator'|'detector', armed, reason},
+//     models:{detector, discriminator, probe},           // 版本/文件口径
+//     evidence:{videoTs, frame, cropJpeg?}}
+function buildEvidenceEvent(o) {
+  const action = o.decision && o.decision.action;
+  return {
+    schema: EVIDENCE_SCHEMA,
+    kind: o.kind,                                   // 'alert'|'arbitration'|'record'|'disarm'
+    time: o.timeIso,
+    camera: o.cameraId || null,
+    mode: { id: o.mode, version: o.modeVersion === undefined ? null : o.modeVersion },
+    track: { id: o.trackId, cls: o.cls, conf: o.clsConf, bbox: o.bbox || null, dist: o.dist || null },
+    belief: o.belief || null,
+    decision: o.decision,
+    models: o.models || {},
+    evidence: o.evidence || null,
+    action_recommended: action === 'alert' ? 'notify' : (action === 'escalate' ? 'review' : 'record'),
+  };
+}
 
 // ---------- Node 单测入口（浏览器端 module 未定义，此块不执行） ----------
 if (typeof module!=='undefined' && module.exports) {
-  module.exports = { CFG, estimateDist, iou, Tracker, MotionGate,
-    MODE_PACKS, getModePack, validatePack, isArmed, JepaPolicy, ArbitrationQueue,
-    logregScore, protoDist, weightedAvg, probeLearn, shouldSelfTrain, normalizeProbe };
+  module.exports = { CFG, estimateDist, sizeForClass, iou, Tracker, MotionGate,
+    validatePack, isArmed, JepaPolicy, ArbitrationQueue,
+    logregScore, protoDist, weightedAvg, probeLearn, shouldSelfTrain, normalizeProbe,
+    probeStorageKey, MockDetector, EVIDENCE_SCHEMA, buildEvidenceEvent };
 }

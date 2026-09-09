@@ -14,6 +14,7 @@ TARGETS=(
 FILES=(
   index.html
   core.js
+  mode-packs.js
   whep-client.js
   hls.min.js
   jepa_probe_init.json
