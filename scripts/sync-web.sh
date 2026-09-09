@@ -61,11 +61,13 @@ for f in "${CODE_FILES[@]}"; do
 done
 
 # ---- 资产文件（单源 staging） ----
+# web/ 为本地开发 staging（大文件不入库），CI 中缺失属预期——只强制两个原生副本
 for f in "${!ASSET_SRC[@]}"; do
   src="${ASSET_SRC[$f]}"
   if [ ! -f "$src" ]; then echo "missing asset source: $src"; fail=1; continue; fi
   for t in "${ALL_TARGETS[@]}"; do
     if [ "$mode" = "--check" ]; then
+      if [ "$t" = "web" ] && [ ! -f "$t/$f" ]; then continue; fi
       if [ ! -f "$t/$f" ]; then echo "missing copy: $t/$f"; fail=1;
       elif ! cmp -s "$src" "$t/$f"; then echo "differs from asset source: $t/$f"; fail=1; fi
     else
