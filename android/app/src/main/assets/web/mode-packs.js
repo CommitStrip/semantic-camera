@@ -4,11 +4,13 @@
    新增场所 = 在 PACKS 里加一个条目（+ 可选的模型/探针/判别头
    文件），核心流水线零改动。schema 校验见 core.js 的 validatePack。
    字段说明：
-   - detector.engine: 'onnx'（真实模型）| 'mock'（确定性脚本，测试
-     与无模型演示；mockScript 为检出时间线）
+   - detector.engine: 'onnx'（真实模型）| 'mock'（确定性脚本，测试与无模型演示）
+   - detector.head: 解码器注册键（'yolo8head' | 'nanodethead'，见 core.js HEAD_DECODERS）
+   - detector.keepIndices/numClasses: 从多类模型里保留的模型类索引（如 COCO person=0）
    - discriminator: null = 本场所暂无判别头，检测器权威（显式降级）
    - detectorAlertConf: 无判别器/判别未出时检测器权威的告警阈值
    - schedule: 布防时间表（可跨零点；缺省 7×24）
+   - zones: 多边形区域规则（归一化坐标；enter+dwell 达标才升级告警）
    - selfTrain: null = 禁用（无判别头时必须为 null）
    ============================================================ */
 "use strict";
@@ -20,6 +22,7 @@
       version: 1,
       detector: {
         engine: 'onnx',
+        head: 'yolo8head',                 // 解码器：[1,4+nc,N] 无 objectness
         model: './yolov8s-drone.onnx',
         classes: ['drone'],
         confThresh: 0.25,
@@ -42,26 +45,29 @@
 
     'restricted-area': {
       id: 'restricted-area',
-      name: '限制区域闯入（设计态）',
-      version: 1,
-      status: 'design',                    // 核心抽象已由 CI 双模式测试验证；
-                                           // 真实人员检测模型接入前用 mock 演示
+      name: '限制区域闯入',
+      version: 2,
       detector: {
-        engine: 'mock',
-        classes: ['person'],
-        confThresh: 0.5,
+        engine: 'onnx',
+        head: 'nanodethead',               // 解码器：[1,N,nc+4*bins] GFL 分布回归
+        model: './person-detector.onnx',
+        inputSize: 416,
+        classes: ['person'],               // 对外类名（与 keepIndices 一一对应）
+        keepIndices: [0],                  // COCO person = 模型类 0
+        numClasses: 80,                    // 模型总类数（COCO）
+        strides: [8, 16, 32, 64],
+        regBins: 8,
+        confThresh: 0.4,                   // 实测口径：公开街景抽帧 0.4 下 7~58 检出/帧（docs/model-selection.md）
         sizeByClass: { person: 1.7 },
         defaultSizeM: 1.7,
-        // 确定性演示时间线：t=500ms 起每 3s 出现一次人员检出，共 3 次
-        mockScript: [
-          { fromMs: 500, everyMs: 3000, count: 3,
-            det: { cls: 'person', conf: 0.82, bbox: [0.40, 0.30, 0.12, 0.35] } },
-        ],
       },
       discriminator: null,                 // 无判别头：检测器权威（显式降级路径）
       detectorAlertConf: 0.60,
       alertCls: 'person',
       schedule: [{ from: '22:00', to: '06:00' }],   // 夜间布防（跨零点）
+      zones: [
+        { id: 'restricted-zone', polygon: [[0.30, 0.20], [0.72, 0.20], [0.72, 0.78], [0.30, 0.78]], dwellMs: 2000 },
+      ],
       arb: { budgetPerHour: 10, ttlMs: 15000 },
       selfTrain: null,
     },

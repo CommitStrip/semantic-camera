@@ -142,8 +142,21 @@ function validatePack(pack) {
   if (!det || typeof det !== 'object') errs.push('缺少 detector');
   else {
     if (det.engine !== 'onnx' && det.engine !== 'mock') errs.push('detector.engine 必须为 onnx|mock');
-    if (det.engine === 'onnx' && (!det.model || typeof det.model !== 'string'))
-      errs.push('onnx 检测器必须给出 model 路径');
+    if (det.engine === 'onnx') {
+      if (!det.model || typeof det.model !== 'string')
+        errs.push('onnx 检测器必须给出 model 路径');
+      if (!det.head || !HEAD_DECODERS[det.head])
+        errs.push('detector.head 必须为注册解码器之一：' + Object.keys(HEAD_DECODERS).join('/'));
+      if (det.head === 'nanodethead') {
+        if (!Array.isArray(det.strides) || det.strides.length < 2 ||
+            det.strides.some(s => !(s > 0))) errs.push('nanodethead 需要 strides 数组');
+        if (!(det.inputSize > 0)) errs.push('nanodethead 需要 inputSize');
+        if (!(det.regBins >= 2)) errs.push('nanodethead 需要 regBins≥2');
+      }
+    }
+    if (det.keepIndices !== undefined &&
+        (!Array.isArray(det.keepIndices) || det.keepIndices.some(k => !(k >= 0))))
+      errs.push('keepIndices 必须为非负索引数组');
     if (!Array.isArray(det.classes) || det.classes.length === 0 ||
         det.classes.some(c => typeof c !== 'string' || !c)) errs.push('detector.classes 非法');
     if (typeof det.confThresh !== 'number' || !(det.confThresh > 0) || !(det.confThresh < 1))
@@ -151,6 +164,18 @@ function validatePack(pack) {
     if (!(det.defaultSizeM > 0)) errs.push('detector.defaultSizeM 必须为正数');
     if (det.mockScript !== undefined && !Array.isArray(det.mockScript))
       errs.push('mockScript 必须为时间线数组');
+  }
+  if (pack.zones !== undefined) {
+    const ok = Array.isArray(pack.zones) && pack.zones.length > 0 && pack.zones.every(z =>
+      z && typeof z.id === 'string' && z.id &&
+      Array.isArray(z.polygon) && z.polygon.length >= 3 &&
+      z.polygon.every(p => Array.isArray(p) && p.length === 2 &&
+        typeof p[0] === 'number' && p[0] >= 0 && p[0] <= 1 &&
+        typeof p[1] === 'number' && p[1] >= 0 && p[1] <= 1) &&
+      (z.classes === undefined || (Array.isArray(z.classes) &&
+        z.classes.every(c => typeof c === 'string'))) &&
+      (z.dwellMs === undefined || (typeof z.dwellMs === 'number' && z.dwellMs >= 0)));
+    if (!ok) errs.push('zones 必须为 {id, polygon[[x,y]≥3点(0..1)], classes?, dwellMs?} 数组');
   }
   if (typeof pack.detectorAlertConf !== 'number' ||
       !(pack.detectorAlertConf > 0) || !(pack.detectorAlertConf < 1))
@@ -351,6 +376,153 @@ class MockDetector {
   }
 }
 
+// ---------- 检测头解码器注册表（DetectorProvider 契约的解码侧） ----------
+// 解码器输出网络输入像素尺度的 {mcls(模型类索引), conf, x1,y1,x2,y2}，
+// NMS 与到源图坐标的逆 letterbox 由调用方处理——核心不含领域类别词。
+const HEAD_DECODERS = { yolo8head: null, nanodethead: null };   // 注册表键（先声明后填充）
+
+// 共享 NMS（xyxy 框，按 conf 降序贪心抑制）
+function boxIoU(a, b) {
+  const x1 = Math.max(a.x1, b.x1), y1 = Math.max(a.y1, b.y1);
+  const x2 = Math.min(a.x2, b.x2), y2 = Math.min(a.y2, b.y2);
+  const iw = Math.max(0, x2 - x1), ih = Math.max(0, y2 - y1);
+  const inter = iw * ih;
+  const ua = (a.x2 - a.x1) * (a.y2 - a.y1) + (b.x2 - b.x1) * (b.y2 - b.y1) - inter;
+  return ua > 0 ? inter / ua : 0;
+}
+function nms(dets, iouThresh) {
+  const sorted = [...dets].sort((a, b) => b.conf - a.conf);
+  const keep = [];
+  for (const d of sorted) {
+    let ok = true;
+    for (const k of keep) if (boxIoU(d, k) > iouThresh) { ok = false; break; }
+    if (ok) keep.push(d);
+  }
+  return keep;
+}
+
+// v8 系导出头：输出 [1, 4+nc, N]（CHW）或 [1, N, 4+nc]，无 objectness
+function decodeV8Head(data, dims, opts) {
+  const conf = opts.conf, keep = opts.keepIndices;
+  let nc;
+  const CHW = dims[1] < dims[2];
+  if (CHW) nc = dims[1] - 4; else nc = dims[2] - 4;
+  const N = Math.max(dims[1], dims[2]);
+  const dets = [];
+  for (let c = 0; c < N; c++) {
+    let cx, cy, bw, bh;
+    if (CHW) { cx = data[0 * N + c]; cy = data[1 * N + c]; bw = data[2 * N + c]; bh = data[3 * N + c]; }
+    else { cx = data[c * dims[2] + 0]; cy = data[c * dims[2] + 1]; bw = data[c * dims[2] + 2]; bh = data[c * dims[2] + 3]; }
+    let bi = -1, bs = -1;
+    for (let k = 0; k < nc; k++) {
+      if (keep && !keep.includes(k)) continue;
+      const sc = CHW ? data[(4 + k) * N + c] : data[c * dims[2] + 4 + k];
+      if (sc > bs) { bs = sc; bi = k; }
+    }
+    if (bi < 0 || bs < conf) continue;
+    dets.push({ mcls: bi, conf: bs, x1: cx - bw / 2, y1: cy - bh / 2, x2: cx + bw / 2, y2: cy + bh / 2 });
+  }
+  return dets;
+}
+
+// NanoDet(GFL) 导出头：输出 [1, N, nc + 4*(bins)]，cls 已在图内 sigmoid，
+// reg 为 bins-bin 分布 logits（softmax → 投影 0..bins-1 → ltrb 距离 × 步长）
+const _anchorCache = new Map();
+function nanoAnchors(inputSize, strides) {
+  const key = inputSize + ':' + strides.join(',');
+  if (_anchorCache.has(key)) return _anchorCache.get(key);
+  const pts = [], strd = [];
+  for (const s of strides) {
+    const hs = Math.ceil(inputSize / s);
+    for (let r = 0; r < hs; r++)
+      for (let c = 0; c < hs; c++) {
+        pts.push([(c + 0.5) * s, (r + 0.5) * s]);
+        strd.push(s);
+      }
+  }
+  const a = { pts, strd };
+  _anchorCache.set(key, a);
+  return a;
+}
+function decodeNanoDetHead(data, dims, opts) {
+  const N = dims[1], cols = dims[2];
+  const nc = opts.numClasses, bins = opts.regBins;
+  const keep = opts.keepIndices;
+  const { pts, strd } = nanoAnchors(opts.inputSize, opts.strides);
+  const proj = []; for (let b = 0; b < bins; b++) proj.push(b);
+  const dets = [];
+  for (let i = 0; i < N; i++) {
+    const base = i * cols;
+    let bi = -1, bs = -1;
+    for (let k = 0; k < nc; k++) {
+      if (keep && !keep.includes(k)) continue;
+      const sc = data[base + k];               // 图内已 sigmoid
+      if (sc > bs) { bs = sc; bi = k; }
+    }
+    if (bi < 0 || bs < opts.conf) continue;
+    const d = new Array(4);
+    for (let g = 0; g < 4; g++) {
+      let mx = -Infinity;
+      const raw = new Array(bins);
+      for (let b = 0; b < bins; b++) {
+        const v = data[base + nc + g * bins + b];
+        raw[b] = v; if (v > mx) mx = v;
+      }
+      let se = 0;
+      for (let b = 0; b < bins; b++) { raw[b] = Math.exp(raw[b] - mx); se += raw[b]; }
+      let dot = 0;
+      for (let b = 0; b < bins; b++) dot += (raw[b] / se) * proj[b];
+      d[g] = dot * strd[i];                    // [l, t, r, b] × 步长
+    }
+    dets.push({ mcls: bi, conf: bs,
+      x1: pts[i][0] - d[0], y1: pts[i][1] - d[1],
+      x2: pts[i][0] + d[2], y2: pts[i][1] + d[3] });
+  }
+  return dets;
+}
+HEAD_DECODERS.yolo8head = decodeV8Head;
+HEAD_DECODERS.nanodethead = decodeNanoDetHead;
+
+// ---------- 区域引擎（场所时空语义，详见设计文档 §6） ----------
+// 射线法：多边形内 true；顶点/边界的归属由扫描奇偶自然处理，不单独特判
+function pointInPolygon(px, py, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i][0], yi = poly[i][1], xj = poly[j][0], yj = poly[j][1];
+    if (((yi > py) !== (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi))
+      inside = !inside;
+  }
+  return inside;
+}
+// 轨迹进出与滞留计时：centers/ polygon 均为归一化坐标；出区重置计时
+class ZoneEngine {
+  constructor(zones) { this.zones = zones || []; }
+  update(track, now) {
+    const hit = this.zones.find(z =>
+      (!z.classes || z.classes.includes(track.cls)) &&
+      pointInPolygon(track.cx, track.cy, z.polygon));
+    if (hit) {
+      if (track.zoneId !== hit.id || track.zoneEnterAt === undefined) {
+        track.zoneId = hit.id; track.zoneEnterAt = now;
+      }
+      return { zoneId: hit.id, dwellMs: now - track.zoneEnterAt };
+    }
+    if (track.zoneId !== undefined) { track.zoneId = undefined; track.zoneEnterAt = undefined; }
+    return null;
+  }
+}
+// 区域门控（纯函数）：有 zones 时，alert 须"在区内滞留达标"，区外降级为 record；
+// 非 alert 裁决与无 zones 模式原样透传
+function applyZonePolicy(dec, zoneHit, zones) {
+  if (!zones || !zones.length || dec.action !== 'alert') return dec;
+  const z = zones.find(z => zoneHit && z.id === zoneHit.zoneId);
+  const need = z && z.dwellMs ? z.dwellMs : 0;
+  if (!zoneHit || zoneHit.dwellMs < need)
+    return Object.assign({}, dec, { action: 'record', reason: 'outside-zone' });
+  return Object.assign({}, dec, { reason: 'zone-intrusion' });
+}
+
+
 // ---------- 证据事件（机器可消费的版本化事件，从"帧"到"有证据的事件"） ----------
 const EVIDENCE_SCHEMA = 'sc.evidence/v1';
 const POLICY_VERSION = 'four-state/2';
@@ -418,5 +590,7 @@ if (typeof module!=='undefined' && module.exports) {
     validatePack, isArmed, JepaPolicy, ArbitrationQueue,
     logregScore, protoDist, weightedAvg, probeLearn, shouldSelfTrain, normalizeProbe,
     probeStorageKey, MockDetector, EVIDENCE_SCHEMA, POLICY_VERSION,
-    stableStringify, stableHash, sha256Hex, buildEvidenceEvent };
+    stableStringify, stableHash, sha256Hex, buildEvidenceEvent,
+    HEAD_DECODERS, decodeV8Head, decodeNanoDetHead, boxIoU, nms,
+    pointInPolygon, ZoneEngine, applyZonePolicy };
 }

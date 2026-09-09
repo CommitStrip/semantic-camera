@@ -271,6 +271,7 @@ const tele=new Telemetry();
 class OnnxDetector{
   constructor(pack){
     const det=pack.detector;
+    this.pack=pack; this.det=det;
     this.ort=null; this.session=null; this.imgsz=det.inputSize||640; this.conf=det.confThresh;
     this.modelPath=det.model;
     this.names=det.classes;   // 索引→类名（来自模式包，核心不含领域词）
@@ -341,24 +342,7 @@ class OnnxDetector{
     }
     return {data, r, dw, dh, srcW, srcH};
   }
-  // 纯 JS NMS（类内 IoU 抑制）
-  _nms(dets,iouTh){
-    dets.sort((a,b)=>b.conf-a.conf);
-    const keep=[];
-    for(const d of dets){
-      let ok=true;
-      for(const k of keep){
-        const ix1=Math.max(d.x1,k.x1),iy1=Math.max(d.y1,k.y1);
-        const ix2=Math.min(d.x2,k.x2),iy2=Math.min(d.y2,k.y2);
-        const iw=Math.max(0,ix2-ix1),ih=Math.max(0,iy2-iy1);
-        const inter=iw*ih, ua=(d.x2-d.x1)*(d.y2-d.y1)+(k.x2-k.x1)*(k.y2-k.y1)-inter;
-        if(ua>0 && inter/ua>iouTh){ ok=false; break; }
-      }
-      if(ok) keep.push(d);
-    }
-    return keep;
-  }
-  // 输入: 彩色 canvas 帧; 输出 [{cls,conf,bbox:[x,y,w,h](原图像素)}]
+  // 解码：按模式包注册的检测头分发（HEAD_DECODERS），共享 NMS + 逆 letterbox
   async predict(canvas){
     if(!this.loaded) await this.load();
     const s=this.imgsz;
@@ -366,41 +350,26 @@ class OnnxDetector{
     const tensor=new this.ort.Tensor('float32',data,[1,3,s,s]);
     const feeds={}; feeds[this.session.inputNames[0]]=tensor;
     const out=await this.session.run(feeds);
-    const outName=this.session.outputNames[0];
-    let box=out[outName].data;
-    // 输出 shape [1,4+nc,8400] 或 [1,8400,4+nc]
-    const shape=out[outName].dims;
-    let nc;
-    if(shape[1]<shape[2]){ nc=shape[1]-4; }
-    else { nc=shape[2]-4; }
-    const N=Math.max(shape[1],shape[2]);
-    // 若 [1,4+nc,N]: 转置访问
-    const CHW = shape[1]<shape[2];
-    const dets=[];
-    for(let c=0;c<N;c++){
-      let cx,cy,bw,bh;
-      if(CHW){
-        cx=box[0*N+c]; cy=box[1*N+c]; bw=box[2*N+c]; bh=box[3*N+c];
-      }else{
-        cx=box[c*shape[2]+0]; cy=box[c*shape[2]+1]; bw=box[c*shape[2]+2]; bh=box[c*shape[2]+3];
-      }
-      // 类别分数
-      let bestCls=-1,bestSc=-1;
-      for(let k=0;k<nc;k++){
-        const sc=CHW? box[(4+k)*N+c] : box[c*shape[2]+4+k];
-        if(sc>bestSc){bestSc=sc;bestCls=k;}
-      }
-      if(bestSc<this.conf) continue;
-      const x1=(cx-bw/2-dw)/r, y1=(cy-bh/2-dh)/r;
-      const x2=(cx+bw/2-dw)/r, y2=(cy+bh/2-dh)/r;
-      const X1=Math.max(0,Math.min(srcW,x1)), Y1=Math.max(0,Math.min(srcH,y1));
-      const X2=Math.max(0,Math.min(srcW,x2)), Y2=Math.max(0,Math.min(srcH,y2));
-      if(X2<=X1||Y2<=Y1) continue;
-      dets.push({cls:this.names[bestCls]||this.names[0],conf:bestSc,x1:X1,y1:Y1,x2:X2,y2:Y2});
-    }
-    const picked=this._nms(dets,0.45);
-    return picked.map(d=>({cls:d.cls,conf:Math.round(d.conf*1000)/1000,
-      bbox:[Math.round(d.x1),Math.round(d.y1),Math.round(d.x2-d.x1),Math.round(d.y2-d.y1)]}));
+    const od=out[this.session.outputNames[0]];
+    const det=this.det;
+    const raw=HEAD_DECODERS[det.head](od.data, od.dims, {
+      conf:det.confThresh, keepIndices:det.keepIndices,
+      inputSize:det.inputSize, strides:det.strides, regBins:det.regBins,
+      numClasses:det.numClasses,
+    });
+    const picked=nms(raw,0.45);
+    return picked.map(d=>{
+      const x1=Math.max(0,Math.min(srcW,(d.x1-dw)/r)), y1=Math.max(0,Math.min(srcH,(d.y1-dh)/r));
+      const x2=Math.max(0,Math.min(srcW,(d.x2-dw)/r)), y2=Math.max(0,Math.min(srcH,(d.y2-dh)/r));
+      if(x2<=x1||y2<=y1) return null;
+      return {cls:this.clsName(d.mcls),conf:Math.round(d.conf*1000)/1000,
+        bbox:[Math.round(x1),Math.round(y1),Math.round(x2-x1),Math.round(y2-y1)]};
+    }).filter(Boolean);
+  }
+  clsName(mcls){
+    const det=this.det;
+    if(det.keepIndices) return det.classes[det.keepIndices.indexOf(mcls)]||det.classes[0];
+    return det.classes[mcls]||det.classes[0];
   }
 }
 
@@ -533,6 +502,7 @@ const packErrs=(modeParam && !pack) ? ['未知模式：'+modeParam+'（拒绝布
 const MODE_HASH=pack ? stableHash(pack) : null;
 let policy=pack ? new JepaPolicy(pack) : null;          // 四态全自动裁决（无人工判定环节）
 let arb=pack ? new ArbitrationQueue(pack.arb) : null;   // 慢脑仲裁队列（预算硬上限 + 轨迹去重）
+let zoneEngine=pack ? new ZoneEngine(pack.zones) : null; // 区域规则引擎（场所时空语义）
 let stream=null, running=false, raf=null;
 let srcCanvas=document.createElement('canvas');
 let sctx=srcCanvas.getContext('2d');
@@ -551,8 +521,8 @@ let pendingJepa=null;      // 最近一次裁决(供 HUD 显示)
 document.getElementById('modeName').textContent=
   (modeParam && !pack) ? '⚠ 未知模式：'+modeParam+'（拒绝布防）'
   : packErrs.length ? '⚠ 模式包非法：'+packErrs[0]+'（拒绝布防）'
-  : pack.name+' · v'+pack.version+' · '+(pack.status==='design'?'设计态(mock 演示)':'JEPA 全自动判别')
-    +(pack.schedule?' · 定时布防':'');
+  : pack.name+' · v'+pack.version+' · '+(jepa?'JEPA 全自动判别':'检测器权威')
+    +(pack.schedule?' · 定时布防':'')+(pack.zones?' · 区域规则':'');
 
 // 变焦状态(平滑)
 let smZoom=1;
@@ -867,7 +837,11 @@ async function loop(){
         if(t.confirmed && (t.lastConfirmAt===undefined ||
                            now-t.lastConfirmAt>=CFG.reconfirmInterval)){
           const v=t.verdict;
-          const dec=v || policy.decideDetector(t.cls, t.conf===undefined?0:t.conf);
+          let dec=v || policy.decideDetector(t.cls, t.conf===undefined?0:t.conf);
+          // 场所规则：有 zones 时，告警还须"在区内滞留达标"；区外目标降级为记录
+          let zr=null;
+          if(pack.zones && pack.zones.length) zr=zoneEngine.update(t, now);
+          dec=applyZonePolicy(dec, zr, pack.zones);
           const act=dec.action;
           const dist=estimateDist(t.box[3]*vh,vh,sizeForClass(pack,t.cls));
           tele.conf({id:t.id,dist,act,armed});
@@ -894,13 +868,14 @@ async function loop(){
             bbox:t.box, dist,
             belief: v ? {label:v.label, conf:v.conf, probeVersion:jepa?jepa.rid:null} : null,
             decision:{action:dec.action, via:dec.via, armed,
-              reason: v ? 'discriminator-verdict' : 'detector-authority'},
+              reason: dec.reason || (v ? 'discriminator-verdict' : 'detector-authority')},
             models:{ detector:{ engine:pack.detector.engine,
                 name:pack.detector.engine==='onnx'?pack.detector.model:'mock-script',
                 sha256:(detector&&detector.modelSha256)||null },
               discriminator: pack.discriminator?pack.discriminator.probe:null,
               probeState: jepa?jepa.storageKey:null },
-            evidence:{videoTs:video.currentTime, frame:frameCount, cropJpeg},
+            evidence:{videoTs:video.currentTime, frame:frameCount, cropJpeg,
+              zoneId:(zr&&zr.zoneId)||null},
           });
           tele._log({ty:'ev',ev});
           // 证据内容哈希尽力补齐（异步写回事件对象，导出时已带上）
@@ -991,6 +966,26 @@ function drawOverlay(vw,vh,t0){
     octx.fillRect(px,ty,tw+8,14);
     octx.fillStyle=t.confirmed?'#ffffff':'#04120c';
     octx.fillText(label,px+4,ty+10);
+  }
+
+  // 区域规则叠加（只读展示；模式包 zones，归一化坐标 → 变焦视口映射）
+  if(pack.zones){
+    octx.lineWidth=1.5;
+    octx.font='9px sans-serif';
+    for(const z of pack.zones){
+      octx.strokeStyle='rgba(79,210,255,.75)';
+      octx.setLineDash([6,4]);
+      octx.beginPath();
+      z.polygon.forEach((p,i)=>{
+        const px=ox+(p[0]*vw-sx)/zw*ow, py=oy+(p[1]*vh-sy)/zh*oh;
+        if(i===0)octx.moveTo(px,py); else octx.lineTo(px,py);
+      });
+      octx.closePath(); octx.stroke();
+      octx.setLineDash([]);
+      const zx=ox+(z.polygon[0][0]*vw-sx)/zw*ow, zy=oy+(z.polygon[0][1]*vh-sy)/zh*oh;
+      octx.fillStyle='rgba(79,210,255,.75)';
+      octx.fillText((z.dwellMs?z.id+' '+z.dwellMs+'ms':z.id), zx+2, zy-4);
+    }
   }
 
   // 遥测 HUD

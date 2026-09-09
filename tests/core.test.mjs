@@ -6,7 +6,7 @@
    index.html 内联脚本语法守护。 */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
@@ -14,8 +14,11 @@ const { CFG, estimateDist, sizeForClass, iou, Tracker, MotionGate,
   validatePack, isArmed, JepaPolicy, ArbitrationQueue,
   logregScore, protoDist, weightedAvg, probeLearn, shouldSelfTrain, normalizeProbe,
   probeStorageKey, MockDetector, EVIDENCE_SCHEMA, POLICY_VERSION,
-  stableStringify, stableHash, sha256Hex, buildEvidenceEvent } = require('../web/core.js');
+  stableStringify, stableHash, sha256Hex, buildEvidenceEvent,
+  HEAD_DECODERS, decodeV8Head, decodeNanoDetHead, boxIoU, nms,
+  pointInPolygon, ZoneEngine, applyZonePolicy } = require('../web/core.js');
 const { MODE_PACKS, getModePack } = require('../web/mode-packs.js');
+const { createHash } = await import('node:crypto');
 
 // 检出构造器：bbox [x,y,w,h] 归一化，cx/cy 为中心
 function mk(x, y, w, h, cls = 'drone', conf = 0.9) {
@@ -211,14 +214,12 @@ test('模式包不变量（schema v3）：两包差异必须足够大，证明�
       assert.equal(p.selfTrain, null, '无判别头必须显式 selfTrain:null');
     }
   }
-  assert.notEqual(MODE_PACKS.airfield.detector.engine, MODE_PACKS['restricted-area'].detector.engine,
-    '检测引擎必须不同（onnx vs mock）');
-  assert.notDeepEqual(MODE_PACKS.airfield.detector.classes, MODE_PACKS['restricted-area'].detector.classes,
-    '检测类别必须不同');
-  assert.notEqual(!!MODE_PACKS.airfield.discriminator, !!MODE_PACKS['restricted-area'].discriminator,
-    '判别头有无必须不同');
-  assert.ok(!!MODE_PACKS['restricted-area'].schedule !== !!MODE_PACKS.airfield.schedule,
-    '布防时间表有无必须不同');
+  const air = MODE_PACKS.airfield, ra = MODE_PACKS['restricted-area'];
+  assert.notEqual(air.detector.head, ra.detector.head, '解码头必须不同（yolo8head vs nanodethead）');
+  assert.notDeepEqual(air.detector.classes, ra.detector.classes, '检测类别必须不同');
+  assert.notEqual(!!air.discriminator, !!ra.discriminator, '判别头有无必须不同');
+  assert.ok(!!ra.schedule !== !!air.schedule, '布防时间表有无必须不同');
+  assert.ok(!air.zones && !!ra.zones, '区域规则有无必须不同');
 });
 
 // ==================== validatePack（fail-closed） ====================
@@ -235,6 +236,8 @@ test('validatePack：缺字段/越界/错配逐一报错', () => {
     p => { p.detector.confThresh = 1.2; },
     p => { p.detector.defaultSizeM = 0; },
     p => { p.detector.mockScript = 'x'; },
+    p => { p.detector.head = 'magic'; },                   // 未注册解码器
+    p => { delete p.detector.head; },
     p => { p.discriminator.classes = ['x']; },
     p => { p.discriminator.alertConf = 0.3; },
     p => { p.alertCls = 'kite'; },                          // 不在检测类别中
@@ -243,6 +246,9 @@ test('validatePack：缺字段/越界/错配逐一报错', () => {
     p => { p.arb.budgetPerHour = 0; },
     p => { p.schedule = [{ from: '24:00', to: '06:00' }]; },
     p => { p.schedule = '22:00-06:00'; },
+    p => { p.zones = [{ id: 'z', polygon: [[0.5]] }]; },    // 多边形点位非法
+    p => { p.zones = [{ id: 'z', polygon: [[1.5, 0], [0, 0], [0, 1]] }]; }, // 越界坐标
+    p => { p.zones = [{ id: 'z', polygon: [[0, 0], [1, 1]] }]; },           // 少于 3 点
   ]) {
     const p = JSON.parse(JSON.stringify(base));
     mutate(p);
@@ -407,18 +413,135 @@ test('学习状态按模式包隔离（场所间不互相污染）', () => {
   assert.ok(probeStorageKey('x').startsWith('jepa_probe_v2:'));
 });
 
+// ==================== 检测头解码器（注册表契约） ====================
+
+test('decodeV8Head：CHW 布局合成张量解码 + 置信过滤', () => {
+  // [1, 5, 8]：nc=1，8 个锚（5 行 CHW：cx,cy,w,h,cls0）
+  const N = 8;
+  const data = new Float32Array(5 * N);
+  const put = (row, c, v) => { data[row * N + c] = v; };
+  put(0, 0, 100); put(1, 0, 50); put(2, 0, 20); put(3, 0, 10); put(4, 0, 0.9);
+  put(0, 3, 200); put(1, 3, 60); put(2, 3, 10); put(3, 3, 20); put(4, 3, 0.8);
+  const dets = decodeV8Head(data, [1, 5, N], { conf: 0.5 });
+  assert.equal(dets.length, 2);
+  const top = dets.find(d => Math.abs(d.conf - 0.9) < 1e-6);
+  assert.equal(top.mcls, 0);
+  assert.deepEqual([top.x1, top.y1, top.x2, top.y2], [90, 45, 110, 55]);
+});
+
+test('decodeNanoDetHead：GFL 分布投影 + 网格/步长数学（合成小网格）', () => {
+  // inputSize 32, strides [8,16] → 级别 4×4 + 2×2 = 20 锚；2 类、3 bins → 14 列
+  const nc = 2, bins = 3, N = 16 + 4, cols = nc + 4 * bins, strides = [8, 16];
+  const data = new Float32Array(N * cols);
+  const i = 6;                            // level0 (s=8) row=1,col=2 → 中心 (20,12)
+  data[i * cols + 0] = 3;                 // 类0 分数（导出图内已 sigmoid，直接当分数）
+  data[i * cols + 1] = -1;
+  const setBin = (g, bin, v) => { data[i * cols + nc + g * bins + bin] = v; };
+  setBin(0, 1, 1);                        // l：单热 bin1 → 投影 1.0
+  setBin(1, 0, 5);                        // t：集中 bin0 → 投影 0
+  setBin(2, 2, 5);                        // r：集中 bin2 → 投影 2
+  setBin(3, 1, 5);                        // b：集中 bin1 → 投影 1
+  const opts = { conf: 0.5, numClasses: nc, regBins: bins, keepIndices: [0],
+    inputSize: 32, strides };
+  const dets = decodeNanoDetHead(data, [1, N, cols], opts);
+  assert.equal(dets.length, 1);
+  const d = dets[0];
+  assert.equal(d.mcls, 0);
+  // l=1×8=8, t≈0.16（softmax 非零 bin 的尾部泄漏）, r≈15.84, b=1×8=8；中心 (20,12)
+  const want = [12, 11.84, 35.84, 20];
+  [d.x1, d.y1, d.x2, d.y2].forEach((v, i) =>
+    assert.ok(Math.abs(v - want[i]) < 0.01, `框[${i}]应为 ${want[i]}，实际 ${v}`));
+  // keepIndices=[0]：仅类0 高分的锚不输出
+  data[7 * cols + 1] = 5;
+  const d2 = decodeNanoDetHead(data, [1, N, cols], opts);
+  assert.ok(d2.every(x => x.mcls === 0), 'keepIndices 过滤生效');
+});
+
+test('nms/boxIoU：重叠抑制、独立保留', () => {
+  const a = { mcls: 0, conf: 0.9, x1: 0, y1: 0, x2: 10, y2: 10 };
+  const b = { mcls: 0, conf: 0.8, x1: 1, y1: 1, x2: 11, y2: 11 };
+  const c = { mcls: 0, conf: 0.7, x1: 100, y1: 100, x2: 110, y2: 110 };
+  const kept = nms([a, b, c], 0.45);
+  assert.equal(kept.length, 2);
+  assert.equal(kept[0].conf, 0.9, '按置信降序保留');
+});
+
+// ==================== 区域引擎（时空规则） ====================
+
+test('pointInPolygon：内/外判定', () => {
+  const sq = [[0, 0], [10, 0], [10, 10], [0, 10]];
+  assert.equal(pointInPolygon(5, 5, sq), true);
+  assert.equal(pointInPolygon(-1, 5, sq), false);
+  assert.equal(pointInPolygon(11, 5, sq), false);
+  assert.equal(pointInPolygon(5, -5, sq), false);
+  const tri = [[0, 0], [10, 0], [5, 10]];
+  assert.equal(pointInPolygon(5, 3, tri), true);
+  assert.equal(pointInPolygon(0.5, 9, tri), false);
+});
+
+test('ZoneEngine：滞留计时/类别过滤/出区重置', () => {
+  const ze = new ZoneEngine([
+    { id: 'z1', polygon: [[0, 0], [0.5, 0], [0.5, 0.5], [0, 0.5]], classes: ['person'] },
+  ]);
+  const t = { cls: 'person', cx: 0.25, cy: 0.25 };
+  let h = ze.update(t, 0);
+  assert.equal(h.zoneId, 'z1');
+  assert.equal(ze.update(t, 800).dwellMs, 800, '滞留累加');
+  const other = { cls: 'animal', cx: 0.25, cy: 0.25 };
+  assert.equal(ze.update(other, 900), null, '类别不符不触发');
+  const t2 = { cls: 'person', cx: 0.9, cy: 0.9 };
+  assert.equal(ze.update(t2, 1000), null, '区外返回 null');
+  assert.equal(ze.update({ cls: 'person', cx: 0.25, cy: 0.25 }, 5000).dwellMs, 0, '重进计时重置');
+});
+
+test('applyZonePolicy：滞留达标升级告警，区外降级记录，无 zones 透传', () => {
+  const zones = [{ id: 'z', polygon: [[0, 0], [1, 0], [1, 1], [0, 1]], dwellMs: 1000 }];
+  const alert = { action: 'alert', via: 'detector', conf: 0.9 };
+  const down = applyZonePolicy(alert, { zoneId: 'z', dwellMs: 500 }, zones);
+  assert.equal(down.action, 'record');
+  assert.equal(down.reason, 'outside-zone');
+  const ok = applyZonePolicy(alert, { zoneId: 'z', dwellMs: 1000 }, zones);
+  assert.equal(ok.action, 'alert');
+  assert.equal(ok.reason, 'zone-intrusion');
+  assert.equal(applyZonePolicy(alert, null, null).action, 'alert', '无 zones 透传');
+  assert.equal(applyZonePolicy({ action: 'clear' }, null, zones).action, 'clear', '非 alert 透传');
+});
+
+// ==================== 模型资产清单完整性 ====================
+
+test('模型资产清单完整性：manifest sha256 与文件一致（CI 闸门）', async () => {
+  const manifest = JSON.parse(readFileSync(new URL('../assets/manifest.json', import.meta.url), 'utf8'));
+  assert.equal(manifest.schema, 'sc.assets/v1');
+  assert.ok(manifest.files.length >= 4, '至少含 3 模型 + ort 运行时');
+  for (const f of manifest.files) {
+    const p = new URL('../' + f.path, import.meta.url);
+    assert.ok(existsSync(p), f.path + ' 缺失');
+    const hex = createHash('sha256').update(readFileSync(p)).digest('hex');
+    assert.equal(hex, f.sha256, f.path + ' 哈希不符——staging 漂移或权重被篡改');
+    assert.ok(f.license, f.path + ' 必须声明许可证');
+  }
+  const person = manifest.files.find(f => f.path.endsWith('person-detector.onnx'));
+  assert.match(person.license, /Apache-2\.0/, '人员模型必须为宽松许可证');
+});
+
 // ==================== MockDetector 确定性 ====================
 
 test('MockDetector：时间线脚本确定性触发与像素换算', async () => {
-  const pack = getModePack('restricted-area');
+  const pack = {
+    detector: { engine: 'mock', classes: ['x'], confThresh: 0.5, defaultSizeM: 1,
+      mockScript: [
+        { fromMs: 500, everyMs: 3000, count: 3,
+          det: { cls: 'x', conf: 0.82, bbox: [0.25, 0.25, 0.1, 0.2] } },
+      ] },
+  };
   const det = new MockDetector(pack);
   await det.load();
   const canvas = { width: 1920, height: 1080 };
   assert.deepEqual(await det.predict(canvas, 100), [], '触发前无检出');
   const d1 = await det.predict(canvas, 500);
   assert.equal(d1.length, 1);
-  assert.equal(d1[0].cls, 'person');
-  assert.deepEqual(d1[0].bbox, [768, 324, 230, 378], '归一化 bbox 按画布尺寸换算');
+  assert.equal(d1[0].cls, 'x');
+  assert.deepEqual(d1[0].bbox, [480, 270, 192, 216], '归一化 bbox 按画布尺寸换算');
   assert.deepEqual(await det.predict(canvas, 600), [], '窗口外不重复');
   assert.equal((await det.predict(canvas, 3500)).length, 1, '第二次周期触发');
   assert.equal((await det.predict(canvas, 9500)).length, 0, 'count=3 次用尽后不再触发');
@@ -527,6 +650,15 @@ test('双模式端到端：同一核心管线跑通两个完全不同的场所�
       ? policy.decideDiscriminated(0.92)
       : policy.decideDetector(t.cls, t.conf);
     assert.equal(dec.action, 'alert', packId + '：目标侧高置信应告警');
+    // 区域门控：restricted-area 须"进区+滞留达标"才升级告警
+    if (pack.zones) {
+      const ze = new ZoneEngine(pack.zones);
+      const early = applyZonePolicy(dec, ze.update(t, 1000), pack.zones);
+      assert.equal(early.action, 'record', '滞留不足不得告警');
+      const late = applyZonePolicy(dec, ze.update(t, 3000), pack.zones);
+      assert.equal(late.action, 'alert', '滞留达标升级告警');
+      assert.equal(late.reason, 'zone-intrusion');
+    }
     const ev = buildEvidenceEvent({
       kind: 'alert', timeIso: '2026-09-09T00:00:00.000Z',
       mode: pack.id, modeVersion: pack.version,

@@ -1,0 +1,40 @@
+{
+  "schema": "sc.assets/v1",
+  "files": [
+    {
+      "path": "assets/models/yolov8s-drone.onnx",
+      "sha256": "7e5e3bf66dc3325c24bc7397d2f6e3460925eacef8d702a1177317e8a2ad64ad",
+      "size": 44746522,
+      "source": "predecessor repo anti-drone-monitor (fine-tuned YOLOv8s on ultralytics arch)",
+      "license": "AGPL-3.0 (inherited from upstream arch/weights)"
+    },
+    {
+      "path": "assets/models/person-detector.onnx",
+      "sha256": "be3a96588c5a551ebd2133a915acff67034d6c2a03f8fb5f8042ad0c414eff34",
+      "size": 9893045,
+      "source": "https://github.com/RangiLyu/nanodet/releases/download/v1.0.0-alpha-1/nanodet-plus-m-1.5x_416.onnx (COCO-pretrained NanoDet-Plus-m-1.5x@416, person=class 0)",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "assets/models/dinov2_vits14_feat.onnx",
+      "sha256": "859fcada5b3138a88d8b38b5f627dec5c646732a07b9ac6c1acf3b85a443ea16",
+      "size": 89110468,
+      "source": "predecessor repo (DINOv2 ViT-S/14 vision-tower export)",
+      "license": "CC-BY-NC 4.0 (upstream Meta weights) \u2014 non-commercial, replacement planned (see docs/model-selection.md \u00a7license path)"
+    },
+    {
+      "path": "assets/runtime/ort-wasm-simd-threaded.mjs",
+      "sha256": "2a96ec96baba994fd4dd82d1563dd850f6b0bcd232c61cdc4e7bb6112c65ea1b",
+      "size": 24239,
+      "source": "onnxruntime-web 1.x official wasm bundle",
+      "license": "MIT"
+    },
+    {
+      "path": "assets/runtime/ort-wasm-simd-threaded.wasm",
+      "sha256": "d1ab1b94b16a65b29d710d0b587b29e7bed336827577623913479b8afe8113e6",
+      "size": 13479978,
+      "source": "onnxruntime-web 1.x official wasm bundle",
+      "license": "MIT"
+    }
+  ]
+}

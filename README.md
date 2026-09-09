@@ -98,7 +98,8 @@ See `harmony/README.md`. The core runs in an ArkWeb component; `javaScriptProxy`
 ## Development: tests, CI and multi-copy sync
 
 ```bash
-node --test tests/core.test.mjs     # 50 unit tests (node:test, zero deps)
+node --test tests/core.test.mjs     # 57 unit tests (node:test, zero deps)
+python scripts/verify_models.py    # model asset sha256 integrity (fail-closed)
 bash scripts/sync-web.sh            # web/ → android assets + harmony rawfile
 bash scripts/sync-web.sh --check    # consistency check only (same as CI)
 ```
@@ -111,7 +112,8 @@ CI (node 20/22 matrix): JS syntax checks → unit tests → three-copy consisten
 |----|------|
 | WHEP signaling end-to-end | ✅ verified (MediaMTX v1.20.0 + H.264 test stream, OPTIONS→POST→PATCH→DELETE all pass) |
 | Probe-head offline accuracy | ✅ 98.15% (162 samples, `web/jepa_probe_init.json`, inherited as measured from the predecessor) |
-| Unit tests / CI | ✅ 50 tests green (incl. two-mode acceptance, cleanliness, schema contract, fail-closed meta-tests), node 20/22 matrix |
+| Unit tests / CI | ✅ 57 tests green (incl. two-mode acceptance, cleanliness, schema contract, fail-closed, asset-integrity gates), node 20/22 matrix |
+| Person model on real street footage | ✅ NanoDet-Plus@416: 7–58 persons/frame on sampled frames, 23–24 ms/frame CPU ([selection record](docs/model-selection.md)); browser wasm fps ⏳ pending |
 | On-device fps/latency | ⏳ pending — telemetry already records per-frame `detMs/trackMs/motionRatio`; export CSV/JSON for measured data |
 
 Model size & strategy: YOLOv8s fp32 43 MB + DINOv2 85 MB; a single wasm-side inference takes seconds — hence detection is **trigger-based** (gating + cooldown) rather than per-frame, and JEPA runs only on confirmed targets with lazy loading.
@@ -120,7 +122,7 @@ Model size & strategy: YOLOv8s fp32 43 MB + DINOv2 85 MB; a single wasm-side inf
 
 ## Platform roadmap
 
-Milestones M1 (discrimination automation) → M1.5 (standalone repo + config governance) → M1.6 (platform consolidation: domain-free core + two-mode acceptance + evidence events) → **M1.7 (provenance hardening: fail-closed mode selection + evidence provenance fields + self-training off by default, this release)** → P1 (real restricted-area / single-source model assets / model unbinding) → M2 (vus bridge arbitration feedback) → M3 (spatiotemporal rules + open-set + smoke/fire pack) → M4 (multi-camera scheduling + health monitoring) → M5 (retraining loop + evaluation gates + alert sinks + license decision — the precondition for enabling self-training) → M6 (multi-stream gateway box). Details and risks in [docs/semantic-camera-design.md](docs/semantic-camera-design.md).
+Milestones M1 (discrimination automation) → M1.5 (standalone repo + config governance) → M1.6 (platform consolidation: domain-free core + two-mode acceptance + evidence events) → **M1.7 (provenance hardening: fail-closed mode selection + evidence provenance fields + self-training off by default, this release)** → **P1-①② (real restricted-area model + zone rules / single-source model assets, this release)** → M2 (vus bridge arbitration feedback) → M3 (spatiotemporal rules + open-set + smoke/fire pack) → M4 (multi-camera scheduling + health monitoring) → M5 (retraining loop + evaluation gates + alert sinks + license decision — the precondition for enabling self-training) → M6 (multi-stream gateway box). Details and risks in [docs/semantic-camera-design.md](docs/semantic-camera-design.md).
 
 ## Platforms & hardware
 
@@ -131,6 +133,7 @@ Browsers need WASM and WebRTC (Android 8+ WebView / modern desktop browsers); th
 - [MediaMTX](https://github.com/bluenviron/mediamtx) — RTSP → WebRTC/HLS streaming gateway (MIT). This repo only ships configuration and a launch script under `gateway/`.
 - [onnxruntime-web](https://github.com/microsoft/onnxruntime) — wasm inference engine (MIT).
 - [hls.js](https://github.com/video-dev/hls.js) — HLS fallback playback (Apache-2.0).
+- [NanoDet-Plus](https://github.com/RangiLyu/nanodet) (Apache-2.0) — person detection model (person-detector.onnx is the official COCO-pretrained export, see docs/model-selection.md).
 - [DINOv2](https://github.com/facebookresearch/dinov2) ViT-S/14 (Meta AI) — discrimination feature extractor; upstream code is Apache-2.0 while the official weights are CC-BY-NC 4.0 (non-commercial). `dinov2_vits14_feat.onnx` in this repo is an export of its vision tower; verify upstream terms before redistribution or commercial use.
 - [YOLOv8 / ultralytics](https://github.com/ultralytics/ultralytics) — detection architecture (AGPL-3.0). `yolov8s-drone.onnx` in this repo is a fine-tuned drone-detection export of that architecture; redistribution and commercial use must comply with AGPL-3.0 and upstream terms.
 

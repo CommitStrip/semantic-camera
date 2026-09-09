@@ -23,3 +23,12 @@ release/*.hap
 # ---- 签名材料（不入库）----
 harmony/signing/*.p12
 harmony/signing/*.csr
+
+# ---- 构建期 staging 产物（单源在 assets/，不入库）----
+web/*.onnx
+web/ort-wasm-simd-threaded.mjs
+web/ort-wasm-simd-threaded.wasm
+
+# ---- 本地测试素材（不入库）----
+web/test_*.mp4
+web/test_*.webm

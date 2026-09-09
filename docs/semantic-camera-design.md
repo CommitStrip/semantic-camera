@@ -1,6 +1,6 @@
 # 语义摄像头（Semantic Camera）平台设计
 
-*v2.3 · 2026-09-09 · 本仓为库系主线；v1（反无人机单场景判别自动化）已在前身仓落地；v2 吸收第一轮外部架构审查（§0.1–0.2、§4 v3 schema、§14 证据事件）；v2.2 吸收第二轮审查（P0 fail-closed 模式选择、证据溯源字段、自训练默认关闭、红线措辞修正）；v2.3 收录 Vision Agents 调研结论与借鉴边界（§19，含告警出口确定性主链 §14、DetectorProvider 契约 §16）*
+*v2.4 · 2026-09-10 · 本仓为库系主线；v1（反无人机单场景判别自动化）已在前身仓落地；v2 吸收第一轮外部架构审查（§0.1–0.2、§4 v3 schema、§14 证据事件）；v2.2 吸收第二轮审查（P0 fail-closed 模式选择、证据溯源字段、自训练默认关闭、红线措辞修正）；v2.3 收录 Vision Agents 调研结论与借鉴边界（§19，含告警出口确定性主链 §14、DetectorProvider 契约 §16）*
 
 ---
 
@@ -122,7 +122,12 @@
 
 - **配置校验 fail-closed**：`validatePack()` 在装载时校验全部不变量（检测引擎/类别、判别头二类与闸门区间、alertCls 可判别性、自训练严于告警闸门、时间表格式等），不合法则**拒绝布防**并明确报错——坏配置宁可不起流水线，不带病上线。
 - **检测置信 ≠ 判别置信**：两条路径的闸门分开（`detectorAlertConf` vs `discriminator.alertConf`），裁决结果带 `via` 来源标记，单个模型分数不会被一路传成处置结论（§14 证据事件里两者分立记录）。
-- 首波场所目录：净空防黑飞（✅ 完整落地）→ 限制区域闯入（✅ 核心抽象验证，mock 运行，真实模型待接入）→ 油库烟火（烟/雾判别，误报抑制杀手场景，M3）→ 工地合规（M3）→ 校园周界（M3）→ 养殖驱避（M5）。一机多包（一台相机同时跑周界+烟火两包）在 VenueController 设计时支持，模式包保持纯函数语义。
+- 首波场所目录：净空防黑飞（✅ 完整落地）→ 限制区域闯入（✅ 真实模型 NanoDet-Plus@416 + zone 规则）→ 油库烟火（烟/雾判别，误报抑制杀手场景，M3）→ 工地合规（M3）→ 校园周界（M3）→ 养殖驱避（M5）。一机多包（一台相机同时跑周界+烟火两包）在 VenueController 设计时支持，模式包保持纯函数语义。
+
+**v3.1 增补（P1-①② 落地，2026-09-10）**：
+- detector 增加 `head`（解码器注册键，`HEAD_DECODERS`：yolo8head/nanodethead/mock）、`keepIndices`/`numClasses`（多类模型保留子集，如 COCO person=0）、`strides`/`regBins`（GFL 分布回归参数）；
+- `zones` 从设计转落地：进入区域 + 滞留达标（dwellMs）才升级告警（`reason: zone-intrusion`），区外降级 record（`outside-zone`）——区域引擎 `ZoneEngine`/`applyZonePolicy` 为 core 纯函数，单测覆盖；
+- restricted-area 升级为**真实模型模式包**：NanoDet-Plus-m-1.5x@416（Apache-2.0，官方 ONNX 9.89MB），真实街景抽帧实测 person 7~58 检出/帧、CPU 23-24ms/帧（选型/淘汰证据与解码契约见 docs/model-selection.md）。
 
 ## 5. 判别体系（全自动闭环）
 
@@ -151,13 +156,14 @@
 - 判别侧：escalate 率与 alert 后被仲裁推翻率（M2 起可得）双指标滚动监控，超带自动降级为"仅检测"模式并提示；
 - 原则：**判别置信下降必须可观测**，不允许静默劣化。
 
-## 6. 时空语义引擎（M3，场所语义的主体）
+## 6. 时空语义引擎（场所语义的主体）
 
-类别告警只是语义的最浅层；场所语义的主体是**时空规则**，全部做成模式包数据：
+类别告警只是语义的最浅层；场所语义的主体是**时空规则**，全部做成模式包数据。布防时间表与多边形 zone+滞留已落地，其余按里程碑推进：
 
 | 规则类型 | 数据形态 | 场所示例 |
 |---|---|---|
-| 布防时间表 `schedule` | `{from,to}` 窗口数组，支持跨零点（已落地） | 校园周界 22:00–06:00；工地吊臂区全天 |
+| 布防时间表 `schedule` | `{from,to}` 窗口数组，支持跨零点（✅ 已落地） | 校园周界 22:00–06:00；工地吊臂区全天 |
+| 区域 `zones` | 归一化多边形 + 类别 + 滞留 `dwellMs`（✅ 已落地：进区+滞留达标升级告警 `zone-intrusion`，区外降级 record） | 净空区禁入无人机；围栏区域闯入 |
 | 区域 `zones` | 归一化多边形 + 触发类别 + 方向 | 净空区禁入无人机；围栏单向越线 |
 | 滞留 `dwell` | 类别 + 区域 + 时长 | 无人车前滞留 >60s |
 | 计数/聚集 `count` | 类别 + 区域 + 阈值 + 窗口 | 鸟群 ≥5 只 30s（鸟击预警）；人群聚集 |
@@ -266,7 +272,7 @@ EdgeCore → 桥：{type:'arb-request', trackId, packId, task:'main',
 
 ## 16. 检测器可替换性与许可证退出路径
 
-模式包把检测模型抽象为 `detector` 配置，**架构上检测器可插拔**。扩展不走 engine 枚举膨胀（onnx|mock|webgpu|remote|…），统一 **DetectorProvider 契约**：`load(config) / infer(frame, ctx) / health() / close()`——engine 名称只是 provider registry 的键；能力声明（输入/输出类型、是否产事件）与运行属性（并发/背压/超时/错误降级）随 provider 注册（契约借鉴 Vision Agents processor 设计，见 §19）。
+模式包把检测模型抽象为 `detector` 配置，**架构上检测器可插拔**。扩展不走 engine 枚举膨胀（onnx|mock|webgpu|remote|…），统一 **DetectorProvider 契约**：`load(config) / infer(frame, ctx) / health() / close()`——engine 名称只是 provider registry 的键；能力声明（输入/输出类型、是否产事件）与运行属性（并发/背压/超时/错误降级）随 provider 注册（契约借鉴 Vision Agents processor 设计，见 §19）。已注册：`yolo8head`（前身仓无人机模型）、`nanodethead`（NanoDet GFL 分布回归，person 模型）、`mock`（确定性时间线）。
 
 现用 YOLOv8 权重 AGPL-3.0 传染、DINOv2 权重 CC-BY-NC 非商业——演示与科研无碍，**商业化前必须替换**：检测器换宽松许可架构（现代 opset 重导出，顺带解决量化失效问题；人员检测候选 RF-DETR 待许可证单独核实，§19），判别塔确认商用条款或换自训塔。该决策进 M5 前置清单，属用户商业裁决项。
 
@@ -281,6 +287,7 @@ EdgeCore → 桥：{type:'arb-request', trackId, packId, task:'main',
 | **P1 遗留（下一轮优先）** | ① restricted-area 真实化：真人员检测模型 + polygon zone + 进出/越线/持续 + 事件录像缓冲 + 真实视频 benchmark（M3 主体）；② 模型资产单源化：assets/models/ + 构建期 staging，消除三份物理副本；③ 模型解绑：核心不捆绑受限权重，model-manifest + 下载器 + 第三方声明（商用前置，含用户决策） | 待做 |
 | **M2 vus 桥** | WS 协议 §8 全量落地，仲裁回灌闭环 | 待做 |
 | **M3 时空规则引擎 + 开放集** | zones/dwell/count/composite + unknown 拒识 + 油库烟火第三模式包 + restricted-area 真实人员检测模型接入 | 待做 |
+| **M1.8 restricted-area 真实化 + 资产单源化（P1-①②）** | 真实人员模型 NanoDet-Plus@416（Apache-2.0，选型/淘汰证据 docs/model-selection.md）+ zones/滞留规则落地 + nanodethead 解码器注册 + `assets/` 单源（manifest sha256 + verify_models.py + CI 资产完整性闸门）；JS 解码器与真实模型输出等价性验证通过 | ✅ 本轮 |
 | **M4 多相机 + VenueController + 健康监控** | 多路预算调度 + §9 健康项 + 学习状态全键隔离 + **MediaTransport 抽象**（RTSP/WHEP/HLS/USB 不进模式包、不与检测器耦合，§19） | 待做 |
 | **M5 复训闭环 + 评测闸门 + 告警出口** | 影子晋升/校准集防线/每包基准集/sinks（确定性 Outbox 主链 + MCP 可选适配器，§14）/许可证决策——**自训练按场所开启的前置条件** | 待做 |
 | **M6 部署形态扩展** | 单盒多路网关实测与发布（Prometheus 指标维度参考 §19；先单机做实再横向扩展） | 待做 |
@@ -321,4 +328,4 @@ EdgeCore → 桥：{type:'arb-request', trackId, packId, task:'main',
 
 **明确不采纳**：Stream-first RTC 传输；会话/turn 驱动运行时；持续视频→实时 LLM 路径；云端检测为默认路径；模型驱动告警投递；Python 框架依赖。
 
-**对 P1 的间接提示**：restricted-area 真实人员检测模型候选——RF-DETR（Roboflow 开源 DETR 系）本地路径值得调研，但**代码与权重许可证需单独核实**；Moondream 支持本地 CUDA 但不等于适合 WebView/wasm 端侧。选型仍按 §16 许可证退出路径执行。
+**P1 选型已闭环**：NanoDet-Plus-m-1.5x@416 胜出（Apache-2.0，官方 ONNX，真实街景实测通过）；RF-DETR 因参数规模架构性超 wasm 门槛出局；YOLOX 0.1.1rc0 资产因现代栈全零出局。完整选型矩阵与解码契约见 docs/model-selection.md。
