@@ -35,7 +35,9 @@
       detectorAlertConf: 0.60,             // 判别未出时检测器权威阈值（防漏报）
       alertCls: 'drone',
       arb: { budgetPerHour: 20, ttlMs: 15000 },
-      selfTrain: { minConf: 0.90, marginRatio: 0.80, cooldownMs: 60000, lr: 0.05 },
+      // 自训练默认关闭：双信号并非独立证据（同一特征空间），在冻结 golden set、
+      // 版本化回滚、开放集拒识完备前（M5 治理栈）不得在线修改判别头
+      selfTrain: { enabled: false, minConf: 0.90, marginRatio: 0.80, cooldownMs: 60000, lr: 0.05 },
     },
 
     'restricted-area': {
@@ -66,7 +68,10 @@
   };
 
   function getModePack(name) {
-    return PACKS[name || 'airfield'] || PACKS.airfield;
+    // 缺省首包；未知模式返回 null（fail-closed：调用方必须拒绝布防，
+    // 严禁静默回退到别的场所——选错模式比配置非法更危险）
+    if (name === undefined || name === null || name === '') return PACKS.airfield;
+    return Object.prototype.hasOwnProperty.call(PACKS, name) ? PACKS[name] : null;
   }
 
   if (typeof module !== 'undefined' && module.exports) {

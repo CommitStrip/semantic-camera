@@ -8,11 +8,11 @@
 
 This repository is the mainline of the library family: `vus` is the general video-understanding engine, `rvs` the robotics increment, and the predecessor `anti-drone-monitor` (single-scene anti-drone demo) is frozen while this repo carries the evolution forward.
 
-Three design red lines: **no step of the discrimination pipeline may depend on human judgment** (a feature that needs a human judge is no feature); **cost has a hard cap** (budget-based, never growing linearly with runtime); **new venues require no core changes** (the platform-viability criterion).
+Three design red lines: **the discrimination pipeline runs fully automatically with no human judgment step** (discrimination never waits for a human; but "automatic understanding ≠ automatic execution of everything" — human review never blocks the realtime pipeline, and whether high-impact external effects need human confirmation is decided by the effect policy); **cost has a hard cap** (budget-based, never growing linearly with runtime); **new venues require no core-logic changes** (the platform-viability criterion; mode selection is fail-closed — an unknown mode refuses to arm and never silently falls back to another venue).
 
-**Claims discipline**: today's algorithms are a "configurable event camera + per-venue discrimination heads" — we do not claim universal scene understanding, zero false alarms, or human-level semantics; we report measured numbers only, and everything unmeasured is marked "pending / design / roadmap".
+**Claims discipline**: today's algorithms are a "configurable event camera + per-venue discrimination heads" — we do not claim universal scene understanding, zero false alarms, human-level semantics, or "zero-code venue onboarding" (the accurate claim: new venues require no core-logic changes, while still adding registry data and redeploying); we report measured numbers only, and everything unmeasured is marked "pending / design / roadmap".
 
-Current validation status: probe-head offline accuracy **98.15%** (162 authoritative Drone-vs-Bird samples, evidence `web/jepa_probe_init.json`: acc=0.9815, n_train=162, dim=768, inherited as measured from the predecessor repo); WHEP signaling verified end-to-end against a local MediaMTX v1.20.0 + H.264 test stream; **46 unit tests + GitHub Actions CI all green** (including the two-mode end-to-end acceptance and source-cleanliness meta-tests). On-device end-to-end fps/latency benchmarks are **pending**.
+Current validation status: probe-head offline accuracy **98.15%** (162 authoritative Drone-vs-Bird samples, evidence `web/jepa_probe_init.json`: acc=0.9815, n_train=162, dim=768, inherited as measured from the predecessor repo); WHEP signaling verified end-to-end against a local MediaMTX v1.20.0 + H.264 test stream; **50 unit tests + GitHub Actions CI all green** (including two-mode end-to-end acceptance, source-cleanliness, evidence-schema contract, and mode-selection fail-closed meta-tests). On-device end-to-end fps/latency benchmarks are **pending**.
 
 ## Key capabilities
 
@@ -22,7 +22,7 @@ Current validation status: probe-head offline accuracy **98.15%** (162 authorita
 | Target tracking | IoU + center-distance association + constant-velocity prediction (no track loss across long detection gaps), multi-frame confirmation (≥2) cuts false positives; confirmed targets get a 12 s survival window — hovering targets are not lost |
 | Fully-automatic semantic discrimination | Four-state verdict (discriminated / detector-authority dual paths): alert / pending-arbitration / cleared / suppressed — **no human judgment anywhere**; gray-zone cases enter a budget-capped arbitration queue; high-confidence dual-signal agreement auto-updates the probe head |
 | Venue mode packs | Modes are data + a validator: `?mode=` selects, new venues plug in with zero code; domain terms live only in `web/mode-packs.js` (enforced by a CI cleanliness test); `validatePack` is fail-closed — a bad config refuses to arm |
-| Evidence events | Versioned `sc.evidence/v1` envelope: detector and discriminator confidences kept separate, arming state, traceable model/probe versions, alert-level crop frame — from "frames" to "evidence-bearing events" for machine consumption and audit replay |
+| Evidence events | Versioned `sc.evidence/v1` envelope: stable event ID, dual timestamps (source/processed), mode-pack config fingerprint, policy version, model SHA-256, detector and discriminator confidences kept separate, alert crop frame with its content hash — auditable, machine-consumable events |
 | Arming schedule | Mode packs may declare arming windows (overnight-capable); outside the window alerts downgrade to records and arbitration spends no budget |
 | Smooth zoom | Pinch / slider / buttons + **target-following** auto-centering, smooth interpolation 1×-8× |
 | Distance estimation | Pinhole model with per-class size (drone 0.35 m / bird 0.20 m); digital zoom is a center crop and does not affect the reading |
@@ -61,7 +61,7 @@ A mode pack is pure data: detection model (pluggable onnx/mock) + optional discr
 On top of YOLO localization, a **JEPA-style self-supervised discriminator** (`web/dinov2_vits14_feat.onnx`, 85 MB, DINOv2-ViT-S feature extractor + `web/jepa_probe_init.json` linear probe head):
 
 - **Four-state fully-automatic verdict**: the probe outputs P(target class); the policy emits `alert` (target side, high confidence → alert) / `escalate` (target side, low confidence → **abstain and queue for arbitration** — never a false alert) / `clear` (confidently not the target → suppress) / `suppress` (silent). Before a verdict exists, the detector is authoritative (no missed alerts).
-- **Auto evolution (no human-in-the-loop)**: when the logreg head and the prototype distance **agree with confidence ≥0.90**, the probe head updates itself (centroid moving average + one-step SGD with gradient descent), persisted to `localStorage`; "Reset learning" restores the initial weights (an ops action). The manual feedback buttons are gone.
+- **Auto evolution (capability shipped, disabled by default)**: on frozen features, when the logreg head and the prototype distance agree with confidence ≥0.90, the probe head can update itself (centroid moving average + one-step SGD). **Defaults to `enabled:false`** — the two signals are not independent evidence; until the governance stack (frozen evaluation set, versioned rollback, open-set rejection) is complete (M5), the head must not be modified online by default; per-venue opt-in follows. Learning state is isolated per mode pack (`jepa_probe_v2:<modeId>`) so one venue's pseudo-labels never pollute another. "Reset learning" restores the initial weights (an ops action). The manual feedback buttons are gone.
 - **Gray-zone arbitration queue**: `escalate` cases queue under a hard budget cap (20/hour) with per-track dedup (15 s TTL); milestone M2 bridges the vus slow brain (VLM arbitration) whose verdicts feed back as pseudo-labels (protocol in the design doc §8). Without the bridge the edge stays fully autonomous.
 
 ## Hikvision RTSP intake (verified)
@@ -98,7 +98,7 @@ See `harmony/README.md`. The core runs in an ArkWeb component; `javaScriptProxy`
 ## Development: tests, CI and multi-copy sync
 
 ```bash
-node --test tests/core.test.mjs     # 46 unit tests (node:test, zero deps)
+node --test tests/core.test.mjs     # 50 unit tests (node:test, zero deps)
 bash scripts/sync-web.sh            # web/ → android assets + harmony rawfile
 bash scripts/sync-web.sh --check    # consistency check only (same as CI)
 ```
@@ -111,7 +111,7 @@ CI (node 20/22 matrix): JS syntax checks → unit tests → three-copy consisten
 |----|------|
 | WHEP signaling end-to-end | ✅ verified (MediaMTX v1.20.0 + H.264 test stream, OPTIONS→POST→PATCH→DELETE all pass) |
 | Probe-head offline accuracy | ✅ 98.15% (162 samples, `web/jepa_probe_init.json`, inherited as measured from the predecessor) |
-| Unit tests / CI | ✅ 46 tests green (incl. two-mode acceptance + cleanliness meta-tests), node 20/22 matrix |
+| Unit tests / CI | ✅ 50 tests green (incl. two-mode acceptance, cleanliness, schema contract, fail-closed meta-tests), node 20/22 matrix |
 | On-device fps/latency | ⏳ pending — telemetry already records per-frame `detMs/trackMs/motionRatio`; export CSV/JSON for measured data |
 
 Model size & strategy: YOLOv8s fp32 43 MB + DINOv2 85 MB; a single wasm-side inference takes seconds — hence detection is **trigger-based** (gating + cooldown) rather than per-frame, and JEPA runs only on confirmed targets with lazy loading.
@@ -120,7 +120,7 @@ Model size & strategy: YOLOv8s fp32 43 MB + DINOv2 85 MB; a single wasm-side inf
 
 ## Platform roadmap
 
-Milestones M1 (discrimination automation) → M1.5 (standalone repo + config governance) → **M1.6 (platform consolidation: domain-free core + two-mode acceptance + evidence events, this release)** → M2 (vus bridge arbitration feedback) → M3 (spatiotemporal rules + open-set + smoke/fire pack) → M4 (multi-camera scheduling + health monitoring) → M5 (retraining loop + evaluation gates + alert sinks + license decision) → M6 (multi-stream gateway box). Details and risks in [docs/semantic-camera-design.md](docs/semantic-camera-design.md).
+Milestones M1 (discrimination automation) → M1.5 (standalone repo + config governance) → M1.6 (platform consolidation: domain-free core + two-mode acceptance + evidence events) → **M1.7 (provenance hardening: fail-closed mode selection + evidence provenance fields + self-training off by default, this release)** → P1 (real restricted-area / single-source model assets / model unbinding) → M2 (vus bridge arbitration feedback) → M3 (spatiotemporal rules + open-set + smoke/fire pack) → M4 (multi-camera scheduling + health monitoring) → M5 (retraining loop + evaluation gates + alert sinks + license decision — the precondition for enabling self-training) → M6 (multi-stream gateway box). Details and risks in [docs/semantic-camera-design.md](docs/semantic-camera-design.md).
 
 ## Platforms & hardware
 

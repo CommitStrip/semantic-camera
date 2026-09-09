@@ -299,6 +299,12 @@ class OnnxDetector{
             graphOptimizationLevel:'all'
           });
           this.loaded=true;
+          // 模型内容 sha256 后台补齐（fire-and-forget；进证据事件的 models 字段——
+          // 文件名不是版本，哈希才是）
+          fetch(this.modelPath).then(r=>r.arrayBuffer())
+            .then(b=>sha256Hex(new Uint8Array(b)))
+            .then(h=>{ this.modelSha256=h; })
+            .catch(()=>{ this.modelSha256=null; });
           return true;
         }finally{
           this.loading=false;
@@ -518,11 +524,15 @@ const stage=document.getElementById('stage');
 const teleOut=document.getElementById('tele');
 
 // 场所模式包：?mode= 参数选择，缺省首包（注册表在 mode-packs.js——领域数据唯一居所）
-const pack=window.SEMANTIC_GET_MODE_PACK(new URLSearchParams(location.search).get('mode'));
-// 配置治理 fail-closed：模式包不合法则拒绝布防（startLoop 拒绝启动），不带病上线
-const packErrs=validatePack(pack);
-let policy=new JepaPolicy(pack);          // 四态全自动裁决（无人工判定环节）
-let arb=new ArbitrationQueue(pack.arb);   // 慢脑仲裁队列（预算硬上限 + 轨迹去重）
+// fail-closed：未知模式返回 null，绝不静默回退到别的场所（选错模式比配置非法更危险）
+const modeParam=new URLSearchParams(location.search).get('mode');
+const pack=window.SEMANTIC_GET_MODE_PACK(modeParam);
+const packErrs=(modeParam && !pack) ? ['未知模式：'+modeParam+'（拒绝布防）']
+  : validatePack(pack);
+// 配置指纹：进入每条证据事件，证明当时生效的模式包内容（非加密哈希，防漂移不防篡改）
+const MODE_HASH=pack ? stableHash(pack) : null;
+let policy=pack ? new JepaPolicy(pack) : null;          // 四态全自动裁决（无人工判定环节）
+let arb=pack ? new ArbitrationQueue(pack.arb) : null;   // 慢脑仲裁队列（预算硬上限 + 轨迹去重）
 let stream=null, running=false, raf=null;
 let srcCanvas=document.createElement('canvas');
 let sctx=srcCanvas.getContext('2d');
@@ -530,15 +540,18 @@ let zoom=1, zoomTarget=1, modeFollow=true;
 let tracker=new Tracker();
 let motionGate=new MotionGate();
 // 检测器可插拔：mock（确定性脚本/无模型演示）或 onnx（模式包指定模型）
-let detector=pack.detector.engine==='mock' ? new MockDetector(pack) : new OnnxDetector(pack);
-let jepa=pack.discriminator ? new JepaDiscriminator(pack) : null;   // null=检测器权威模式
+let detector=pack
+  ? (pack.detector.engine==='mock' ? new MockDetector(pack) : new OnnxDetector(pack))
+  : null;
+let jepa=pack && pack.discriminator ? new JepaDiscriminator(pack) : null;   // null=检测器权威模式
 let lastDet=0;
 let detecting=false;                // 慢系统在飞标志：wasm 推理期间 raf 重入不重复派发
 let frameCount=0, flip=false;
 let pendingJepa=null;      // 最近一次裁决(供 HUD 显示)
-document.getElementById('modeName').textContent=packErrs.length
-  ? '⚠ 模式包非法：'+packErrs[0]+'（拒绝布防）'
-  : pack.name+' · '+(pack.status==='design'?'设计态(mock 演示)':'JEPA 全自动判别')
+document.getElementById('modeName').textContent=
+  (modeParam && !pack) ? '⚠ 未知模式：'+modeParam+'（拒绝布防）'
+  : packErrs.length ? '⚠ 模式包非法：'+packErrs[0]+'（拒绝布防）'
+  : pack.name+' · v'+pack.version+' · '+(pack.status==='design'?'设计态(mock 演示)':'JEPA 全自动判别')
     +(pack.schedule?' · 定时布防':'');
 
 // 变焦状态(平滑)
@@ -731,7 +744,7 @@ function stop(){
 // ---------- 主循环 ----------
 function startLoop(){
   // fail-closed：模式包校验不过拒绝布防（渲染层仍可预览画面，但不进流水线）
-  if(packErrs.length){ toast('模式包配置非法，拒绝布防'); return; }
+  if(packErrs.length){ toast('模式包配置非法或未知模式，拒绝布防'); return; }
   running=true;
   if(!tele.recording) tele.start();
   const resize=()=>{ const r=overlay.getBoundingClientRect();
@@ -822,8 +835,11 @@ async function loop(){
             const trk2=tracker.tracks.get(top.trackId);
             if(trk2){ trk2.lastJepaAt=now; trk2.verdict=verdict; }  // 裁决挂轨迹（告警语义用）
             if(verdict.action==='alert'||verdict.action==='clear'){
-              // 边缘自训练：logreg 头与原型距离双信号一致才更新，防止错误自我强化
-              if(shouldSelfTrain(jepa.probe,feat,pack.selfTrain)
+              // 边缘自训练：默认关闭（enabled:false）——logreg 头与原型距离并非
+              // 独立证据（同一特征空间），在冻结 golden set/版本化回滚/开放集拒识
+             // 完备（M5 治理栈）前不得在线修改判别头；开启后双信号一致才更新
+              if(pack.selfTrain && pack.selfTrain.enabled===true
+                 && shouldSelfTrain(jepa.probe,feat,pack.selfTrain)
                  && (!trk2 || now-(trk2.autoLearnedAt||0)>pack.selfTrain.cooldownMs)){
                 const n=jepa.learn(feat,
                   verdict.label===pack.discriminator.classes[1]?1:0, pack.selfTrain.lr);
@@ -855,8 +871,9 @@ async function loop(){
           const act=dec.action;
           const dist=estimateDist(t.box[3]*vh,vh,sizeForClass(pack,t.cls));
           tele.conf({id:t.id,dist,act,armed});
-          // 版本化证据事件（sc.evidence/v1）：检测置信与判别置信分立，
-          // 告警级事件附裁剪帧——供机器消费、审计与回放
+          // 版本化证据事件（sc.evidence/v1）：稳定事件 ID、双时间戳、配置指纹、
+          // 模型/策略版本、检测置信与判别置信分立，告警级事件附裁剪帧——
+          // 供机器消费、审计与回放
           let cropJpeg=null;
           if(act==='alert' && armed){
             try{
@@ -869,20 +886,32 @@ async function loop(){
               cropJpeg=cw.toDataURL('image/jpeg',0.6);
             }catch(e){}
           }
-          tele._log({ty:'ev',ev:buildEvidenceEvent({
+          const ev=buildEvidenceEvent({
             kind: act==='alert'?'alert':(act==='escalate'?'arbitration':'record'),
-            timeIso:new Date().toISOString(),
-            mode:pack.id, modeVersion:pack.version,
+            timeIso:new Date().toISOString(), sourceTs:video.currentTime,
+            mode:pack.id, modeVersion:pack.version, modeHash:MODE_HASH,
             trackId:t.id, cls:t.cls, clsConf:t.conf===undefined?null:t.conf,
             bbox:t.box, dist,
             belief: v ? {label:v.label, conf:v.conf, probeVersion:jepa?jepa.rid:null} : null,
             decision:{action:dec.action, via:dec.via, armed,
               reason: v ? 'discriminator-verdict' : 'detector-authority'},
-            models:{ detector: pack.detector.engine==='onnx'?pack.detector.model:'mock',
+            models:{ detector:{ engine:pack.detector.engine,
+                name:pack.detector.engine==='onnx'?pack.detector.model:'mock-script',
+                sha256:(detector&&detector.modelSha256)||null },
               discriminator: pack.discriminator?pack.discriminator.probe:null,
-              probeState: probeStorageKey(pack.id) },
+              probeState: jepa?jepa.storageKey:null },
             evidence:{videoTs:video.currentTime, frame:frameCount, cropJpeg},
-          })});
+          });
+          tele._log({ty:'ev',ev});
+          // 证据内容哈希尽力补齐（异步写回事件对象，导出时已带上）
+          if(cropJpeg && typeof atob==='function'){
+            try{
+              const bstr=atob(cropJpeg.split(',')[1]);
+              const bytes=new Uint8Array(bstr.length);
+              for(let i=0;i<bstr.length;i++) bytes[i]=bstr.charCodeAt(i);
+              sha256Hex(bytes).then(h=>{ ev.evidence.cropSha256='sha256:'+h; }).catch(()=>{});
+            }catch(e){}
+          }
           if(act==='alert' && armed)
             toast('⚠ 已确认'+(v?v.label+' '+(v.conf*100).toFixed(0)+'%':'目标')+' #'+t.id);
           else if(act==='escalate' && armed){

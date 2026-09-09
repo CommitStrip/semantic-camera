@@ -179,11 +179,13 @@ function validatePack(pack) {
     ? disc.alertConf : 0.5;
   const st = pack.selfTrain;
   if (st !== null && st !== undefined) {
-    if (typeof st !== 'object' || !(st.minConf > floor) ||
+    if (typeof st !== 'object' ||
+        (st.enabled !== undefined && typeof st.enabled !== 'boolean') ||
+        !(st.minConf > floor) ||
         !(st.marginRatio > 0 && st.marginRatio <= 1) || !(st.cooldownMs > 0) || !(st.lr > 0))
       errs.push('selfTrain 闸门非法或未严于判别告警闸门');
   } else if (disc && typeof disc === 'object' && st === undefined) {
-    errs.push('有判别器时必须显式声明 selfTrain（可为 null 禁用）');
+    errs.push('有判别器时必须显式声明 selfTrain（null 禁用，或 {enabled:false,…} 关闭）');
   }
   if (pack.schedule !== undefined) {
     const ok = Array.isArray(pack.schedule) && pack.schedule.length > 0 && pack.schedule.every(w =>
@@ -351,25 +353,61 @@ class MockDetector {
 
 // ---------- 证据事件（机器可消费的版本化事件，从"帧"到"有证据的事件"） ----------
 const EVIDENCE_SCHEMA = 'sc.evidence/v1';
-// o: {kind, timeIso, cameraId, mode, modeVersion,
+const POLICY_VERSION = 'four-state/2';
+
+// 稳定序列化（键排序）+ 稳定哈希（FNV-1a，非加密）：用于配置指纹与变更检测，
+// 明确不用于防篡改（防篡改哈希见 sha256Hex 与 M5 模型清单）
+function stableStringify(v) {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v);
+  if (Array.isArray(v)) return '[' + v.map(x => stableStringify(x)).join(',') + ']';
+  const keys = Object.keys(v).filter(k => v[k] !== undefined).sort();
+  return '{' + keys.map(k => JSON.stringify(k) + ':' + stableStringify(v[k])).join(',') + '}';
+}
+function stableHash(v) {
+  const s = stableStringify(v);
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = (h * 0x01000193) >>> 0;          // FNV-1a 32bit，uint 乘法
+  }
+  return 'fnv1a:' + h.toString(16).padStart(8, '0');
+}
+// 内容 sha256（十六进制）。crypto.subtle 在 Node 20/22 与现代浏览器均可用；
+// 用于模型文件与证据内容的防篡改指纹（文件名不是版本，哈希才是）
+async function sha256Hex(bytes) {
+  const buf = (bytes instanceof Uint8Array) ? bytes
+    : (bytes instanceof ArrayBuffer) ? new Uint8Array(bytes) : bytes;
+  const d = await globalThis.crypto.subtle.digest('SHA-256', buf);
+  return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// o: {kind, timeIso, sourceTs, cameraId, eventId, nowMs,
+//     mode, modeVersion, modeHash,
 //     trackId, cls, clsConf, bbox, dist,
 //     belief:{label,conf,score,probeVersion}|null,      // 判别器置信——独立于检测置信
 //     decision:{action, via:'discriminator'|'detector', armed, reason},
-//     models:{detector, discriminator, probe},           // 版本/文件口径
-//     evidence:{videoTs, frame, cropJpeg?}}
+//     models:{detector:{engine,name,sha256}, discriminator, probeState},
+//     evidence:{videoTs, frame, cropJpeg?, cropSha256?}}
 function buildEvidenceEvent(o) {
   const action = o.decision && o.decision.action;
+  const ms = o.nowMs === undefined ? Date.now() : o.nowMs;
   return {
     schema: EVIDENCE_SCHEMA,
-    kind: o.kind,                                   // 'alert'|'arbitration'|'record'|'disarm'
-    time: o.timeIso,
+    // 稳定事件 ID：去重/重放/外部告警幂等的关键（camera:mode:kind:track:毫秒）
+    event_id: o.eventId || ((o.cameraId || 'cam') + ':' + o.mode + ':' +
+      (o.kind || 'record') + ':' + (o.trackId === undefined ? '-' : o.trackId) + ':' + ms),
+    kind: o.kind || 'record',                       // 'alert'|'arbitration'|'record'|'disarm'
+    // 双时间戳：source=视频源时间（RTSP 抖动/延迟分析），processed=本地处理完成时间
+    time: { source: o.sourceTs === undefined ? null : o.sourceTs, processed: o.timeIso || null },
     camera: o.cameraId || null,
-    mode: { id: o.mode, version: o.modeVersion === undefined ? null : o.modeVersion },
+    mode: { id: o.mode, version: o.modeVersion === undefined ? null : o.modeVersion,
+            hash: o.modeHash || null },             // mode_hash：证明当时生效的配置快照指纹
+    policy_version: POLICY_VERSION,                 // 模型没变、裁决逻辑也可能变——独立版本
     track: { id: o.trackId, cls: o.cls, conf: o.clsConf, bbox: o.bbox || null, dist: o.dist || null },
     belief: o.belief || null,
     decision: o.decision,
     models: o.models || {},
-    evidence: o.evidence || null,
+    evidence: o.evidence || null,                   // 证据内容应带 sha256（防替换）
     action_recommended: action === 'alert' ? 'notify' : (action === 'escalate' ? 'review' : 'record'),
   };
 }
@@ -379,5 +417,6 @@ if (typeof module!=='undefined' && module.exports) {
   module.exports = { CFG, estimateDist, sizeForClass, iou, Tracker, MotionGate,
     validatePack, isArmed, JepaPolicy, ArbitrationQueue,
     logregScore, protoDist, weightedAvg, probeLearn, shouldSelfTrain, normalizeProbe,
-    probeStorageKey, MockDetector, EVIDENCE_SCHEMA, buildEvidenceEvent };
+    probeStorageKey, MockDetector, EVIDENCE_SCHEMA, POLICY_VERSION,
+    stableStringify, stableHash, sha256Hex, buildEvidenceEvent };
 }

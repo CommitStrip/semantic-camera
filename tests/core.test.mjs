@@ -13,7 +13,8 @@ const require = createRequire(import.meta.url);
 const { CFG, estimateDist, sizeForClass, iou, Tracker, MotionGate,
   validatePack, isArmed, JepaPolicy, ArbitrationQueue,
   logregScore, protoDist, weightedAvg, probeLearn, shouldSelfTrain, normalizeProbe,
-  probeStorageKey, MockDetector, EVIDENCE_SCHEMA, buildEvidenceEvent } = require('../web/core.js');
+  probeStorageKey, MockDetector, EVIDENCE_SCHEMA, POLICY_VERSION,
+  stableStringify, stableHash, sha256Hex, buildEvidenceEvent } = require('../web/core.js');
 const { MODE_PACKS, getModePack } = require('../web/mode-packs.js');
 
 // 检出构造器：bbox [x,y,w,h] 归一化，cx/cy 为中心
@@ -186,10 +187,12 @@ test('MotionGate 像素差阈值边界：恰为 25 不触发，26 触发', () =>
 
 // ==================== 模式包注册表（领域数据唯一居所） ====================
 
-test('模式包注册表：双包存在，未知/缺省回退首包', () => {
+test('模式包注册表：双包存在；缺省回退首包但未知模式必须 fail-closed', () => {
   assert.ok(MODE_PACKS.airfield && MODE_PACKS['restricted-area'], '必须同时有两个场所包');
-  assert.equal(getModePack(undefined), MODE_PACKS.airfield);
-  assert.equal(getModePack('nope'), MODE_PACKS.airfield);
+  assert.equal(getModePack(undefined), MODE_PACKS.airfield, '缺省（无参数）回退首包');
+  assert.equal(getModePack('restricted-area'), MODE_PACKS['restricted-area']);
+  assert.equal(getModePack('restricted-arae'), null, '拼错模式名必须失败，严禁静默回退');
+  assert.equal(getModePack('nope'), null, '未知模式返回 null，由启动流程拒绝布防');
 });
 
 test('模式包不变量（schema v3）：两包差异必须足够大，证明抽象非单场景定制', () => {
@@ -202,6 +205,8 @@ test('模式包不变量（schema v3）：两包差异必须足够大，证明�
       assert.ok(p.discriminator.alertConf > 0.5 && p.discriminator.alertConf < 1);
       assert.ok(p.selfTrain === null || p.selfTrain.minConf > p.discriminator.alertConf,
         '自训练闸门必须严于判别告警闸门');
+      // 自训练默认必须关闭：双信号非独立证据，治理栈（M5）完备前不得在线修改判别头
+      assert.equal(p.selfTrain.enabled, false, p.id + ' 自训练必须默认关闭');
     } else {
       assert.equal(p.selfTrain, null, '无判别头必须显式 selfTrain:null');
     }
@@ -421,22 +426,47 @@ test('MockDetector：时间线脚本确定性触发与像素换算', async () =>
 
 // ==================== 证据事件（sc.evidence/v1） ====================
 
-test('证据事件：字段完整、置信分立、处置建议映射', () => {
+test('证据事件：溯源字段完整（event_id/双时间戳/配置指纹/策略版本/模型哈希）', () => {
   const ev = buildEvidenceEvent({
-    kind: 'alert', timeIso: '2026-09-09T02:32:10.000Z',
-    mode: 'restricted-area', modeVersion: 1,
+    kind: 'alert', timeIso: '2026-09-09T02:32:10.000Z', sourceTs: 12.5,
+    eventId: 'cam-01:restricted-area:alert:17:1725856420',
+    mode: 'restricted-area', modeVersion: 1, modeHash: 'fnv1a:deadbeef',
     trackId: 17, cls: 'person', clsConf: 0.82, bbox: [0.4, 0.3, 0.12, 0.35], dist: 6.1,
     belief: { label: 'person', conf: 0.82, probeVersion: 3 },
     decision: { action: 'alert', via: 'detector', armed: true, reason: 'detector-authority' },
-    models: { detector: 'mock', discriminator: null, probeState: 'jepa_probe_v2:restricted-area' },
+    models: { detector: { engine: 'mock', name: 'mock-script', sha256: null },
+      discriminator: null, probeState: 'jepa_probe_v2:restricted-area' },
     evidence: { videoTs: 12.5, frame: 375, cropJpeg: 'data:image/jpeg;base64,…' },
   });
   assert.equal(ev.schema, EVIDENCE_SCHEMA);
+  assert.equal(ev.event_id, 'cam-01:restricted-area:alert:17:1725856420', '稳定事件 ID 用于幂等/去重');
+  assert.equal(ev.time.source, 12.5, '视频源时间（RTSP 抖动分析）');
+  assert.equal(ev.time.processed, '2026-09-09T02:32:10.000Z', '本地处理时间');
+  assert.equal(ev.mode.hash, 'fnv1a:deadbeef', '配置指纹：证明当时生效的模式包内容');
+  assert.equal(ev.policy_version, POLICY_VERSION, '裁决逻辑独立版本');
   assert.equal(ev.action_recommended, 'notify');
   assert.equal(ev.track.id, 17);
   assert.equal(ev.belief.probeVersion, 3, '判别置信独立成段');
-  assert.equal(ev.decision.armed, true);
   assert.ok(ev.evidence.cropJpeg.startsWith('data:image/jpeg'), '告警级事件附裁剪帧');
+});
+
+test('证据事件：event_id 自动生成且确定性（注入时钟）', () => {
+  const ev = buildEvidenceEvent({ kind: 'arbitration', timeIso: 't',
+    nowMs: 1725856420000, mode: 'x', trackId: 7, cls: 'y', clsConf: 0.5,
+    decision: { action: 'escalate' } });
+  assert.equal(ev.event_id, 'cam:x:arbitration:7:1725856420000');
+  assert.equal(ev.time.source, null, '未提供源时间显式为 null');
+});
+
+test('证据事件 schema 契约：必需键齐全（兼容性闸门）', () => {
+  const ev = buildEvidenceEvent({ kind: 'record', timeIso: 't',
+    mode: 'm', trackId: 1, cls: 'c', clsConf: 0.9, decision: { action: 'clear' } });
+  for (const k of ['schema', 'event_id', 'kind', 'time', 'camera', 'mode',
+    'policy_version', 'track', 'belief', 'decision', 'models', 'evidence',
+    'action_recommended']) {
+    assert.ok(k in ev, '缺键 ' + k);
+  }
+  assert.equal(ev.action_recommended, 'record');
 });
 
 test('证据事件：action_recommended 按裁决动作映射', () => {
@@ -447,6 +477,27 @@ test('证据事件：action_recommended 按裁决动作映射', () => {
   assert.equal(mk('escalate').action_recommended, 'review');
   assert.equal(mk('clear').action_recommended, 'record');
   assert.equal(mk('suppress').action_recommended, 'record');
+});
+
+// ==================== 溯源哈希（配置指纹 / 内容指纹） ====================
+
+test('stableStringify/stableHash：键序无关、值敏感（配置指纹）', () => {
+  const a = { x: 1, y: { b: 2, a: [3, { d: 4, c: 5 }] } };
+  const b = { y: { a: [3, { c: 5, d: 4 }], b: 2 }, x: 1 };
+  assert.equal(stableStringify(a), stableStringify(b), '键序不影响指纹');
+  assert.equal(stableHash(a), stableHash(b));
+  const c = JSON.parse(JSON.stringify(a)); c.y.b = 3;
+  assert.notEqual(stableHash(a), stableHash(c), '阈值变化必须改变指纹');
+  assert.ok(stableHash(a).startsWith('fnv1a:'));
+});
+
+test('sha256Hex：标准向量（防篡改内容指纹）', async () => {
+  const enc = s => new TextEncoder().encode(s);
+  assert.equal(await sha256Hex(enc('')),
+    'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
+  assert.equal(await sha256Hex(enc('abc')),
+    'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
+  assert.equal((await sha256Hex(enc('abc'))).length, 64);
 });
 
 // ==================== 双模式端到端验收（平台抽象的核心证明） ====================
