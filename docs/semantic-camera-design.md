@@ -1,6 +1,6 @@
 # 语义摄像头（Semantic Camera）平台设计
 
-*v2.2 · 2026-09-09 · 本仓为库系主线；v1（反无人机单场景判别自动化）已在前身仓落地；v2 吸收第一轮外部架构审查（§0.1–0.2、§4 v3 schema、§14 证据事件）；v2.2 吸收第二轮审查（P0 fail-closed 模式选择、证据溯源字段、自训练默认关闭、红线措辞修正）*
+*v2.3 · 2026-09-09 · 本仓为库系主线；v1（反无人机单场景判别自动化）已在前身仓落地；v2 吸收第一轮外部架构审查（§0.1–0.2、§4 v3 schema、§14 证据事件）；v2.2 吸收第二轮审查（P0 fail-closed 模式选择、证据溯源字段、自训练默认关闭、红线措辞修正）；v2.3 收录 Vision Agents 调研结论与借鉴边界（§19，含告警出口确定性主链 §14、DetectorProvider 契约 §16）*
 
 ---
 
@@ -254,7 +254,7 @@ EdgeCore → 桥：{type:'arb-request', trackId, packId, task:'main',
 
 要点：**检测置信（track.conf）与判别置信（belief.conf）分立**，decision 带裁决来源与布防状态，告警级事件附裁剪帧。全量事件随遥测导出（CSV/JSON/JSONL），构成 §12 评测与 §11 复训的数据底座。schema 契约有单测把守（必需键齐全）。
 
-**告警出口（M5）**：`sinks` 作为模式包数据：`hud`（默认）/ `snapshot`（事件快照落盘）/ `webhook`（JSON POST，重试退避）/ `push`（移动端）。出口统一消费上述证据事件信封，出口不改变告警语义，只做路由。
+**告警出口（M5）**：可靠性主链是**确定性**的：`证据事件 → Effect Policy（模式包数据）→ Outbox（本地持久化，at-least-once）→ sinks`：`hud`（默认）/ `snapshot`（事件快照落盘）/ `webhook`（JSON POST，重试退避）/ `MQTT` / `email` / `本地声光` / **MCP 适配器（可选）**。MCP 只能作为出口适配器之一（服务 Agent 生态：查事件/调证据/请求复析/建工单），**不得作为告警主链**——模型工具调用无法提供 at-least-once、幂等与确定性重试；幂等与去重由 `event_id` 承担（§19）。出口不改变告警语义，只做路由。
 
 ## 15. 部署形态矩阵
 
@@ -266,7 +266,9 @@ EdgeCore → 桥：{type:'arb-request', trackId, packId, task:'main',
 
 ## 16. 检测器可替换性与许可证退出路径
 
-模式包把检测模型抽象为 `detector` 路径，**架构上检测器可插拔**。现用 YOLOv8 权重 AGPL-3.0 传染、DINOv2 权重 CC-BY-NC 非商业——演示与科研无碍，**商业化前必须替换**：检测器换宽松许可架构（现代 opset 重导出，顺带解决量化失效问题），判别塔确认商用条款或换自训塔。该决策进 M5 前置清单，属用户商业裁决项。
+模式包把检测模型抽象为 `detector` 配置，**架构上检测器可插拔**。扩展不走 engine 枚举膨胀（onnx|mock|webgpu|remote|…），统一 **DetectorProvider 契约**：`load(config) / infer(frame, ctx) / health() / close()`——engine 名称只是 provider registry 的键；能力声明（输入/输出类型、是否产事件）与运行属性（并发/背压/超时/错误降级）随 provider 注册（契约借鉴 Vision Agents processor 设计，见 §19）。
+
+现用 YOLOv8 权重 AGPL-3.0 传染、DINOv2 权重 CC-BY-NC 非商业——演示与科研无碍，**商业化前必须替换**：检测器换宽松许可架构（现代 opset 重导出，顺带解决量化失效问题；人员检测候选 RF-DETR 待许可证单独核实，§19），判别塔确认商用条款或换自训塔。该决策进 M5 前置清单，属用户商业裁决项。
 
 ## 17. 里程碑
 
@@ -279,9 +281,9 @@ EdgeCore → 桥：{type:'arb-request', trackId, packId, task:'main',
 | **P1 遗留（下一轮优先）** | ① restricted-area 真实化：真人员检测模型 + polygon zone + 进出/越线/持续 + 事件录像缓冲 + 真实视频 benchmark（M3 主体）；② 模型资产单源化：assets/models/ + 构建期 staging，消除三份物理副本；③ 模型解绑：核心不捆绑受限权重，model-manifest + 下载器 + 第三方声明（商用前置，含用户决策） | 待做 |
 | **M2 vus 桥** | WS 协议 §8 全量落地，仲裁回灌闭环 | 待做 |
 | **M3 时空规则引擎 + 开放集** | zones/dwell/count/composite + unknown 拒识 + 油库烟火第三模式包 + restricted-area 真实人员检测模型接入 | 待做 |
-| **M4 多相机 + VenueController + 健康监控** | 多路预算调度 + §9 健康项 + 学习状态全键隔离 | 待做 |
-| **M5 复训闭环 + 评测闸门 + 告警出口** | 影子晋升/校准集防线/每包基准集/sinks/许可证决策——**自训练按场所开启的前置条件** | 待做 |
-| **M6 部署形态扩展** | 单盒多路网关实测与发布 | 待做 |
+| **M4 多相机 + VenueController + 健康监控** | 多路预算调度 + §9 健康项 + 学习状态全键隔离 + **MediaTransport 抽象**（RTSP/WHEP/HLS/USB 不进模式包、不与检测器耦合，§19） | 待做 |
+| **M5 复训闭环 + 评测闸门 + 告警出口** | 影子晋升/校准集防线/每包基准集/sinks（确定性 Outbox 主链 + MCP 可选适配器，§14）/许可证决策——**自训练按场所开启的前置条件** | 待做 |
+| **M6 部署形态扩展** | 单盒多路网关实测与发布（Prometheus 指标维度参考 §19；先单机做实再横向扩展） | 待做 |
 
 ## 18. 风险与开放问题
 
@@ -301,3 +303,22 @@ EdgeCore → 桥：{type:'arb-request', trackId, packId, task:'main',
 | 模式包规则与模型逻辑耦合回潮（核心里出现 `if cls==='x'`） | 洁净度元测试是永久闸门：领域词进核心即 CI 失败；规则表达只允许走模式包数据（§6 的 zones/composite 同样） |
 | 隐式领域假设残留（二分类/单告警类别/固定尺寸/单目标事件） | 洁净度测试只防文本不防假设；第三种事件形态（烟火/人群/遗留物，P2）是真正的证伪手段 |
 | 仓库叙事与商业命名 | 本仓以 semantic-camera 为技术名，商业名待用户裁决 |
+
+## 19. 相关工作与借鉴：Vision Agents 调研（2026-09-09）
+
+**调研对象**：GetStream/Vision-Agents（Apache-2.0，Python，8.1k star，v0.6.x）——实时语音/视频**会话** Agent 框架：可插拔帧处理器（ultralytics/Roboflow/自定义 ONNX）+ 实时多模态 LLM（Gemini Live / OpenAI Realtime）+ STT/TTS + 工具调用/MCP。**与本仓的关系判断：不同问题域（会话式互动 vs 事件式 24×7 场所监控），采纳结论"参考，不引入"**——量化口径：直接引入框架 0%、复制代码 0–5%、借鉴接口模式 20–30%、借鉴运维设计 30–40%、不需要改变现有技术路线。
+
+**传输依赖的准确表述**：默认与最成熟的生产路径依赖 Stream 云 RTC；框架接口层有 `EdgeTransport` 抽象（存在 Tencent RTC transport 等第三方实现），**并非硬绑定 Stream**——但目前没有现成的纯局域网/自托管 RTSP-WHEP transport 能满足本仓"视频不出场"红线，自行实现 transport 的成本也不值得。隐私冲突成立，理由是"无现成合规路径且自建不划算"，而非"框架做不到"。
+
+**有分量的第三方佐证（官方 Current Limitations，可直接引用）**：持续视频约 30s 后上下文退化；多数场景需要专用小模型 + 大模型组合；纯视频流不触发实时模型响应（需音频/文本驱动）；小字识别易幻觉。——独立印证本仓"触发式慎思 + 事件驱动 + 端侧专用模型 + VLM 仅接灰区"的路线。定位为**强工程佐证**（另一个成熟团队独立遇到相同约束并选择了相似分工），不是科学证明，更不证明其在安防生产环境的 24×7 稳定性。
+
+**采纳的模式**（按价值排序）：
+
+1. **Processor/Provider 生命周期契约**（最高价值）：`load / infer / health / close` + 能力声明（输入/输出类型、是否修改媒体、是否产事件）+ 运行属性（并发/背压/最大处理帧率/超时/错误降级）+ 可观测性（耗时/跳帧/错误/模型版本）→ 本仓落地为 DetectorProvider 契约（§16）；
+2. **Transport 与处理/策略解耦**（M4 方向）：`MediaTransport`（RTSP/WHEP/HLS/WebRTC/USB/文件）不进模式包、不与检测器耦合——传输源是部署属性，不是场所语义；分层为 MediaTransport / FrameProcessor（门控/检测/跟踪/判别）/ ModePolicy（schedule/zone/阈值/效果）；
+3. **多路网关运维设计**（M4/M6 参考）：指标维度=活跃会话数/输入输出帧率/丢帧背压/processor 延迟/模型调用延迟/队列深度/重连次数/错误率/CPU·内存；部署上**先单机做实**（watchdog + SQLite/JSONL 证据 + Prometheus endpoint），做实后再考虑横向扩展，不照搬其 K8s 架构；
+4. **MCP 仅作为可选 Effect Adapter**：告警可靠性主链必须是确定性的 `证据事件 → Effect Policy → Outbox → sinks`（webhook/MQTT/短信/本地声光/MCP 适配器）；**绝不允许"模型决定是否调用工具"成为告警主链**（模型工具调用无法提供 at-least-once/幂等/确定性重试；幂等由 event_id 承担）。MCP 适合的频段是 Agent 生态协作：查事件、调取证据、请求复析、建工单。
+
+**明确不采纳**：Stream-first RTC 传输；会话/turn 驱动运行时；持续视频→实时 LLM 路径；云端检测为默认路径；模型驱动告警投递；Python 框架依赖。
+
+**对 P1 的间接提示**：restricted-area 真实人员检测模型候选——RF-DETR（Roboflow 开源 DETR 系）本地路径值得调研，但**代码与权重许可证需单独核实**；Moondream 支持本地 CUDA 但不等于适合 WebView/wasm 端侧。选型仍按 §16 许可证退出路径执行。
