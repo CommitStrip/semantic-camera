@@ -1,0 +1,9 @@
+# 换行策略：代码文件自动处理；资产（模型/运行时/素材）一律按字节存取，
+# 禁止 EOL 转换——sha256 完整性闸门依赖字节级一致（见 assets/manifest.json）
+* text=auto
+assets/** -text
+*.onnx -text
+*.wasm -text
+*.webm -text
+*.mp4 -text
+*.mjs -text

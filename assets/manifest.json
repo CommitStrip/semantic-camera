@@ -24,7 +24,7 @@
     },
     {
       "path": "assets/runtime/ort-wasm-simd-threaded.mjs",
-      "sha256": "2a96ec96baba994fd4dd82d1563dd850f6b0bcd232c61cdc4e7bb6112c65ea1b",
+      "sha256": "0a1e718d99c41b22c21f2520ff4f9e883a6b5533856e398d21816ee8eb8185d3",
       "size": 24239,
       "source": "onnxruntime-web 1.x official wasm bundle",
       "license": "MIT"
