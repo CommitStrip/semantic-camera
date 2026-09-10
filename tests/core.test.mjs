@@ -16,7 +16,7 @@ const { CFG, estimateDist, sizeForClass, iou, Tracker, MotionGate,
   probeStorageKey, MockDetector, EVIDENCE_SCHEMA, POLICY_VERSION,
   stableStringify, stableHash, sha256Hex, buildEvidenceEvent,
   HEAD_DECODERS, decodeV8Head, decodeNanoDetHead, boxIoU, nms,
-  pointInPolygon, ZoneEngine, applyZonePolicy } = require('../web/core.js');
+  pointInPolygon, ZoneEngine, applyZonePolicy, BridgeLink } = require('../web/core.js');
 const { MODE_PACKS, getModePack } = require('../web/mode-packs.js');
 const { createHash } = await import('node:crypto');
 
@@ -411,6 +411,58 @@ test('normalizeProbe：旧命名质心 → 归一化形态；已归一化透传�
 test('学习状态按模式包隔离（场所间不互相污染）', () => {
   assert.notEqual(probeStorageKey('airfield'), probeStorageKey('restricted-area'));
   assert.ok(probeStorageKey('x').startsWith('jepa_probe_v2:'));
+});
+
+// ==================== vus 桥客户端链路（BridgeLink） ====================
+
+test('BridgeLink：离线入队→open 后按序发出→裁决按 requestId 关联', async () => {
+  let handlers = null; const sent = [];
+  const bl = new BridgeLink({
+    url: 'ws://x', token: 'tk',
+    transportFactory: (url, h) => { handlers = h; return { send: t => sent.push(JSON.parse(t)), close: () => {} }; },
+    backoffBase: 10, backoffMax: 20,
+  });
+  const p = bl.request({ type: 'arb-request', requestId: 'r1' });
+  bl.connect();
+  handlers.onOpen();
+  assert.equal(sent[0].type, 'hello', 'open 后先握手');
+  assert.equal(sent[0].token, 'tk');
+  assert.equal(sent[1].requestId, 'r1', 'flush 按序发出入队案件');
+  handlers.onMessage(JSON.stringify({ type: 'arb-verdict', requestId: 'r1', label: 'drone', conf: 0.9 }));
+  const v = await p;
+  assert.equal(v.label, 'drone');
+});
+
+test('BridgeLink：响应超时拒绝（bridge-timeout）', async () => {
+  let handlers = null;
+  const bl = new BridgeLink({ url: 'ws://x', token: 'tk', timeoutMs: 30,
+    transportFactory: (url, h) => { handlers = h; return { send: () => {}, close: () => {} }; } });
+  bl.connect(); handlers.onOpen();
+  await assert.rejects(bl.request({ requestId: 't1' }), /bridge-timeout/);
+  bl.close();
+});
+
+test('BridgeLink：在途拥塞拒绝（bridge-busy）', async () => {
+  let handlers = null;
+  const bl = new BridgeLink({ url: 'ws://x', token: 'tk', maxInFlight: 1,
+    transportFactory: (url, h) => { handlers = h; return { send: () => {}, close: () => {} }; } });
+  bl.connect(); handlers.onOpen();
+  const first = bl.request({ requestId: 'a' });
+  first.catch(() => {});                 // 占位请求：故意不等待，拒绝时静默
+  await assert.rejects(bl.request({ requestId: 'b' }), /bridge-busy/);
+  bl.close();
+});
+
+test('BridgeLink：断线清空在途（bridge-offline）并进入退避', async () => {
+  let handlers = null;
+  const bl = new BridgeLink({ url: 'ws://x', token: 'tk', backoffBase: 50, backoffMax: 100,
+    transportFactory: (url, h) => { handlers = h; return { send: () => {}, close: () => {} }; } });
+  bl.connect(); handlers.onOpen();
+  const p = bl.request({ requestId: 'z' });
+  handlers.onClose();
+  await assert.rejects(p, /bridge-offline/);
+  assert.equal(bl.state, 'offline');
+  bl.close();
 });
 
 // ==================== 检测头解码器（注册表契约） ====================

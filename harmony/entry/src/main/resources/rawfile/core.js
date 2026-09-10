@@ -584,6 +584,98 @@ function buildEvidenceEvent(o) {
   };
 }
 
+// ---------- vus 桥客户端链路（纯逻辑：状态机/指数退避/请求关联/超时；传输注入以便单测） ----------
+// 语义：state offline→connecting→open；离线请求入队（上限保护），open 后按序发出；
+// 案件-裁决按 requestId 关联；超时/断线/拥塞分别以 bridge-timeout/bridge-offline/bridge-busy 拒绝，
+// 上层据此降级为边缘自治（灰区弃权语义不变，绝不虚报）。
+class BridgeLink {
+  constructor(opts) {
+    this.url = opts.url || '';
+    this.token = opts.token || '';
+    this.timeoutMs = opts.timeoutMs || 30000;
+    this.maxInFlight = opts.maxInFlight || 2;
+    this.backoffBase = opts.backoffBase || 1000;
+    this.backoffMax = opts.backoffMax || 30000;
+    this.maxQueue = opts.maxQueue || 8;
+    this.transportFactory = opts.transportFactory || null; // (url, handlers) => {send, close}
+    this.onVerdict = opts.onVerdict || null;               // (verdict) — 关联 promise 之外的旁路通知
+    this.onState = opts.onState || null;                   // ('offline'|'connecting'|'open')
+    this.state = 'offline';
+    this.inFlight = new Map();                              // requestId → {resolve, reject, timer}
+    this.queue = [];
+    this.attempt = 0;
+    this.conn = null;
+    this.reconnectTimer = null;
+  }
+  _setState(s) { this.state = s; if (this.onState) this.onState(s); }
+  connect() {
+    if (!this.url || !this.transportFactory || this.state !== 'offline' || this.reconnectTimer) return;
+    this._setState('connecting');
+    this.conn = this.transportFactory(this.url, {
+      onOpen: () => {
+        this.attempt = 0;
+        this._send({ type: 'hello', token: this.token });
+        this._setState('open');
+        const q = this.queue; this.queue = [];
+        for (const p of q) this.request(p.payload).then(p.resolve, p.reject);
+      },
+      onMessage: (txt) => this._onMessage(txt),
+      onClose: () => this._onDown(),
+      onError: () => {},
+    });
+  }
+  _send(obj) { this.conn.send(JSON.stringify(obj)); }
+  request(payload) {
+    if (!this.url) return Promise.reject(new Error('bridge-not-configured'));
+    if (this.state !== 'open') {
+      this.connect();
+      return new Promise((resolve, reject) => {
+        if (this.queue.length >= this.maxQueue) {
+          const dropped = this.queue.shift();
+          dropped.reject(new Error('bridge-queue-overflow'));
+        }
+        this.queue.push({ payload, resolve, reject });
+      });
+    }
+    if (this.inFlight.size >= this.maxInFlight) return Promise.reject(new Error('bridge-busy'));
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.inFlight.delete(payload.requestId);
+        reject(new Error('bridge-timeout'));
+      }, this.timeoutMs);
+      this.inFlight.set(payload.requestId, { resolve, reject, timer });
+      try { this._send(payload); }
+      catch (e) { clearTimeout(timer); this.inFlight.delete(payload.requestId); reject(e); }
+    });
+  }
+  _onMessage(txt) {
+    let m;
+    try { m = JSON.parse(txt); } catch (e) { return; }
+    if (m.type === 'arb-verdict' && m.requestId && this.inFlight.has(m.requestId)) {
+      const e = this.inFlight.get(m.requestId);
+      clearTimeout(e.timer);
+      this.inFlight.delete(m.requestId);
+      e.resolve(m);
+      if (this.onVerdict) this.onVerdict(m);
+    }
+  }
+  _onDown() {
+    this._setState('offline');
+    this.conn = null;
+    for (const [, e] of this.inFlight) { clearTimeout(e.timer); e.reject(new Error('bridge-offline')); }
+    this.inFlight.clear();
+    const delay = Math.min(this.backoffBase * Math.pow(2, this.attempt++), this.backoffMax);
+    this.reconnectTimer = setTimeout(() => { this.reconnectTimer = null; this.connect(); }, delay);
+  }
+  close() {
+    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+    for (const [, e] of this.inFlight) { clearTimeout(e.timer); e.reject(new Error('bridge-offline')); }
+    this.inFlight.clear();
+    if (this.conn) { try { this.conn.close(); } catch (e) {} }
+    this._setState('offline');
+  }
+}
+
 // ---------- Node 单测入口（浏览器端 module 未定义，此块不执行） ----------
 if (typeof module!=='undefined' && module.exports) {
   module.exports = { CFG, estimateDist, sizeForClass, iou, Tracker, MotionGate,
@@ -592,5 +684,5 @@ if (typeof module!=='undefined' && module.exports) {
     probeStorageKey, MockDetector, EVIDENCE_SCHEMA, POLICY_VERSION,
     stableStringify, stableHash, sha256Hex, buildEvidenceEvent,
     HEAD_DECODERS, decodeV8Head, decodeNanoDetHead, boxIoU, nms,
-    pointInPolygon, ZoneEngine, applyZonePolicy };
+    pointInPolygon, ZoneEngine, applyZonePolicy, BridgeLink };
 }

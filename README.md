@@ -24,6 +24,10 @@ Current validation status: probe-head offline accuracy **98.15%** (162 authorita
 | Venue mode packs | Modes are data + a validator: `?mode=` selects, new venues plug in with zero code; domain terms live only in `web/mode-packs.js` (enforced by a CI cleanliness test); `validatePack` is fail-closed — a bad config refuses to arm |
 | Evidence events | Versioned `sc.evidence/v1` envelope: stable event ID, dual timestamps (source/processed), mode-pack config fingerprint, policy version, model SHA-256, detector and discriminator confidences kept separate, alert crop frame with its content hash — auditable, machine-consumable events |
 | Arming schedule | Mode packs may declare arming windows (overnight-capable); outside the window alerts downgrade to records and arbitration spends no budget |
+| vus bridge arbitration (M2) | Gray-zone cases escalate to a pluggable slow brain (CLIP zero-shot / ollama VLM): verdicts feed back as pseudo-labels, cases archived to JSONL; bridge down = edge stays fully autonomous, never fabricates |
+| Zone rules | Polygon zones (normalized coords): entering + dwelling past `dwellMs` escalates to an alert (`zone-intrusion`), outside-zone targets downgrade to records; read-only overlay |
+| Detector head registry | `HEAD_DECODERS`: `yolo8head` (no objectness) / `nanodethead` (GFL distribution regression) / `mock` (deterministic timeline) — the head name is a provider-registry key, extending adds no core changes |
+| Asset single-sourcing | Models/runtime live once under `assets/` (manifest with sha256/license/source), staged to the three copies at build time, CI hash gate against silent drift |
 | Smooth zoom | Pinch / slider / buttons + **target-following** auto-centering, smooth interpolation 1×-8× |
 | Distance estimation | Pinhole model with per-class size (drone 0.35 m / bird 0.20 m); digital zoom is a center crop and does not affect the reading |
 | Data traceability | IndexedDB persistence + CSV/JSON export + native bridge (Android JSONL / Harmony CSV); full chain detection→verdict→arbitration→self-training is logged |
@@ -36,6 +40,7 @@ semantic-camera/
 ├── web/core.js           # pure-logic core (config/validation/tracking/gating/policy/queue/learning math/mock detector/evidence events)
 ├── web/mode-packs.js     # venue mode-pack registry (pure data; the only home of domain terms)
 ├── gateway/              # MediaMTX gateway: Hikvision RTSP → WebRTC(WHEP)/HLS
+├── bridge/               # vus slow-brain arbitration bridge (M2): gray-zone cases → CLIP/ollama verdicts → probe feedback
 ├── android/              # Android app (Kotlin WebView shell + telemetry)
 ├── harmony/              # HarmonyOS(NEXT) app (ArkWeb shell + telemetry)
 └── docs/                 # platform design (architecture/roadmap/risks)
@@ -122,7 +127,7 @@ Model size & strategy: YOLOv8s fp32 43 MB + DINOv2 85 MB; a single wasm-side inf
 
 ## Platform roadmap
 
-Milestones M1 (discrimination automation) → M1.5 (standalone repo + config governance) → M1.6 (platform consolidation: domain-free core + two-mode acceptance + evidence events) → **M1.7 (provenance hardening: fail-closed mode selection + evidence provenance fields + self-training off by default, this release)** → **P1-①② (real restricted-area model + zone rules / single-source model assets, this release)** → M2 (vus bridge arbitration feedback) → M3 (spatiotemporal rules + open-set + smoke/fire pack) → M4 (multi-camera scheduling + health monitoring) → M5 (retraining loop + evaluation gates + alert sinks + license decision — the precondition for enabling self-training) → M6 (multi-stream gateway box). Details and risks in [docs/semantic-camera-design.md](docs/semantic-camera-design.md).
+Milestones M1 (discrimination automation) → M1.5 (standalone repo + config governance) → M1.6 (platform consolidation: domain-free core + two-mode acceptance + evidence events) → M1.7 (provenance hardening: fail-closed mode selection + evidence provenance fields + self-training off by default) → **P1-①② (real restricted-area model + zone rules / single-source model assets, this release)** → **M2 (vus bridge arbitration feedback, this release)** → M3 (spatiotemporal rules + open-set + smoke/fire pack) → M4 (multi-camera scheduling + health monitoring) → M5 (retraining loop + evaluation gates + alert sinks + license decision — the precondition for enabling self-training) → M6 (multi-stream gateway box). Details and risks in [docs/semantic-camera-design.md](docs/semantic-camera-design.md).
 
 ## Platforms & hardware
 

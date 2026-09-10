@@ -165,6 +165,13 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:20px;heigh
     <span id="modeName" style="flex:1;font-size:11px;color:var(--dim)"></span>
     <button class="btn small" id="btnProbeReset">重置学习</button>
   </div>
+  <div class="row">
+    <label>桥</label>
+    <input id="bridgeUrl" placeholder="ws://192.168.1.10:8390" style="flex:1;background:#05080d;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:8px 10px;font-size:12px;min-width:0">
+    <input id="bridgeToken" type="password" placeholder="令牌" style="flex:0 0 88px;background:#05080d;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:8px 10px;font-size:12px">
+    <button class="btn small" id="btnBridge">连接</button>
+    <span id="bridgeState" style="font-size:11px;color:var(--dim);min-width:34px;text-align:right">—</span>
+  </div>
   <div class="recpanel" id="recpanel">
     <div class="rp-head"><span>遥测记录 <b id="evCount">0 条</b></span><span>已记录 <b id="recTime">00:00</b></span></div>
     <div class="log" id="log"></div>
@@ -503,6 +510,7 @@ const MODE_HASH=pack ? stableHash(pack) : null;
 let policy=pack ? new JepaPolicy(pack) : null;          // 四态全自动裁决（无人工判定环节）
 let arb=pack ? new ArbitrationQueue(pack.arb) : null;   // 慢脑仲裁队列（预算硬上限 + 轨迹去重）
 let zoneEngine=pack ? new ZoneEngine(pack.zones) : null; // 区域规则引擎（场所时空语义）
+let pendingArb=new Map();                // requestId → {feat}（桥裁决回灌探针用）
 let stream=null, running=false, raf=null;
 let srcCanvas=document.createElement('canvas');
 let sctx=srcCanvas.getContext('2d');
@@ -694,6 +702,58 @@ document.getElementById('btnExpCSV').onclick=()=>tele.exportCSV();
 document.getElementById('btnExpJSON').onclick=()=>tele.exportJSON();
 document.getElementById('btnClear').onclick=()=>{ tele.events=[]; document.getElementById('log').innerHTML=''; document.getElementById('evCount').textContent='0 条'; };
 
+// ---------- vus 桥（M2）：灰区案件升级慢脑仲裁，结论回灌探针 ----------
+let bridge=null;
+function captureCropJPEG(bbox, vw, vh){
+  try{
+    const bx=bbox[0]*vw, by=bbox[1]*vh, bw=bbox[2]*vw, bh=bbox[3]*vh, pad=0.15;
+    const cw=document.createElement('canvas'); cw.width=224; cw.height=224;
+    cw.getContext('2d').drawImage(srcCanvas,
+      Math.max(0,bx-bw*pad), Math.max(0,by-bh*pad),
+      Math.min(vw,bw*(1+2*pad)), Math.min(vh,bh*(1+2*pad)), 0,0,224,224);
+    return cw.toDataURL('image/jpeg',0.6);
+  }catch(e){ return null; }
+}
+function bridgeConnect(){
+  const url=document.getElementById('bridgeUrl').value.trim();
+  const token=document.getElementById('bridgeToken').value;
+  if(!url){ toast('请填写桥地址'); return; }
+  localStorage.setItem('bridge_url',url); localStorage.setItem('bridge_token',token);
+  if(bridge) bridge.close();
+  bridge=new BridgeLink({
+    url, token,
+    transportFactory:(u,h)=>{
+      const ws=new WebSocket(u);
+      ws.onopen=h.onOpen; ws.onmessage=e=>h.onMessage(e.data);
+      ws.onclose=h.onClose; ws.onerror=h.onError;
+      return { send:t=>ws.send(t), close:()=>ws.close() };
+    },
+    onState:s=>{ document.getElementById('bridgeState').textContent=
+      s==='open'?'在线':(s==='connecting'?'…':'离线'); },
+  });
+  bridge.connect();
+}
+function applyArbVerdict(m){
+  const pend=pendingArb.get(m.requestId); if(!pend) return;
+  pendingArb.delete(m.requestId);
+  // 回灌前提：模式包显式开启 arbFeedback（与自训练开关相互独立；预算受 arb 上限约束）
+  if(!pack.arbFeedback || !jepa || m.label===null || m.label===undefined){
+    tele._log({ty:'sys',msg:'仲裁结论 '+(m.label||'弃权')+'（回灌未启用，已归档桥侧）'}); return;
+  }
+  const classes=pack.discriminator.classes;
+  const idx=classes.indexOf(m.label);
+  if(idx<0){ tele._log({ty:'sys',msg:'仲裁标签不在判别类别: '+m.label}); return; }
+  const lr=pack.selfTrain&&pack.selfTrain.lr?pack.selfTrain.lr:0.05;
+  const n=jepa.learn(pend.feat, idx, lr);
+  tele._log({ty:'sys',msg:'仲裁回灌 '+m.label+' conf='+m.conf+' 样本='+n});
+}
+document.getElementById('btnBridge').onclick=bridgeConnect;
+(function(){
+  const u=localStorage.getItem('bridge_url'), t=localStorage.getItem('bridge_token');
+  if(u!==null) document.getElementById('bridgeUrl').value=u;
+  if(t!==null) document.getElementById('bridgeToken').value=t;
+})();
+
 // ---------- 判别头运维：重置学习（恢复初始化权重，非判定环节） ----------
 document.getElementById('btnProbeReset').onclick=async()=>{
   if(!jepa){ toast('本模式无判别头（检测器权威）'); return; }
@@ -821,11 +881,23 @@ async function loop(){
                 act:verdict.action,dist:top.dist,zoom});
             }else if(verdict.action==='escalate'){
               // 灰区弃权：宁可待仲裁不可虚报；队列带预算硬上限+轨迹去重，
-              // vus 桥未接入时事件落遥测，导出后供离线消费/复训。
               // 非布防时段不入队（预算留给布防时段），仅记录。
               const r=armed? arb.request(top.trackId,now) : 'disarmed';
               tele._log({ty:'sys',msg:'判别灰区 conf='+verdict.conf.toFixed(2)+
                 ' → 待仲裁['+r+'] #'+top.trackId});
+              // 桥在线且模式包开启回灌：案件升级慢脑（vus 侧），结论按 requestId 关联回灌
+              if(armed && r==='accepted' && bridge && bridge.state==='open' && pack.arbFeedback){
+                const rid='arb-'+now+'-'+top.trackId;
+                pendingArb.set(rid,{feat});
+                bridge.request({ type:'arb-request', requestId:rid, packId:pack.id,
+                    task:'main', trackId:top.trackId,
+                    classes:pack.discriminator.classes,
+                    cropJpeg:captureCropJPEG(top.bbox, vw, vh),
+                    scores:{logreg:+jepa.score(feat).toFixed(4)}, ts:Date.now(),
+                  }).then(v=>{ applyArbVerdict(v); })
+                    .catch(err=>{ pendingArb.delete(rid);
+                      tele._log({ty:'sys',msg:'桥仲裁降级('+err.message+')——边缘自治，保持弃权'}); });
+              }
             }
           }catch(e){ tele.err('JEPA 判别失败:'+e.message); }
         }
@@ -848,18 +920,7 @@ async function loop(){
           // 版本化证据事件（sc.evidence/v1）：稳定事件 ID、双时间戳、配置指纹、
           // 模型/策略版本、检测置信与判别置信分立，告警级事件附裁剪帧——
           // 供机器消费、审计与回放
-          let cropJpeg=null;
-          if(act==='alert' && armed){
-            try{
-              const bx=t.box[0]*vw, by=t.box[1]*vh, bw=t.box[2]*vw, bh=t.box[3]*vh;
-              const pad=0.15;
-              const cw=document.createElement('canvas'); cw.width=224; cw.height=224;
-              cw.getContext('2d').drawImage(srcCanvas,
-                Math.max(0,bx-bw*pad), Math.max(0,by-bh*pad),
-                Math.min(vw,bw*(1+2*pad)), Math.min(vh,bh*(1+2*pad)), 0,0,224,224);
-              cropJpeg=cw.toDataURL('image/jpeg',0.6);
-            }catch(e){}
-          }
+          const cropJpeg=(act==='alert' && armed)? captureCropJPEG(t.box, vw, vh) : null;
           const ev=buildEvidenceEvent({
             kind: act==='alert'?'alert':(act==='escalate'?'arbitration':'record'),
             timeIso:new Date().toISOString(), sourceTs:video.currentTime,
@@ -990,6 +1051,7 @@ function drawOverlay(vw,vh,t0){
 
   // 遥测 HUD
   teleOut.innerHTML=`<div>帧率 <b>${(1000/(performance.now()-t0+1)).toFixed(1)}</b></div>
+    <div>桥 <b style="color:${bridge&&bridge.state==='open'?'var(--accent)':'var(--dim)'}">${bridge?bridge.state:'—'}</b>${pendingArb.size?` <span style="color:var(--accent2)">仲裁中${pendingArb.size}</span>`:''}</div>
     <div>变焦 <b>${zoom.toFixed(1)}×</b></div>
     <div>目标 <b>${[...tracker.tracks.values()].length}</b> <span style="color:var(--dim)">确认</span> <b style="color:var(--warn)">${tracker.getConfirmed().length}</b></div>
     <div style="color:var(--dim)">判别<sup>${!jepa?'—':(jepa.loading?'load…':(jepa.loaded?'ON':'off'))}</sup>

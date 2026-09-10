@@ -1,0 +1,5 @@
+websockets
+numpy
+opencv-python
+onnxruntime
+regex

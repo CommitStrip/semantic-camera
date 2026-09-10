@@ -38,6 +38,7 @@
       detectorAlertConf: 0.60,             // 判别未出时检测器权威阈值（防漏报）
       alertCls: 'drone',
       arb: { budgetPerHour: 20, ttlMs: 15000 },
+      arbFeedback: true,                   // vus 桥仲裁结论回灌探针（预算受 arb 上限约束；与自训练开关相互独立）
       // 自训练默认关闭：双信号并非独立证据（同一特征空间），在冻结 golden set、
       // 版本化回滚、开放集拒识完备前（M5 治理栈）不得在线修改判别头
       selfTrain: { enabled: false, minConf: 0.90, marginRatio: 0.80, cooldownMs: 60000, lr: 0.05 },

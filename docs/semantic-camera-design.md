@@ -1,6 +1,6 @@
 # 语义摄像头（Semantic Camera）平台设计
 
-*v2.4 · 2026-09-10 · 本仓为库系主线；v1（反无人机单场景判别自动化）已在前身仓落地；v2 吸收第一轮外部架构审查（§0.1–0.2、§4 v3 schema、§14 证据事件）；v2.2 吸收第二轮审查（P0 fail-closed 模式选择、证据溯源字段、自训练默认关闭、红线措辞修正）；v2.3 收录 Vision Agents 调研结论与借鉴边界（§19，含告警出口确定性主链 §14、DetectorProvider 契约 §16）*
+*v2.5 · 2026-09-10 · 本仓为库系主线；v1（反无人机单场景判别自动化）已在前身仓落地；v2 吸收第一轮外部架构审查（§0.1–0.2、§4 v3 schema、§14 证据事件）；v2.2 吸收第二轮审查（P0 fail-closed 模式选择、证据溯源字段、自训练默认关闭、红线措辞修正）；v2.3 收录 Vision Agents 调研结论与借鉴边界（§19，含告警出口确定性主链 §14、DetectorProvider 契约 §16）；v2.4 P1-①② 落地（restricted-area 真实化、资产单源化，§17 M1.8）；v2.5 M2 vus 桥落地（§8）*
 
 ---
 
@@ -177,7 +177,17 @@
 - 每场所成本上限不变：仲裁预算是场所级而非路级；单飞合并升级为跨路去重（同一物理目标跨相机只裁一次）；
 - wasm 秒级单次推理意味着单进程吞吐有天花板：M4 给出 N 路实测吞吐表后再定多进程/原生运行时（Node worker）路线，**先实测后设计**，不预写架构。
 
-## 8. vus 桥协议（M2）
+## 8. vus 桥协议（M2，✅ 已落地 bridge/）
+
+本地 WS 服务（与 MediaMTX 网关同级的本地件，默认只绑内网，`bridge/server.py` + `websockets`）。
+
+**已实现（2026-09-10）**：
+
+- **令牌鉴权**：hello 握手 5s 超时，不匹配 4401 拒绝（实测 ✓）；
+- **仲裁器注册表（可插拔）**：`abstain`（诚实弃权——桥通但无慢脑时不产伪标签）/ `clip`（本地 CLIP 零样本：完整 CLIPModel ONNX 复用 vus models 目录资产，与边缘 DINOv2 探针**异族独立**；语义抽检 person 0.90 / dog 0.98；端到端裁决 570ms）/ `ollama`（vus 慢脑同款路线，主机经 `validate_http_base` 校验：仅环回+显式允许表，http.client 直连不跟随重定向）；
+- **案件归档**：输入+裁决+灰区裁剪帧追加 JSONL（M5 复训语料；`archiveCrops` 可关）；
+- **边缘侧 `BridgeLink` 纯逻辑链路**（core.js，单测覆盖）：指数退避重连、requestId 关联、超时/断线/拥塞三态拒绝 → 上层降级边缘自治（灰区保持弃权，绝不虚报）；
+- **回灌开关**：`arbFeedback` 模式包标志，独立于自训练开关；预算受仲裁队列上限约束。
 
 本地 WS 服务（与 MediaMTX 网关同级的本地件，默认只绑内网）：
 
@@ -285,7 +295,7 @@ EdgeCore → 桥：{type:'arb-request', trackId, packId, task:'main',
 | **M1.6 平台化收敛（第一轮外部审查回应）** | 核心去领域化（领域词收敛到 mode-packs.js，洁净度元测试把守）+ 模式包 schema v3（可插拔检测器 onnx/mock、判别头可选、检测/判别置信分立）+ **双模式端到端验收**（restricted-area 第二模式包）+ 证据事件 sc.evidence/v1 + 学习状态按模式隔离 + 宣传口径纪律（§0.2） | ✅ |
 | **M1.7 溯源加固（第二轮外部审查回应）** | **P0 模式选择 fail-closed**（未知模式拒绝布防，不静默回退）+ 证据溯源补齐（event_id/双时间戳/mode_hash/policy_version/模型 sha256/证据内容哈希/schema 契约测试）+ **自训练默认关闭**（治理栈 M5 完备前不得在线改判别头）+ 红线措辞修正（判别自动 ≠ 处置自动，§0） | ✅ 本轮 |
 | **P1 遗留（下一轮优先）** | ① restricted-area 真实化：真人员检测模型 + polygon zone + 进出/越线/持续 + 事件录像缓冲 + 真实视频 benchmark（M3 主体）；② 模型资产单源化：assets/models/ + 构建期 staging，消除三份物理副本；③ 模型解绑：核心不捆绑受限权重，model-manifest + 下载器 + 第三方声明（商用前置，含用户决策） | 待做 |
-| **M2 vus 桥** | WS 协议 §8 全量落地，仲裁回灌闭环 | 待做 |
+| **M2 vus 桥** | WS 协议 §8 全量落地（bridge/ 服务 + 边缘 BridgeLink + 仲裁回灌 + 归档）；慢脑=可插拔仲裁器（clip/ollama/abstain） | ✅ 本轮 |
 | **M3 时空规则引擎 + 开放集** | zones/dwell/count/composite + unknown 拒识 + 油库烟火第三模式包 + restricted-area 真实人员检测模型接入 | 待做 |
 | **M1.8 restricted-area 真实化 + 资产单源化（P1-①②）** | 真实人员模型 NanoDet-Plus@416（Apache-2.0，选型/淘汰证据 docs/model-selection.md）+ zones/滞留规则落地 + nanodethead 解码器注册 + `assets/` 单源（manifest sha256 + verify_models.py + CI 资产完整性闸门）；JS 解码器与真实模型输出等价性验证通过 | ✅ 本轮 |
 | **M4 多相机 + VenueController + 健康监控** | 多路预算调度 + §9 健康项 + 学习状态全键隔离 + **MediaTransport 抽象**（RTSP/WHEP/HLS/USB 不进模式包、不与检测器耦合，§19） | 待做 |

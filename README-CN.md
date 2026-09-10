@@ -25,6 +25,7 @@
 | 证据事件 | `sc.evidence/v1` 版本化事件信封：稳定事件 ID、双时间戳（源/处理）、模式包配置指纹、策略版本、模型 sha256、检测置信与判别置信分立、告警附裁剪帧及其内容哈希——从"帧"到"可审计的证据事件" |
 | 区域规则引擎 | 多边形 zone（归一化坐标）：进入 + 滞留达标（dwellMs）才升级告警，区外目标降级为记录；overlay 只读叠加展示 |
 | 可插拔检测头 | `HEAD_DECODERS` 注册表：`yolo8head`（无 objectness）/ `nanodethead`（GFL 分布回归）/ `mock`（确定性时间线）——解码头是 provider registry 的键，扩展不改核心 |
+| vus 桥仲裁（M2） | 灰区案件升级慢脑（CLIP 零样本 / ollama VLM，可插拔）：结论伪标签回灌探针、案件归档 JSONL；桥断即边缘自治，绝不虚报 |
 | 资产单源治理 | 模型/运行时单源 `assets/`（manifest 含 sha256/许可证/来源），构建期 staging 到三副本，CI 哈希闸门防静默漂移 |
 | 布防时间表 | 模式包可声明布防窗口（支持跨零点）；非布防时段告警降级为记录、仲裁不占预算 |
 | 丝滑变焦 | 捏合/滑块/按钮 + **目标跟随**自动居中，平滑插值 1×-8× |
@@ -41,6 +42,7 @@ semantic-camera/
 ├── assets/models/        # 模型单源（manifest.json 含 sha256/许可证/来源）
 ├── assets/runtime/       # ORT wasm 运行时单源
 ├── gateway/              # MediaMTX 网关：海康 RTSP → WebRTC(WHEP)/HLS
+├── bridge/               # vus 慢脑仲裁桥（M2）：灰区案件 → CLIP/ollama 仲裁 → 回灌
 ├── android/              # Android 工程（Kotlin WebView 封装 + 遥测落盘）
 ├── harmony/              # HarmonyOS(NEXT) 工程（ArkWeb 封装 + 遥测落盘）
 └── docs/                 # 平台设计文档 + 模型选型记录
