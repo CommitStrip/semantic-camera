@@ -158,12 +158,13 @@
 
 ## 6. 时空语义引擎（场所语义的主体）
 
-类别告警只是语义的最浅层；场所语义的主体是**时空规则**，全部做成模式包数据。布防时间表与多边形 zone+滞留已落地，其余按里程碑推进：
+类别告警只是语义的最浅层；场所语义的主体是**时空规则**，全部做成模式包数据。布防时间表、多边形 zone+滞留、**越线（带方向）+ 区域占驻计数（countGte）**已落地，其余按里程碑推进：
 
 | 规则类型 | 数据形态 | 场所示例 |
 |---|---|---|
 | 布防时间表 `schedule` | `{from,to}` 窗口数组，支持跨零点（✅ 已落地） | 校园周界 22:00–06:00；工地吊臂区全天 |
-| 区域 `zones` | 归一化多边形 + 类别 + 滞留 `dwellMs`（✅ 已落地：进区+滞留达标升级告警 `zone-intrusion`，区外降级 record） | 净空区禁入无人机；围栏区域闯入 |
+| 区域 `zones` | 归一化多边形 + 类别 + 滞留 `dwellMs` + 占驻计数 `countGte`（✅ 已落地：进区+滞留达标升级 `zone-intrusion`，人数不足降级 `zone-count`，区外降级 record） | 净空区禁入无人机；围栏区域闯入；人群聚集 |
+| 警戒线 `rules.lines` | 线段 + 方向 `any/AB/BA`（✅ 已落地：轨迹历史扫描 segIntersect，同线冷却防抖动） | 大门越线单向告警；围栏双向翻越 |
 | 区域 `zones` | 归一化多边形 + 触发类别 + 方向 | 净空区禁入无人机；围栏单向越线 |
 | 滞留 `dwell` | 类别 + 区域 + 时长 | 无人车前滞留 >60s |
 | 计数/聚集 `count` | 类别 + 区域 + 阈值 + 窗口 | 鸟群 ≥5 只 30s（鸟击预警）；人群聚集 |
@@ -316,6 +317,7 @@ EdgeCore → 桥：{type:'arb-request', trackId, packId, task:'main',
 | **M1.7 溯源加固（第二轮外部审查回应）** | **P0 模式选择 fail-closed**（未知模式拒绝布防，不静默回退）+ 证据溯源补齐（event_id/双时间戳/mode_hash/policy_version/模型 sha256/证据内容哈希/schema 契约测试）+ **自训练默认关闭**（治理栈 M5 完备前不得在线改判别头）+ 红线措辞修正（判别自动 ≠ 处置自动，§0） | ✅ 本轮 |
 | **P1 遗留（下一轮优先）** | ① restricted-area 真实化：真人员检测模型 + polygon zone + 进出/越线/持续 + 事件录像缓冲 + 真实视频 benchmark（M3 主体）；② 模型资产单源化：assets/models/ + 构建期 staging，消除三份物理副本；③ 模型解绑：核心不捆绑受限权重，model-manifest + 下载器 + 第三方声明（商用前置，含用户决策） | 待做 |
 | **M2 vus 桥** | WS 协议 §8 全量落地（bridge/ 服务 + 边缘 BridgeLink + 仲裁回灌 + 归档）；慢脑=可插拔仲裁器（clip/ollama/abstain） | ✅ |
+| **M3-a 时空规则引擎完善** | 越线（方向过滤+冷却去重）+ 区域占驻计数 + Tracker 有界轨迹历史；复合事件（A 后 B 于 T 内）与事件录像缓冲待做 | ✅ 本轮 |
 | **M2.6 场景自识别（§8.1）** | 首个确认事件 → 慢脑识别场所（CLIP 兜底/ollama VLM 精判）→ 高置信自动布防 → 人工可改；观察态引导包（人员检测仅记录） | ✅ 本轮 |
 | **M3 时空规则引擎 + 开放集** | zones/dwell/count/composite + unknown 拒识 + 油库烟火第三模式包 + restricted-area 真实人员检测模型接入 | 待做 |
 | **M1.8 restricted-area 真实化 + 资产单源化（P1-①②）** | 真实人员模型 NanoDet-Plus@416（Apache-2.0，选型/淘汰证据 docs/model-selection.md）+ zones/滞留规则落地 + nanodethead 解码器注册 + `assets/` 单源（manifest sha256 + verify_models.py + CI 资产完整性闸门）；JS 解码器与真实模型输出等价性验证通过 | ✅ 本轮 |

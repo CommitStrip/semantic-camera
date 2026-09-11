@@ -17,7 +17,8 @@ const { CFG, estimateDist, sizeForClass, iou, Tracker, MotionGate,
   stableStringify, stableHash, sha256Hex, buildEvidenceEvent,
   HEAD_DECODERS, decodeV8Head, decodeNanoDetHead, boxIoU, nms,
   pointInPolygon, ZoneEngine, applyZonePolicy, BridgeLink,
-  SCENE_AUTO_ARM_CONF, applySceneGate, selectPackFromVerdict } = require('../web/core.js');
+  SCENE_AUTO_ARM_CONF, applySceneGate, selectPackFromVerdict,
+  segSide, segIntersect, RuleEngine } = require('../web/core.js');
 const { MODE_PACKS, getModePack } = require('../web/mode-packs.js');
 const { createHash } = await import('node:crypto');
 
@@ -497,6 +498,67 @@ test('_bootstrap 引导包：通过校验、hidden 不入人工目录、不抢�
   // 场景目录（人工选择列表）必须排除引导包
   const visible = Object.values(MODE_PACKS).filter(p => !p.hidden);
   assert.ok(visible.every(p => !p.bootstrap));
+});
+
+// ==================== 时空规则引擎（越线/计数/轨迹历史） ====================
+
+test('Tracker：有界轨迹历史（越线检测的输入）', () => {
+  const tr = new Tracker();
+  for (let i = 0; i <= 40; i++) tr.update([mk(0.4 + i * 0.001, 0.4, 0.1, 0.1)], i * 100);
+  const t = tr.tracks.get(1);
+  assert.ok(t.hist.length <= 32, '历史环形截断 ≤32');
+  assert.equal(t.hist[t.hist.length - 1].x, t.cx, '最新点与当前位置一致');
+});
+
+test('segSide/segIntersect：穿越/平行/端点触碰语义', () => {
+  const a = [0.5, 0], b = [0.5, 1];                       // 垂直警戒线 x=0.5
+  assert.equal(segIntersect([0.4, 0.2], [0.6, 0.8], a, b), true, '跨越');
+  assert.equal(segIntersect([0.1, 0.2], [0.3, 0.8], a, b), false, '未达');
+  assert.equal(segIntersect([0.6, 0.2], [0.8, 0.8], a, b), false, '已过');
+  assert.equal(segIntersect([0, 0.5], [0.4, 0.5], a, b), false, '共线不视为越线');
+});
+
+test('RuleEngine：方向判定 + 冷却去重 + 类别过滤', () => {
+  const re = new RuleEngine({ lines: [{ id: 'L', a: [0.5, 0], b: [0.5, 1], dir: 'BA', classes: ['person'] }] });
+  const track = (pts, id = 7, cls = 'person') =>
+    ({ id, cls, hist: pts.map(p => ({ x: p[0], y: p[1], t: 0 })) });
+  // 0.4→0.6 越线：按 a→b 向量左右侧定义，落点在 BA 侧 → dir='BA'
+  let hits = re.evaluate([track([[0.4, 0.3], [0.6, 0.3]])], 1000, 30000);
+  assert.equal(hits.get(7)[0].dir, 'BA');
+  // 冷却：30s 内同轨迹同线不重复告警（防来回抖动刷屏）
+  hits = re.evaluate([track([[0.6, 0.3], [0.4, 0.3]])], 5000, 30000);
+  assert.equal(hits.size, 0, '冷却期内不重复');
+  // 冷却后反向穿越：dir='AB' 与规则 'BA' 不符 → 方向过滤正确拒绝
+  hits = re.evaluate([track([[0.6, 0.3], [0.4, 0.3]])], 40000, 30000);
+  assert.equal(hits.size, 0, '方向不符不触发');
+  // 同样反向、规则改为 any → 命中且方向标记为 AB
+  const reAny = new RuleEngine({ lines: [{ id: 'L', a: [0.5, 0], b: [0.5, 1], dir: 'any', classes: ['person'] }] });
+  hits = reAny.evaluate([track([[0.6, 0.3], [0.4, 0.3]])], 40000, 30000);
+  assert.equal(hits.get(7)[0].dir, 'AB');
+  // 类别过滤：规则限定 person，animal 穿越不触发
+  hits = re.evaluate([track([[0.4, 0.3], [0.6, 0.3]], 8, 'animal')], 42000, 30000);
+  assert.equal(hits.size, 0, '类别不符不触发');
+});
+
+test('ZoneEngine.occupancy：占驻计数（聚集规则基础）', () => {
+  const ze = new ZoneEngine([{ id: 'z', polygon: [[0, 0], [0.5, 0], [0.5, 0.5], [0, 0.5]] }]);
+  const in1 = { cls: 'x', cx: 0.1, cy: 0.1 }, in2 = { cls: 'x', cx: 0.2, cy: 0.2 };
+  const out = { cls: 'x', cx: 0.9, cy: 0.9 };
+  ze.update(in1, 0); ze.update(in2, 0); ze.update(out, 0);
+  const counts = ze.occupancy([in1, in2, out]);
+  assert.equal(counts.z, 2);
+});
+
+test('applyZonePolicy：countGte 人数不足降级（聚集规则）', () => {
+  const zones = [{ id: 'z', polygon: [[0, 0], [1, 0], [1, 1], [0, 1]], dwellMs: 0, countGte: 3 }];
+  const alert = { action: 'alert', via: 'detector', conf: 0.9 };
+  const hit = { zoneId: 'z', dwellMs: 0 };
+  const few = applyZonePolicy(alert, hit, zones, 1);
+  assert.equal(few.action, 'record');
+  assert.equal(few.reason, 'zone-count');
+  const crowd = applyZonePolicy(alert, hit, zones, 3);
+  assert.equal(crowd.action, 'alert');
+  assert.equal(crowd.reason, 'zone-intrusion');
 });
 
 // ==================== 检测头解码器（注册表契约） ====================

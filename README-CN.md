@@ -12,7 +12,7 @@
 
 **宣传口径**：当前算法是"可配置事件摄像头 + 场所判别头"——不宣称自动理解所有场景、零误报、人类级语义理解或"零代码接入"（准确说法：新增场所不改核心逻辑代码，仍需在注册表加数据并部署）；只报告实测数据，未测项标"待回填/设计态"。
 
-当前验证状态：初始化探针头离线精度 **98.15%**（162 张权威 Drone-vs-Bird 样本，证据 `web/jepa_probe_init.json`：acc=0.9815, n_train=162, dim=768，自前身仓实测继承）；**人员检测模型已在真实街景验证**：NanoDet-Plus-m-1.5x@416（Apache-2.0）对 CC 授权的涩谷十字路口视频抽帧检出 person 7~58 个/帧，Python ORT CPU 推理 23-24ms/帧（选型与实测详见 [docs/model-selection.md](docs/model-selection.md)）；WHEP 信令已用本地 MediaMTX v1.20.0 + H.264 测试流完成端到端验证；**57 例单元测试 + GitHub Actions CI 全绿**（含双模式端到端验收、核心源码洁净度、证据事件 schema 契约、模式选择 fail-closed、模型资产完整性闸门）。浏览器 wasm 端到端帧率/延迟实测**待回填**。
+当前验证状态：初始化探针头离线精度 **98.15%**（162 张权威 Drone-vs-Bird 样本，证据 `web/jepa_probe_init.json`：acc=0.9815, n_train=162, dim=768，自前身仓实测继承）；**人员检测模型已在真实街景验证**：NanoDet-Plus-m-1.5x@416（Apache-2.0）对 CC 授权的涩谷十字路口视频抽帧检出 person 7~58 个/帧，Python ORT CPU 推理 23-24ms/帧（选型与实测详见 [docs/model-selection.md](docs/model-selection.md)）；WHEP 信令已用本地 MediaMTX v1.20.0 + H.264 测试流完成端到端验证；**69 例单元测试 + GitHub Actions CI 全绿**（含双模式端到端验收、核心源码洁净度、证据事件 schema 契约、模式选择 fail-closed、模型资产完整性闸门）。浏览器 wasm 端到端帧率/延迟实测**待回填**。
 
 ## 核心能力
 
@@ -23,9 +23,9 @@
 | 全自动语义判别 | 四态裁决（判别/检测器权威双路径）：告警 / 待仲裁 / 判明非目标 / 静默——**无人工判定环节**；灰区入仲裁队列（预算硬上限），高置信双信号一致自动自训练探针 |
 | 场所模式包 | 模式 = 数据 + 校验器：`?mode=` 选择，新场所零代码接入；领域词只允许存在于 `web/mode-packs.js`（CI 洁净度测试把守）；`validatePack` fail-closed，坏配置拒绝布防 |
 | 证据事件 | `sc.evidence/v1` 版本化事件信封：稳定事件 ID、双时间戳（源/处理）、模式包配置指纹、策略版本、模型 sha256、检测置信与判别置信分立、告警附裁剪帧及其内容哈希——从"帧"到"可审计的证据事件" |
-| 区域规则引擎 | 多边形 zone（归一化坐标）：进入 + 滞留达标（dwellMs）才升级告警，区外目标降级为记录；overlay 只读叠加展示 |
-| 可插拔检测头 | `HEAD_DECODERS` 注册表：`yolo8head`（无 objectness）/ `nanodethead`（GFL 分布回归）/ `mock`（确定性时间线）——解码头是 provider registry 的键，扩展不改核心 |
+| 时空规则引擎 | 多边形 zone（进区+滞留+占驻计数）与警戒线（越线方向过滤+冷却去重）：规则全是模式包数据，overlay 只读叠加展示 |
 | 场景自识别 | 首个确认事件触发慢脑识别场所（CLIP 零样本兜底 / ollama VLM 精判），conf≥0.85 自动布防；未识别=观察模式（仅记录不虚报）；人工指定永不自动覆盖 |
+| 可插拔检测头 | `HEAD_DECODERS` 注册表：`yolo8head`（无 objectness）/ `nanodethead`（GFL 分布回归）/ `mock`（确定性时间线）——解码头是 provider registry 的键，扩展不改核心 |
 | vus 桥仲裁（M2） | 灰区案件升级慢脑（CLIP 零样本 / ollama VLM，可插拔）：结论伪标签回灌探针、案件归档 JSONL；桥断即边缘自治，绝不虚报 |
 | 资产单源治理 | 模型/运行时单源 `assets/`（manifest 含 sha256/许可证/来源），构建期 staging 到三副本，CI 哈希闸门防静默漂移 |
 | 布防时间表 | 模式包可声明布防窗口（支持跨零点）；非布防时段告警降级为记录、仲裁不占预算 |
@@ -107,7 +107,7 @@ cd web && python3 -m http.server 8899
 ## 开发：测试、CI 与多端副本同步
 
 ```bash
-node --test tests/core.test.mjs     # 57 例单测（node:test，零依赖）
+node --test tests/core.test.mjs     # 69 例单测（node:test，零依赖）
 python scripts/verify_models.py    # 模型资产 sha256 完整性校验（fail-closed）
 bash scripts/sync-web.sh            # web/ → android assets + harmony rawfile
 bash scripts/sync-web.sh --check    # 只校验一致性（CI 同款）
@@ -121,7 +121,7 @@ CI（node 20/22 矩阵）：JS 语法检查 → 单元测试 → 三副本一致
 |----|------|
 | WHEP 信令端到端 | ✅ 已验证（MediaMTX v1.20.0 + H.264 测试流，OPTIONS→POST→PATCH→DELETE 全通过） |
 | 探针头离线精度 | ✅ 98.15%（162 样本，`web/jepa_probe_init.json`，自前身仓实测继承） |
-| 单元测试 / CI | ✅ 57 例全绿（含双模式验收、洁净度、schema 契约、fail-closed、资产完整性闸门），node 20/22 矩阵 |
+| 单元测试 / CI | ✅ 69 例全绿（含双模式验收、洁净度、schema 契约、fail-closed、资产完整性、时空规则闸门），node 20/22 矩阵 |
 | 人员模型真实街景 | ✅ NanoDet-Plus@416 抽帧检出 7~58 person/帧，CPU 23-24ms/帧（[选型记录](docs/model-selection.md)）；浏览器 wasm 帧率 ⏳ 待回填 |
 | 真机帧率/延迟 | ⏳ 待回填——遥测已逐帧采集 `detMs/trackMs/motionRatio`，导出 CSV/JSON 即为实测数据 |
 

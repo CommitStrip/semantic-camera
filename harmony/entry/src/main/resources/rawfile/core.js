@@ -84,13 +84,18 @@ class Tracker{
         }
         t.box=d.bbox.slice(); t.cx=d.cx; t.cy=d.cy; t.cls=d.cls; t.conf=d.conf;
         t.last=now; t.count++;
+        // 有界轨迹历史（越线/方向/滞留等时空规则的输入；环形截断防膨胀）
+        t.hist = t.hist || [{ x: t.cx, y: t.cy, t: t.last }];
+        t.hist.push({ x: t.cx, y: t.cy, t: now });
+        if (t.hist.length > 32) t.hist.shift();
         active.add(best);
         if(t.count>=CFG.confirmCount) t.confirmed=true;
         d.trackId=best; d.dup=t.count;
       }else{
         const id=this.nextId++;
         this.tracks.set(id,{id,box:d.bbox.slice(),cx:d.cx,cy:d.cy,vx:0,vy:0,
-          cls:d.cls,conf:d.conf,last:now,count:1,confirmed:false});
+          cls:d.cls,conf:d.conf,last:now,count:1,confirmed:false,
+          hist:[{x:d.cx,y:d.cy,t:now}]});
         active.add(id); d.trackId=id; d.dup=1;
       }
     }
@@ -174,8 +179,19 @@ function validatePack(pack) {
         typeof p[1] === 'number' && p[1] >= 0 && p[1] <= 1) &&
       (z.classes === undefined || (Array.isArray(z.classes) &&
         z.classes.every(c => typeof c === 'string'))) &&
-      (z.dwellMs === undefined || (typeof z.dwellMs === 'number' && z.dwellMs >= 0)));
-    if (!ok) errs.push('zones 必须为 {id, polygon[[x,y]≥3点(0..1)], classes?, dwellMs?} 数组');
+      (z.dwellMs === undefined || (typeof z.dwellMs === 'number' && z.dwellMs >= 0)) &&
+      (z.countGte === undefined || (Number.isInteger(z.countGte) && z.countGte >= 1)));
+    if (!ok) errs.push('zones 必须为 {id, polygon[[x,y]≥3点(0..1)], classes?, dwellMs?, countGte?} 数组');
+  }
+  if (pack.rules !== undefined) {
+    const lines = pack.rules && pack.rules.lines;
+    const bad = !Array.isArray(lines) || lines.some(l => !l || typeof l.id !== 'string' || !l.id ||
+      !Array.isArray(l.a) || l.a.length !== 2 || !Array.isArray(l.b) || l.b.length !== 2 ||
+      [l.a[0], l.a[1], l.b[0], l.b[1]].some(v => typeof v !== 'number' || v < 0 || v > 1) ||
+      (l.dir !== undefined && !['any', 'AB', 'BA'].includes(l.dir)) ||
+      (l.classes !== undefined && (!Array.isArray(l.classes) ||
+        l.classes.some(c => typeof c !== 'string'))));
+    if (bad) errs.push('rules.lines 必须为 {id, a[x,y], b[x,y](0..1), dir?:any|AB|BA, classes?} 数组');
   }
   if (typeof pack.detectorAlertConf !== 'number' ||
       !(pack.detectorAlertConf > 0) || !(pack.detectorAlertConf < 1))
@@ -510,18 +526,77 @@ class ZoneEngine {
     if (track.zoneId !== undefined) { track.zoneId = undefined; track.zoneEnterAt = undefined; }
     return null;
   }
+  // 当前各 zone 占驻数（传入确认轨迹列表）——聚集/人群类规则的基础
+  occupancy(tracks) {
+    const counts = {};
+    for (const t of tracks) {
+      if (t.zoneId === undefined) continue;
+      counts[t.zoneId] = (counts[t.zoneId] || 0) + 1;
+    }
+    return counts;
+  }
 }
 // 区域门控（纯函数）：有 zones 时，alert 须"在区内滞留达标"，区外降级为 record；
+// zone 可选 countGte（占驻数门槛）：人数不足降级为 record（聚集/人群类规则基础）；
 // 非 alert 裁决与无 zones 模式原样透传
-function applyZonePolicy(dec, zoneHit, zones) {
+function applyZonePolicy(dec, zoneHit, zones, occupancy) {
   if (!zones || !zones.length || dec.action !== 'alert') return dec;
   const z = zones.find(z => zoneHit && z.id === zoneHit.zoneId);
   const need = z && z.dwellMs ? z.dwellMs : 0;
   if (!zoneHit || zoneHit.dwellMs < need)
     return Object.assign({}, dec, { action: 'record', reason: 'outside-zone' });
+  if (z && z.countGte && occupancy !== undefined && occupancy < z.countGte)
+    return Object.assign({}, dec, { action: 'record', reason: 'zone-count' });
   return Object.assign({}, dec, { reason: 'zone-intrusion' });
 }
 
+
+// 轨迹段与规则线段相交判定（退化共线不视为越线——端点触碰宁缺勿滥）
+function segSide(a, b, p) {
+  return (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]);
+}
+function segIntersect(p1, p2, a, b) {
+  const d1 = segSide(a, b, p1), d2 = segSide(a, b, p2);
+  const d3 = segSide(p1, p2, a), d4 = segSide(p1, p2, b);
+  return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
+         ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
+}
+// ---------- 时空规则引擎：越线（带方向）与区域占驻计数 ----------
+// rules.lines: [{id, a:[x,y], b:[x,y], dir:'any'|'AB'|'BA', classes?}]
+// dir 语义：以 a→b 向量的左侧为 AB 侧（segSide>0），右侧为 BA 侧
+class RuleEngine {
+  constructor(rules) {
+    this.lines = (rules && rules.lines) || [];
+    this.lastCross = new Map();     // trackId:lineId → {dir, at}（同一轨迹不重复告警）
+  }
+  // 每检测周期调用；返回 Map(trackId → [{ruleId, type:'line-cross', dir}])
+  evaluate(tracks, now, reconfirmMs) {
+    const hits = new Map();
+    const guard = reconfirmMs || 30000;
+    for (const t of tracks) {
+      const hist = t.hist || [];
+      if (hist.length < 2) continue;
+      for (const rule of this.lines) {
+        if (rule.classes && !rule.classes.includes(t.cls)) continue;
+        const key = t.id + ':' + rule.id;
+        const last = this.lastCross.get(key);
+        if (last && now - last.at < guard) continue;   // 同线冷却，防来回抖动刷告警
+        for (let i = 1; i < hist.length; i++) {
+          // 历史点是 {x,y,t} 对象——几何函数按数组下标取值，必须先转 [x,y]
+          const p1 = [hist[i - 1].x, hist[i - 1].y], p2 = [hist[i].x, hist[i].y];
+          if (!segIntersect(p1, p2, rule.a, rule.b)) continue;
+          const dir = segSide(rule.a, rule.b, p2) > 0 ? 'AB' : 'BA';
+          if (rule.dir !== 'any' && rule.dir !== dir) continue;
+          this.lastCross.set(key, { dir, at: now });
+          if (!hits.has(t.id)) hits.set(t.id, []);
+          hits.get(t.id).push({ ruleId: rule.id, type: 'line-cross', dir });
+          break;
+        }
+      }
+    }
+    return hits;
+  }
+}
 
 // ---------- 证据事件（机器可消费的版本化事件，从"帧"到"有证据的事件"） ----------
 const EVIDENCE_SCHEMA = 'sc.evidence/v1';
@@ -706,5 +781,6 @@ if (typeof module!=='undefined' && module.exports) {
     stableStringify, stableHash, sha256Hex, buildEvidenceEvent,
     HEAD_DECODERS, decodeV8Head, decodeNanoDetHead, boxIoU, nms,
     pointInPolygon, ZoneEngine, applyZonePolicy, BridgeLink,
-    SCENE_AUTO_ARM_CONF, applySceneGate, selectPackFromVerdict };
+    SCENE_AUTO_ARM_CONF, applySceneGate, selectPackFromVerdict,
+    segSide, segIntersect, RuleEngine };
 }

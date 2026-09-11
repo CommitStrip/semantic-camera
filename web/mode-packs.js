@@ -98,6 +98,12 @@
       zones: [
         { id: 'restricted-zone', polygon: [[0.30, 0.20], [0.72, 0.20], [0.72, 0.78], [0.30, 0.78]], dwellMs: 2000 },
       ],
+      rules: {
+        lines: [
+          // 大门越线：人员自下向上（BA→AB 方向视 a→b 向量左侧为 AB）越过闸口线即告警
+          { id: 'gate-line', a: [0.05, 0.85], b: [0.95, 0.85], dir: 'any', classes: ['person'] },
+        ],
+      },
       arb: { budgetPerHour: 10, ttlMs: 15000 },
       selfTrain: null,
     },

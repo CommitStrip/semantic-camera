@@ -532,9 +532,10 @@ if(modeParam && MODE_PACKS[modeParam]){
 }
 // 配置指纹：进入每条证据事件，证明当时生效的模式包内容（非加密哈希，防漂移不防篡改）
 let MODE_HASH=pack ? stableHash(pack) : null;
-let policy=pack ? new JepaPolicy(pack) : null;          // 四态全自动裁决（无人工判定环节）
-let arb=pack ? new ArbitrationQueue(pack.arb) : null;   // 慢脑仲裁队列（预算硬上限 + 轨迹去重）
-let zoneEngine=pack ? new ZoneEngine(pack.zones) : null; // 区域规则引擎（场所时空语义）
+let policy=pack ? new JepaPolicy(pack) : null;
+let arb=pack ? new ArbitrationQueue(pack.arb) : null;
+let zoneEngine=pack ? new ZoneEngine(pack.zones) : null;
+let ruleEngine=pack ? new RuleEngine(pack.rules) : null; // 时空规则引擎（越线等）
 let pendingArb=new Map();                // requestId → {feat}（桥裁决回灌探针用）
 let stream=null, running=false, raf=null;
 let srcCanvas=document.createElement('canvas');
@@ -856,6 +857,7 @@ function applyPack(np, source, conf, state){
   policy=new JepaPolicy(pack);
   arb=new ArbitrationQueue(pack.arb);
   zoneEngine=new ZoneEngine(pack.zones);
+  ruleEngine=new RuleEngine(pack.rules);
   detector=pack.detector.engine==='mock'? new MockDetector(pack) : new OnnxDetector(pack);
   jepa=pack.discriminator? new JepaDiscriminator(pack) : null;
   tracker=new Tracker();               // 类别体系变化，轨迹重建
@@ -1046,6 +1048,10 @@ async function loop(){
           }catch(e){ tele.err('JEPA 判别失败:'+e.message); }
         }
       }
+      // 时空规则评估：越线等（每检测周期一次；轨迹历史跨周期累积，不漏跨线）
+      const ruleHits=ruleEngine
+        ? ruleEngine.evaluate([...tracker.tracks.values()], now, CFG.reconfirmInterval)
+        : new Map();
       // 确认事件：每个目标首次确认立即出事件，此后按 reconfirmInterval 重复。
       // 告警语义由裁决决定：有判别头用其裁决；判别未出/无判别头走检测器权威
       // （防漏报）；escalate 挂牌待仲裁不虚报、clear/suppress 判明非目标静默。
@@ -1054,12 +1060,19 @@ async function loop(){
                            now-t.lastConfirmAt>=CFG.reconfirmInterval)){
           const v=t.verdict;
           let dec=v || policy.decideDetector(t.cls, t.conf===undefined?0:t.conf);
-          // 场景门控：观察态（引导包）下告警全抑制——检测/跟踪/证据照常，什么都不丢
-          dec=applySceneGate(dec, !pack.bootstrap);
-          // 场所规则：有 zones 时，告警还须"在区内滞留达标"；区外目标降级为记录
+          // 场所规则（zones）：进区滞留达标 + 可选占驻计数（聚集类）
           let zr=null;
           if(pack.zones && pack.zones.length) zr=zoneEngine.update(t, now);
-          dec=applyZonePolicy(dec, zr, pack.zones);
+          const occ=zoneEngine ? zoneEngine.occupancy([...tracker.tracks.values()]) : {};
+          dec=applyZonePolicy(dec, zr, pack.zones,
+            zr ? (occ[zr.zoneId]!==undefined?occ[zr.zoneId]:1) : undefined);
+          // 时空规则（lines）：越线（带方向）命中 → 区外记录升级为告警
+          // （低置信仍走弃权——规则命中不制造置信度）
+          const hits=ruleHits && ruleHits.get(t.id);
+          if(hits && hits.length && dec.action==='record')
+            dec=Object.assign({},dec,{action:'alert',reason:'line-cross',ruleId:hits[0].ruleId});
+          // 场景门控最后：观察态（引导包）全抑制——检测/跟踪/证据照常
+          dec=applySceneGate(dec, !pack.bootstrap);
           const act=dec.action;
           // 场景自识别采样（仅引导包观察态；首个确认事件触发，攒样后经桥识别）
           if(pack.bootstrap && sceneState==='unidentified') collectSceneSample(t, now);
@@ -1194,6 +1207,21 @@ function drawOverlay(vw,vh,t0){
       const zx=ox+(z.polygon[0][0]*vw-sx)/zw*ow, zy=oy+(z.polygon[0][1]*vh-sy)/zh*oh;
       octx.fillStyle='rgba(79,210,255,.75)';
       octx.fillText((z.dwellMs?z.id+' '+z.dwellMs+'ms':z.id), zx+2, zy-4);
+    }
+  }
+
+  // 警戒线叠加（rules.lines：越线方向标注）
+  if(ruleEngine && ruleEngine.lines.length){
+    octx.font='9px sans-serif';
+    for(const rl of ruleEngine.lines){
+      const ax=ox+(rl.a[0]*vw-sx)/zw*ow, ay=oy+(rl.a[1]*vh-sy)/zh*oh;
+      const bx2=ox+(rl.b[0]*vw-sx)/zw*ow, by2=oy+(rl.b[1]*vh-sy)/zh*oh;
+      octx.strokeStyle='rgba(255,180,84,.8)';
+      octx.setLineDash([10,4]);
+      octx.beginPath(); octx.moveTo(ax,ay); octx.lineTo(bx2,by2); octx.stroke();
+      octx.setLineDash([]);
+      octx.fillStyle='rgba(255,180,84,.8)';
+      octx.fillText((rl.id||'line')+(rl.dir&&rl.dir!=='any'?' ('+rl.dir+')':''), ax+2, ay-4);
     }
   }
 

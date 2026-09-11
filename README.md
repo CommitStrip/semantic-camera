@@ -12,7 +12,7 @@ Three design red lines: **the discrimination pipeline runs fully automatically w
 
 **Claims discipline**: today's algorithms are a "configurable event camera + per-venue discrimination heads" — we do not claim universal scene understanding, zero false alarms, human-level semantics, or "zero-code venue onboarding" (the accurate claim: new venues require no core-logic changes, while still adding registry data and redeploying); we report measured numbers only, and everything unmeasured is marked "pending / design / roadmap".
 
-Current validation status: probe-head offline accuracy **98.15%** (162 authoritative Drone-vs-Bird samples, evidence `web/jepa_probe_init.json`: acc=0.9815, n_train=162, dim=768, inherited as measured from the predecessor repo); WHEP signaling verified end-to-end against a local MediaMTX v1.20.0 + H.264 test stream; **50 unit tests + GitHub Actions CI all green** (including two-mode end-to-end acceptance, source-cleanliness, evidence-schema contract, and mode-selection fail-closed meta-tests). On-device end-to-end fps/latency benchmarks are **pending**.
+Current validation status: probe-head offline accuracy **98.15%** (162 authoritative Drone-vs-Bird samples, evidence `web/jepa_probe_init.json`: acc=0.9815, n_train=162, dim=768, inherited as measured from the predecessor repo); **the person model is validated on real street footage**: NanoDet-Plus-m-1.5x@416 (Apache-2.0) detects 7–58 persons/frame on sampled frames of a CC-licensed Shibuya crossing video at 23–24 ms/frame CPU (selection and measurements in [docs/model-selection.md](docs/model-selection.md)); WHEP signaling verified end-to-end against a local MediaMTX v1.20.0 + H.264 test stream; **69 unit tests + GitHub Actions CI all green** (including two-mode end-to-end acceptance, source-cleanliness, evidence-schema contract, mode-selection fail-closed, asset-integrity, and spatiotemporal-rule gates). On-device end-to-end fps/latency benchmarks are **pending**.
 
 ## Key capabilities
 
@@ -24,6 +24,7 @@ Current validation status: probe-head offline accuracy **98.15%** (162 authorita
 | Venue mode packs | Modes are data + a validator: `?mode=` selects, new venues plug in with zero code; domain terms live only in `web/mode-packs.js` (enforced by a CI cleanliness test); `validatePack` is fail-closed — a bad config refuses to arm |
 | Evidence events | Versioned `sc.evidence/v1` envelope: stable event ID, dual timestamps (source/processed), mode-pack config fingerprint, policy version, model SHA-256, detector and discriminator confidences kept separate, alert crop frame with its content hash — auditable, machine-consumable events |
 | Arming schedule | Mode packs may declare arming windows (overnight-capable); outside the window alerts downgrade to records and arbitration spends no budget |
+| Spatiotemporal rules | Polygon zones (enter + dwell + occupancy count) and trip lines (direction-filtered crossing with cooldown): rules are pure pack data, read-only overlay | 
 | Scene auto-recognition | The first confirmed trigger sends frames to the slow brain to identify the venue (CLIP zero-shot fallback / ollama VLM refine); conf≥0.85 auto-arms; unidentified = observation mode (records only, never fabricates); manual assignment always wins |
 | vus bridge arbitration (M2) | Gray-zone cases escalate to a pluggable slow brain (CLIP zero-shot / ollama VLM): verdicts feed back as pseudo-labels, cases archived to JSONL; bridge down = edge stays fully autonomous, never fabricates |
 | Zone rules | Polygon zones (normalized coords): entering + dwelling past `dwellMs` escalates to an alert (`zone-intrusion`), outside-zone targets downgrade to records; read-only overlay |
@@ -105,7 +106,7 @@ See `harmony/README.md`. The core runs in an ArkWeb component; `javaScriptProxy`
 ## Development: tests, CI and multi-copy sync
 
 ```bash
-node --test tests/core.test.mjs     # 57 unit tests (node:test, zero deps)
+node --test tests/core.test.mjs     # 69 unit tests (node:test, zero deps)
 python scripts/verify_models.py    # model asset sha256 integrity (fail-closed)
 bash scripts/sync-web.sh            # web/ → android assets + harmony rawfile
 bash scripts/sync-web.sh --check    # consistency check only (same as CI)
@@ -119,7 +120,7 @@ CI (node 20/22 matrix): JS syntax checks → unit tests → three-copy consisten
 |----|------|
 | WHEP signaling end-to-end | ✅ verified (MediaMTX v1.20.0 + H.264 test stream, OPTIONS→POST→PATCH→DELETE all pass) |
 | Probe-head offline accuracy | ✅ 98.15% (162 samples, `web/jepa_probe_init.json`, inherited as measured from the predecessor) |
-| Unit tests / CI | ✅ 57 tests green (incl. two-mode acceptance, cleanliness, schema contract, fail-closed, asset-integrity gates), node 20/22 matrix |
+| Unit tests / CI | ✅ 69 tests green (incl. two-mode acceptance, cleanliness, schema contract, fail-closed, asset-integrity, spatiotemporal-rule gates), node 20/22 matrix |
 | Person model on real street footage | ✅ NanoDet-Plus@416: 7–58 persons/frame on sampled frames, 23–24 ms/frame CPU ([selection record](docs/model-selection.md)); browser wasm fps ⏳ pending |
 | On-device fps/latency | ⏳ pending — telemetry already records per-frame `detMs/trackMs/motionRatio`; export CSV/JSON for measured data |
 
