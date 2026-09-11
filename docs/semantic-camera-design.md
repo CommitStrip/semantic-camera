@@ -287,7 +287,7 @@ EdgeCore → 桥：{type:'arb-request', trackId, packId, task:'main',
 }
 ```
 
-溯源字段（v2.2 补齐）：**event_id**（camera:mode:kind:track:毫秒，去重/重放/外部告警幂等）、**双时间戳**（`time.source`=视频源时间 / `time.processed`=本地处理完成——RTSP 抖动与端到端延迟可算）、**mode.hash**（模式包内容指纹，键序无关 FNV-1a——证明当时生效的阈值快照；非加密哈希，防漂移不防篡改）、**policy_version**（模型没变裁决逻辑也可能变）、**models.detector.sha256**（文件名不是版本，哈希才是；加载后后台计算补齐）、**evidence.cropSha256**（证据内容哈希，防替换，异步尽力补齐）。
+溯源字段（v2.2 补齐）：**event_id**（camera:mode:kind:track:毫秒，去重/重放/外部告警幂等）、**双时间戳**（`time.source`=视频源时间 / `time.processed`=本地处理完成——RTSP 抖动与端到端延迟可算）、**mode.hash**（模式包内容指纹，键序无关 FNV-1a——证明当时生效的阈值快照；非加密哈希，防漂移不防篡改）、**policy_version**（模型没变裁决逻辑也可能变）、**models.detector.sha256**（文件名不是版本，哈希才是；加载后后台计算补齐）、**evidence.cropSha256**（证据内容哈希，防替换，异步尽力补齐）、**evidence.preRoll**（告警前因帧环：~500ms/帧 × ≤12 帧 ≈ 6s 前因，`FrameRing` 环形缓冲——"frame-before" 证据落地）。
 
 要点：**检测置信（track.conf）与判别置信（belief.conf）分立**，decision 带裁决来源与布防状态，告警级事件附裁剪帧。全量事件随遥测导出（CSV/JSON/JSONL），构成 §12 评测与 §11 复训的数据底座。schema 契约有单测把守（必需键齐全）。
 
@@ -317,7 +317,7 @@ EdgeCore → 桥：{type:'arb-request', trackId, packId, task:'main',
 | **M1.7 溯源加固（第二轮外部审查回应）** | **P0 模式选择 fail-closed**（未知模式拒绝布防，不静默回退）+ 证据溯源补齐（event_id/双时间戳/mode_hash/policy_version/模型 sha256/证据内容哈希/schema 契约测试）+ **自训练默认关闭**（治理栈 M5 完备前不得在线改判别头）+ 红线措辞修正（判别自动 ≠ 处置自动，§0） | ✅ 本轮 |
 | **P1 遗留（下一轮优先）** | ① restricted-area 真实化：真人员检测模型 + polygon zone + 进出/越线/持续 + 事件录像缓冲 + 真实视频 benchmark（M3 主体）；② 模型资产单源化：assets/models/ + 构建期 staging，消除三份物理副本；③ 模型解绑：核心不捆绑受限权重，model-manifest + 下载器 + 第三方声明（商用前置，含用户决策） | 待做 |
 | **M2 vus 桥** | WS 协议 §8 全量落地（bridge/ 服务 + 边缘 BridgeLink + 仲裁回灌 + 归档）；慢脑=可插拔仲裁器（clip/ollama/abstain） | ✅ |
-| **M3-a 时空规则引擎完善** | 越线（方向过滤+冷却去重）+ 区域占驻计数 + Tracker 有界轨迹历史；复合事件（A 后 B 于 T 内）与事件录像缓冲待做 | ✅ 本轮 |
+| **M3-a 时空规则引擎完善** | 越线（方向过滤+冷却去重）+ 区域占驻计数 + Tracker 有界轨迹历史 + 事件帧环形缓冲（告警前因帧）；复合事件（A 后 B 于 T 内）待做 | ✅ 本轮 |
 | **M2.6 场景自识别（§8.1）** | 首个确认事件 → 慢脑识别场所（CLIP 兜底/ollama VLM 精判）→ 高置信自动布防 → 人工可改；观察态引导包（人员检测仅记录） | ✅ 本轮 |
 | **M3 时空规则引擎 + 开放集** | zones/dwell/count/composite + unknown 拒识 + 油库烟火第三模式包 + restricted-area 真实人员检测模型接入 | 待做 |
 | **M1.8 restricted-area 真实化 + 资产单源化（P1-①②）** | 真实人员模型 NanoDet-Plus@416（Apache-2.0，选型/淘汰证据 docs/model-selection.md）+ zones/滞留规则落地 + nanodethead 解码器注册 + `assets/` 单源（manifest sha256 + verify_models.py + CI 资产完整性闸门）；JS 解码器与真实模型输出等价性验证通过 | ✅ 本轮 |

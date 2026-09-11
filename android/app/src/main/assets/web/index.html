@@ -557,6 +557,8 @@ let sceneFirstSampleAt=0;
 let sceneIdentifying=false;
 const SCENE_WINDOW=180000;         // 攒样窗口 3min：到期即用现有样本识别（1~3 帧）
 const SCENE_MAX_SAMPLES=3;
+const evidenceRing=new FrameRing({max:12, minIntervalMs:500});  // 告警前因帧环（~6s@500ms）
+let evidenceLastRender=0;
 function updateModeName(){
   const nm=document.getElementById('modeName');
   if(packErrs.length){ nm.textContent='⚠ '+packErrs[0]; return; }
@@ -792,9 +794,9 @@ document.getElementById('btnBridge').onclick=bridgeConnect;
 })();
 
 // ---------- 场景自识别（§9）：引导包观察态攒样 → 慢脑识别 → 选包收口 ----------
-function captureWideJPEG(vw,vh){
+function captureWideJPEG(vw,vh,width){
   try{
-    const w=640, h=Math.max(1,Math.round(vh*(w/vw)));
+    const w=width||640, h=Math.max(1,Math.round(vh*(w/vw)));
     const cw=document.createElement('canvas'); cw.width=w; cw.height=h;
     cw.getContext('2d').drawImage(srcCanvas,0,0,w,h);
     return cw.toDataURL('image/jpeg',0.6);
@@ -967,6 +969,12 @@ async function loop(){
 
   // 慢系统：触发式检测——有运动即检（间隔≥motionDetInterval），无运动按巡检间隔兜底
   const now=performance.now();
+  // 证据帧环形缓冲（~500ms 一帧 320 宽，≤12 帧≈6s 前因）：告警事件的证据来源
+  if(now-evidenceLastRender>500){
+    evidenceLastRender=now;
+    const j=captureWideJPEG(vw,vh,320);
+    if(j) evidenceRing.push({jpeg:j, ts:video.currentTime}, now);
+  }
   let dets=[];
   const due = motion.length>0
     ? now-lastDet>=CFG.motionDetInterval
@@ -1097,7 +1105,7 @@ async function loop(){
               discriminator: pack.discriminator?pack.discriminator.probe:null,
               probeState: jepa?jepa.storageKey:null },
             evidence:{videoTs:video.currentTime, frame:frameCount, cropJpeg,
-              zoneId:(zr&&zr.zoneId)||null},
+              preRoll:evidenceRing.peek(), zoneId:(zr&&zr.zoneId)||null},
           });
           tele._log({ty:'ev',ev});
           // 证据内容哈希尽力补齐（异步写回事件对象，导出时已带上）

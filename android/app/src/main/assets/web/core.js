@@ -598,6 +598,27 @@ class RuleEngine {
   }
 }
 
+// ---------- 证据帧环形缓冲（告警前因帧：事件发生前的低频帧序列） ----------
+// 渲染 JPEG 属 DOM 操作，留在边缘层；本类只管节流、容量与取用。
+class FrameRing {
+  constructor(opts) {
+    this.max = opts.max || 12;
+    this.minIntervalMs = opts.minIntervalMs || 500;
+    this.items = [];
+    this._lastAt = -Infinity;
+  }
+  // frame: {jpeg, ts}（调用方渲染）；now: 毫秒时钟。返回是否实际入环。
+  push(frame, now) {
+    if (now - this._lastAt < this.minIntervalMs) return false;
+    this._lastAt = now;
+    this.items.push(frame);
+    if (this.items.length > this.max) this.items.shift();
+    return true;
+  }
+  peek() { return this.items.slice(); }   // 快照（引用共享，JPEG 字符串不可变）
+  clear() { this.items.length = 0; }
+}
+
 // ---------- 证据事件（机器可消费的版本化事件，从"帧"到"有证据的事件"） ----------
 const EVIDENCE_SCHEMA = 'sc.evidence/v1';
 const POLICY_VERSION = 'four-state/2';
@@ -782,5 +803,5 @@ if (typeof module!=='undefined' && module.exports) {
     HEAD_DECODERS, decodeV8Head, decodeNanoDetHead, boxIoU, nms,
     pointInPolygon, ZoneEngine, applyZonePolicy, BridgeLink,
     SCENE_AUTO_ARM_CONF, applySceneGate, selectPackFromVerdict,
-    segSide, segIntersect, RuleEngine };
+    segSide, segIntersect, RuleEngine, FrameRing };
 }

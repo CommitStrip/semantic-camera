@@ -18,7 +18,7 @@ const { CFG, estimateDist, sizeForClass, iou, Tracker, MotionGate,
   HEAD_DECODERS, decodeV8Head, decodeNanoDetHead, boxIoU, nms,
   pointInPolygon, ZoneEngine, applyZonePolicy, BridgeLink,
   SCENE_AUTO_ARM_CONF, applySceneGate, selectPackFromVerdict,
-  segSide, segIntersect, RuleEngine } = require('../web/core.js');
+  segSide, segIntersect, RuleEngine, FrameRing } = require('../web/core.js');
 const { MODE_PACKS, getModePack } = require('../web/mode-packs.js');
 const { createHash } = await import('node:crypto');
 
@@ -559,6 +559,24 @@ test('applyZonePolicy：countGte 人数不足降级（聚集规则）', () => {
   const crowd = applyZonePolicy(alert, hit, zones, 3);
   assert.equal(crowd.action, 'alert');
   assert.equal(crowd.reason, 'zone-intrusion');
+});
+
+// ==================== 证据帧环形缓冲（告警前因帧） ====================
+
+test('FrameRing：节流入环 + 容量截断 + 快照语义', () => {
+  const ring = new FrameRing({ max: 3, minIntervalMs: 500 });
+  assert.equal(ring.push({ jpeg: 'a', ts: 1 }, 0), true, '首帧入环');
+  assert.equal(ring.push({ jpeg: 'b', ts: 1.5 }, 200), false, '间隔不足丢弃');
+  assert.equal(ring.push({ jpeg: 'c', ts: 2 }, 600), true);
+  assert.equal(ring.push({ jpeg: 'd', ts: 3 }, 1200), true);
+  assert.equal(ring.push({ jpeg: 'e', ts: 4 }, 1800), true);
+  assert.equal(ring.items.length, 3, '容量截断 ≤max');
+  assert.equal(ring.items[0].jpeg, 'c', '最旧帧被挤出');
+  const snap = ring.peek();
+  assert.equal(snap.length, 3);
+  assert.notEqual(snap, ring.items, '快照为数组拷贝');
+  ring.clear();
+  assert.equal(ring.items.length, 0);
 });
 
 // ==================== 检测头解码器（注册表契约） ====================
