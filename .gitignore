@@ -36,3 +36,7 @@ web/test_*.webm
 # ---- 桥运行时（不入库）----
 bridge/config.json
 bridge/archive/
+
+# ---- Python 运行时（不入库）----
+__pycache__/
+*.pyc

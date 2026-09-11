@@ -12,7 +12,7 @@ Three design red lines: **the discrimination pipeline runs fully automatically w
 
 **Claims discipline**: today's algorithms are a "configurable event camera + per-venue discrimination heads" — we do not claim universal scene understanding, zero false alarms, human-level semantics, or "zero-code venue onboarding" (the accurate claim: new venues require no core-logic changes, while still adding registry data and redeploying); we report measured numbers only, and everything unmeasured is marked "pending / design / roadmap".
 
-Current validation status: probe-head offline accuracy **98.15%** (162 authoritative Drone-vs-Bird samples, evidence `web/jepa_probe_init.json`: acc=0.9815, n_train=162, dim=768, inherited as measured from the predecessor repo); **the person model is validated on real street footage**: NanoDet-Plus-m-1.5x@416 (Apache-2.0) detects 7–58 persons/frame on sampled frames of a CC-licensed Shibuya crossing video at 23–24 ms/frame CPU (selection and measurements in [docs/model-selection.md](docs/model-selection.md)); WHEP signaling verified end-to-end against a local MediaMTX v1.20.0 + H.264 test stream; **69 unit tests + GitHub Actions CI all green** (including two-mode end-to-end acceptance, source-cleanliness, evidence-schema contract, mode-selection fail-closed, asset-integrity, and spatiotemporal-rule gates). On-device end-to-end fps/latency benchmarks are **pending**.
+Current validation status: probe-head offline accuracy **98.15%** (162 authoritative Drone-vs-Bird samples, evidence `web/jepa_probe_init.json`: acc=0.9815, n_train=162, dim=768, inherited as measured from the predecessor repo); **the person model is validated on real street footage**: NanoDet-Plus-m-1.5x@416 (Apache-2.0) detects 7–58 persons/frame on sampled frames of a CC-licensed Shibuya crossing video at 23–24 ms/frame CPU (selection and measurements in [docs/model-selection.md](docs/model-selection.md)); WHEP signaling verified end-to-end against a local MediaMTX v1.20.0 + H.264 test stream; **73 unit tests + GitHub Actions CI all green** (including two-mode end-to-end acceptance, source-cleanliness, evidence-schema contract, mode-selection fail-closed, asset-integrity, and spatiotemporal-rule gates). On-device end-to-end fps/latency benchmarks are **pending**.
 
 ## Key capabilities
 
@@ -106,7 +106,7 @@ See `harmony/README.md`. The core runs in an ArkWeb component; `javaScriptProxy`
 ## Development: tests, CI and multi-copy sync
 
 ```bash
-node --test tests/core.test.mjs     # 69 unit tests (node:test, zero deps)
+node --test tests/core.test.mjs     # 73 unit tests (node:test, zero deps)
 python scripts/verify_models.py    # model asset sha256 integrity (fail-closed)
 bash scripts/sync-web.sh            # web/ → android assets + harmony rawfile
 bash scripts/sync-web.sh --check    # consistency check only (same as CI)

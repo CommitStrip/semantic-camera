@@ -12,7 +12,7 @@
 
 **宣传口径**：当前算法是"可配置事件摄像头 + 场所判别头"——不宣称自动理解所有场景、零误报、人类级语义理解或"零代码接入"（准确说法：新增场所不改核心逻辑代码，仍需在注册表加数据并部署）；只报告实测数据，未测项标"待回填/设计态"。
 
-当前验证状态：初始化探针头离线精度 **98.15%**（162 张权威 Drone-vs-Bird 样本，证据 `web/jepa_probe_init.json`：acc=0.9815, n_train=162, dim=768，自前身仓实测继承）；**人员检测模型已在真实街景验证**：NanoDet-Plus-m-1.5x@416（Apache-2.0）对 CC 授权的涩谷十字路口视频抽帧检出 person 7~58 个/帧，Python ORT CPU 推理 23-24ms/帧（选型与实测详见 [docs/model-selection.md](docs/model-selection.md)）；WHEP 信令已用本地 MediaMTX v1.20.0 + H.264 测试流完成端到端验证；**69 例单元测试 + GitHub Actions CI 全绿**（含双模式端到端验收、核心源码洁净度、证据事件 schema 契约、模式选择 fail-closed、模型资产完整性闸门）。浏览器 wasm 端到端帧率/延迟实测**待回填**。
+当前验证状态：初始化探针头离线精度 **98.15%**（162 张权威 Drone-vs-Bird 样本，证据 `web/jepa_probe_init.json`：acc=0.9815, n_train=162, dim=768，自前身仓实测继承）；**人员检测模型已在真实街景验证**：NanoDet-Plus-m-1.5x@416（Apache-2.0）对 CC 授权的涩谷十字路口视频抽帧检出 person 7~58 个/帧，Python ORT CPU 推理 23-24ms/帧（选型与实测详见 [docs/model-selection.md](docs/model-selection.md)）；WHEP 信令已用本地 MediaMTX v1.20.0 + H.264 测试流完成端到端验证；**73 例单元测试 + GitHub Actions CI 全绿**（含双模式端到端验收、核心源码洁净度、证据事件 schema 契约、模式选择 fail-closed、模型资产完整性闸门）。浏览器 wasm 端到端帧率/延迟实测**待回填**。
 
 ## 核心能力
 
@@ -107,7 +107,7 @@ cd web && python3 -m http.server 8899
 ## 开发：测试、CI 与多端副本同步
 
 ```bash
-node --test tests/core.test.mjs     # 69 例单测（node:test，零依赖）
+node --test tests/core.test.mjs     # 73 例单测（node:test，零依赖）
 python scripts/verify_models.py    # 模型资产 sha256 完整性校验（fail-closed）
 bash scripts/sync-web.sh            # web/ → android assets + harmony rawfile
 bash scripts/sync-web.sh --check    # 只校验一致性（CI 同款）
@@ -121,7 +121,7 @@ CI（node 20/22 矩阵）：JS 语法检查 → 单元测试 → 三副本一致
 |----|------|
 | WHEP 信令端到端 | ✅ 已验证（MediaMTX v1.20.0 + H.264 测试流，OPTIONS→POST→PATCH→DELETE 全通过） |
 | 探针头离线精度 | ✅ 98.15%（162 样本，`web/jepa_probe_init.json`，自前身仓实测继承） |
-| 单元测试 / CI | ✅ 69 例全绿（含双模式验收、洁净度、schema 契约、fail-closed、资产完整性、时空规则闸门），node 20/22 矩阵 |
+| 单元测试 / CI | ✅ 73 例全绿（含双模式验收、洁净度、schema 契约、fail-closed、资产完整性、时空规则、Outbox 出口闸门），node 20/22 矩阵 |
 | 人员模型真实街景 | ✅ NanoDet-Plus@416 抽帧检出 7~58 person/帧，CPU 23-24ms/帧（[选型记录](docs/model-selection.md)）；浏览器 wasm 帧率 ⏳ 待回填 |
 | 真机帧率/延迟 | ⏳ 待回填——遥测已逐帧采集 `detMs/trackMs/motionRatio`，导出 CSV/JSON 即为实测数据 |
 

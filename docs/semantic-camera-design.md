@@ -322,7 +322,7 @@ EdgeCore → 桥：{type:'arb-request', trackId, packId, task:'main',
 | **M3 时空规则引擎 + 开放集** | zones/dwell/count/composite + unknown 拒识 + 油库烟火第三模式包 + restricted-area 真实人员检测模型接入 | 待做 |
 | **M1.8 restricted-area 真实化 + 资产单源化（P1-①②）** | 真实人员模型 NanoDet-Plus@416（Apache-2.0，选型/淘汰证据 docs/model-selection.md）+ zones/滞留规则落地 + nanodethead 解码器注册 + `assets/` 单源（manifest sha256 + verify_models.py + CI 资产完整性闸门）；JS 解码器与真实模型输出等价性验证通过 | ✅ 本轮 |
 | **M4 多相机 + VenueController + 健康监控** | 多路预算调度 + §9 健康项 + 学习状态全键隔离 + **MediaTransport 抽象**（RTSP/WHEP/HLS/USB 不进模式包、不与检测器耦合，§19） | 待做 |
-| **M5 复训闭环 + 评测闸门 + 告警出口** | 影子晋升/校准集防线/每包基准集/sinks（确定性 Outbox 主链 + MCP 可选适配器，§14）/许可证决策——**自训练按场所开启的前置条件** | 待做 |
+| **M5 复训闭环 + 评测闸门 + 告警出口** | 影子晋升/校准集防线/每包基准集/许可证决策——**自训练按场所开启的前置条件**；出口主链已落地（§14：Outbox at-least-once + webhook 脱敏投递，17d5de8）；剩 sinks 路由完善与 MCP 适配器 | 部分完成 |
 | **M6 部署形态扩展** | 单盒多路网关实测与发布（Prometheus 指标维度参考 §19；先单机做实再横向扩展） | 待做 |
 
 ## 18. 风险与开放问题
