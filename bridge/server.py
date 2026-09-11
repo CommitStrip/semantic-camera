@@ -51,6 +51,26 @@ class Bridge:
         except OSError:
             pass  # 归档失败不阻断仲裁
 
+    def archive_scene(self, req, out):
+        """场所识别案件归档（§9）：目录/帧/裁决——模式包目录生长机制的语料"""
+        try:
+            os.makedirs(self.archive_dir, exist_ok=True)
+            path = os.path.join(self.archive_dir,
+                                datetime.now().strftime('%Y%m%d') + '-scene.jsonl')
+            rec = {
+                'ts': datetime.now().isoformat(),
+                'request': {'requestId': req.get('requestId'),
+                            'catalog': req.get('catalog')},
+                'verdict': {k: out.get(k) for k in
+                            ('packId', 'conf', 'rationale', 'arbiter', 'latencyMs')},
+            }
+            if self.archive_crops:
+                rec['frames'] = req.get('frames')
+            with open(path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + '\n')
+        except OSError:
+            pass
+
     async def handle(self, ws):
         peer = getattr(ws, 'remote_address', ('?', 0))
         try:
@@ -67,6 +87,26 @@ class Bridge:
             try:
                 req = json.loads(raw)
             except Exception:
+                continue
+            if req.get('type') == 'scene-identify':
+                t0 = time.time()
+                try:
+                    verdict = await self.arbiter.scene_identify(req)
+                except Exception as e:
+                    verdict = {'packId': None, 'conf': 0.0,
+                               'rationale': str(e)[:120]}
+                out = {'type': 'scene-verdict', 'requestId': req.get('requestId'),
+                       'packId': verdict.get('packId'), 'conf': verdict.get('conf'),
+                       'rationale': verdict.get('rationale', ''),
+                       'arbiter': self.arbiter.name,
+                       'latencyMs': round((time.time() - t0) * 1000)}
+                try:
+                    await ws.send(json.dumps(out))
+                except Exception:
+                    break
+                self.archive_scene(req, out)
+                print(f"[bridge] 场景识别 {req.get('requestId')} → {out.get('packId')} "
+                      f"({out.get('conf')}) {out.get('latencyMs')}ms")
                 continue
             if req.get('type') != 'arb-request':
                 continue

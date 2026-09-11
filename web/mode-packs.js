@@ -16,10 +16,38 @@
 "use strict";
 (function () {
   const PACKS = {
+    _bootstrap: {
+      id: '_bootstrap',
+      name: '观察模式（场景未识别）',
+      version: 1,
+      bootstrap: true,             // 场景自识别前的占位：检测/跟踪/证据照常，告警由场景层全抑制
+      hidden: true,                // 不出现在人工场景选择列表
+      detector: {
+        engine: 'onnx',
+        head: 'nanodethead',
+        model: './person-detector.onnx',  // 通用人员检测作引导——任何场所都成立，且为场景识别提供素材
+        inputSize: 416,
+        classes: ['person'],
+        keepIndices: [0],
+        numClasses: 80,
+        strides: [8, 16, 32, 64],
+        regBins: 8,
+        confThresh: 0.4,
+        sizeByClass: { person: 1.7 },
+        defaultSizeM: 1.7,
+      },
+      discriminator: null,
+      detectorAlertConf: 0.60,
+      alertCls: 'person',
+      arb: { budgetPerHour: 10, ttlMs: 15000 },
+      selfTrain: null,
+    },
+
     airfield: {
       id: 'airfield',
       name: '净空防黑飞',
       version: 1,
+      description: 'an airport airfield with runways, perimeter fences and open sky, aircraft or drones may appear overhead',  // 场所描述：场景自识别匹配素材
       detector: {
         engine: 'onnx',
         head: 'yolo8head',                 // 解码器：[1,4+nc,N] 无 objectness
@@ -48,6 +76,7 @@
       id: 'restricted-area',
       name: '限制区域闯入',
       version: 2,
+      description: 'a fenced restricted compound or industrial site entrance with gates and perimeter walls, people may approach or enter',  // 场所描述：场景自识别匹配素材
       detector: {
         engine: 'onnx',
         head: 'nanodethead',               // 解码器：[1,N,nc+4*bins] GFL 分布回归

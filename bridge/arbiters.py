@@ -70,6 +70,11 @@ class BaseArbiter:
     async def arbitrate(self, req):
         raise NotImplementedError
 
+    async def scene_identify(self, req):
+        """场所识别（§9）：req 含 catalog[{id,description}] 与 frames[{wide,crops[]}]。
+        默认弃权；返回 {packId: str|None, conf: float, rationale: str}"""
+        return {'packId': None, 'conf': 0.0, 'rationale': 'arbiter 无场所识别能力'}
+
 
 class AbstainArbiter(BaseArbiter):
     name = 'abstain'
@@ -121,6 +126,29 @@ class ClipZeroShotArbiter(BaseArbiter):
         return {'label': self.labels[bi], 'conf': round(float(p[bi]), 4),
                 'model': 'clip-vitb32-zeroshot'}
 
+    async def scene_identify(self, req):
+        """CLIP 零样本场所分类：以各模式包的场所描述文本为 prompt，宽帧为图像。
+        离线可跑的兜底通道（细粒度场景弱，VLM 通道可用时优先）。"""
+        catalog = req.get('catalog') or []
+        if not catalog:
+            return {'packId': None, 'conf': 0.0, 'rationale': 'catalog 为空'}
+        descriptions = [c.get('description') or c['id'] for c in catalog]
+        ids, mask = self._tokenize(descriptions)
+        frames = req.get('frames') or []
+        if not frames or not frames[0].get('wide'):
+            return {'packId': None, 'conf': 0.0, 'rationale': '缺宽帧'}
+        jpeg = base64.b64decode(frames[0]['wide'])
+        px = self._prep(jpeg)
+        out = self.sess.run(None, {'pixel_values': px,
+                                   'input_ids': ids,
+                                   'attention_mask': mask})
+        logits = out[self._logits_idx][0]
+        p = np.exp(logits - logits.max())
+        p /= p.sum()
+        bi = int(np.argmax(p))
+        return {'packId': catalog[bi]['id'], 'conf': round(float(p[bi]), 4),
+                'rationale': 'clip 零样本场所分类'}
+
 
 class OllamaArbiter(BaseArbiter):
     """ollama 视觉模型仲裁（vus 慢脑同款路线；主机经 validate_http_base 校验）"""
@@ -147,6 +175,37 @@ class OllamaArbiter(BaseArbiter):
             if l in text:
                 return {'label': l, 'conf': 1.0, 'model': 'ollama:' + self.model}
         return {'label': None, 'conf': 0.0, 'abstain': True}
+
+    async def scene_identify(self, req):
+        """VLM 场所识别：宽帧+裁剪帧 + 模式包目录文本 → 选择最匹配的 packId"""
+        catalog = req.get('catalog') or []
+        if not catalog:
+            return {'packId': None, 'conf': 0.0, 'rationale': 'catalog 为空'}
+        frames = req.get('frames') or []
+        images = []
+        for fr in frames[:2]:
+            if fr.get('wide'):
+                images.append(fr['wide'])
+            images.extend(fr.get('crops') or [])
+        if not images:
+            return {'packId': None, 'conf': 0.0, 'rationale': '无帧'}
+        listing = '\n'.join(f"- {c['id']}: {c.get('description') or c['id']}"
+                            for c in catalog)
+        prompt = (f'You are configuring a surveillance camera. These frames come from '
+                  f'ONE camera. Which venue type does this camera most likely watch?\n'
+                  f'{listing}\n'
+                  f'Reply with exactly one venue id from the list.')
+        body = json.dumps({'model': self.model, 'prompt': prompt,
+                           'images': images, 'stream': False,
+                           'options': {'temperature': 0}})
+        resp = await asyncio.to_thread(
+            post_json_http, self.host + '/api/generate', body, 90, self.allowed_hosts)
+        text = (resp.get('response') or '').strip().lower()
+        for c in catalog:
+            if c['id'].lower() in text:
+                return {'packId': c['id'], 'conf': 0.9,
+                        'rationale': 'ollama vlm 场所识别'}
+        return {'packId': None, 'conf': 0.0, 'rationale': '回复未含目录 id: ' + text[:80]}
 
 
 def build_arbiter(cfg):

@@ -676,6 +676,27 @@ class BridgeLink {
   }
 }
 
+// ---------- 场景自识别（场所层开放集，设计文档 §9） ----------
+// 边缘场景状态机的纯逻辑部分：
+//   applySceneGate —— 未识别/观察态下告警全抑制（检测/跟踪/证据照常，什么都不丢）
+//   selectPackFromVerdict —— 慢脑裁决 → 选包收口（高置信自动布防，低置信仅建议）
+const SCENE_AUTO_ARM_CONF = 0.85;   // 自动布防闸门；低于此值仅列为候选待人工选择
+function applySceneGate(dec, sceneArmed) {
+  if (sceneArmed || dec.action !== 'alert') return dec;
+  return Object.assign({}, dec, { action: 'record', reason: 'scene-unidentified' });
+}
+// verdict: {packId, conf}（慢脑 scene-verdict）；catalog: [{id,...}]
+// 返回 {packId, source:'auto'|'suggest'} | null（未知包=裁决无效）
+function selectPackFromVerdict(verdict, catalog, autoArmConf) {
+  if (!verdict || !verdict.packId) return null;
+  const hit = (catalog || []).find(p => p.id === verdict.packId);
+  if (!hit) return null;
+  const conf = typeof verdict.conf === 'number' ? verdict.conf : 0;
+  const autoArmConf_ = autoArmConf === undefined ? SCENE_AUTO_ARM_CONF : autoArmConf;
+  return { packId: verdict.packId,
+           source: conf >= autoArmConf_ ? 'auto' : 'suggest', conf };
+}
+
 // ---------- Node 单测入口（浏览器端 module 未定义，此块不执行） ----------
 if (typeof module!=='undefined' && module.exports) {
   module.exports = { CFG, estimateDist, sizeForClass, iou, Tracker, MotionGate,
@@ -684,5 +705,6 @@ if (typeof module!=='undefined' && module.exports) {
     probeStorageKey, MockDetector, EVIDENCE_SCHEMA, POLICY_VERSION,
     stableStringify, stableHash, sha256Hex, buildEvidenceEvent,
     HEAD_DECODERS, decodeV8Head, decodeNanoDetHead, boxIoU, nms,
-    pointInPolygon, ZoneEngine, applyZonePolicy, BridgeLink };
+    pointInPolygon, ZoneEngine, applyZonePolicy, BridgeLink,
+    SCENE_AUTO_ARM_CONF, applySceneGate, selectPackFromVerdict };
 }

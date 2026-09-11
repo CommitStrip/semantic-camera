@@ -24,6 +24,7 @@ Current validation status: probe-head offline accuracy **98.15%** (162 authorita
 | Venue mode packs | Modes are data + a validator: `?mode=` selects, new venues plug in with zero code; domain terms live only in `web/mode-packs.js` (enforced by a CI cleanliness test); `validatePack` is fail-closed — a bad config refuses to arm |
 | Evidence events | Versioned `sc.evidence/v1` envelope: stable event ID, dual timestamps (source/processed), mode-pack config fingerprint, policy version, model SHA-256, detector and discriminator confidences kept separate, alert crop frame with its content hash — auditable, machine-consumable events |
 | Arming schedule | Mode packs may declare arming windows (overnight-capable); outside the window alerts downgrade to records and arbitration spends no budget |
+| Scene auto-recognition | The first confirmed trigger sends frames to the slow brain to identify the venue (CLIP zero-shot fallback / ollama VLM refine); conf≥0.85 auto-arms; unidentified = observation mode (records only, never fabricates); manual assignment always wins |
 | vus bridge arbitration (M2) | Gray-zone cases escalate to a pluggable slow brain (CLIP zero-shot / ollama VLM): verdicts feed back as pseudo-labels, cases archived to JSONL; bridge down = edge stays fully autonomous, never fabricates |
 | Zone rules | Polygon zones (normalized coords): entering + dwelling past `dwellMs` escalates to an alert (`zone-intrusion`), outside-zone targets downgrade to records; read-only overlay |
 | Detector head registry | `HEAD_DECODERS`: `yolo8head` (no objectness) / `nanodethead` (GFL distribution regression) / `mock` (deterministic timeline) — the head name is a provider-registry key, extending adds no core changes |
@@ -87,6 +88,7 @@ cd web && python3 -m http.server 8899
 - Tap **▶ Start** to use the phone camera, **📁 Video** for local playback, **🔌 海康** for a real camera stream.
 - Tap **⏺ Record** to open the telemetry panel; events accumulate live; **export CSV/JSON** to download.
 - Zoom via slider / ＋− buttons / two-finger pinch; enable **target-following** to auto-center on confirmed targets.
+- **Scene auto-recognition**: start without picking a mode = observation mode (person detection, records only); with the bridge connected, the first confirmed trigger auto-identifies the venue and arms (conf≥0.85); switch anytime via the "场景" dropdown.
 
 ## Native shells
 

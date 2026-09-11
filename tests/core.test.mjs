@@ -16,7 +16,8 @@ const { CFG, estimateDist, sizeForClass, iou, Tracker, MotionGate,
   probeStorageKey, MockDetector, EVIDENCE_SCHEMA, POLICY_VERSION,
   stableStringify, stableHash, sha256Hex, buildEvidenceEvent,
   HEAD_DECODERS, decodeV8Head, decodeNanoDetHead, boxIoU, nms,
-  pointInPolygon, ZoneEngine, applyZonePolicy, BridgeLink } = require('../web/core.js');
+  pointInPolygon, ZoneEngine, applyZonePolicy, BridgeLink,
+  SCENE_AUTO_ARM_CONF, applySceneGate, selectPackFromVerdict } = require('../web/core.js');
 const { MODE_PACKS, getModePack } = require('../web/mode-packs.js');
 const { createHash } = await import('node:crypto');
 
@@ -463,6 +464,39 @@ test('BridgeLink：断线清空在途（bridge-offline）并进入退避', async
   await assert.rejects(p, /bridge-offline/);
   assert.equal(bl.state, 'offline');
   bl.close();
+});
+
+// ==================== 场景自识别（§9） ====================
+
+test('applySceneGate：观察态告警抑制为记录，布防态与非 alert 透传', () => {
+  const alert = { action: 'alert', via: 'detector', conf: 0.9 };
+  const gated = applySceneGate(alert, false);
+  assert.equal(gated.action, 'record');
+  assert.equal(gated.reason, 'scene-unidentified');
+  assert.equal(applySceneGate(alert, true).action, 'alert', '布防态透传');
+  assert.equal(applySceneGate({ action: 'clear' }, false).action, 'clear', '非 alert 透传');
+});
+
+test('selectPackFromVerdict：高置信 auto / 低置信 suggest / 未知包 null', () => {
+  const catalog = [{ id: 'airfield' }, { id: 'restricted-area' }];
+  const hi = selectPackFromVerdict({ packId: 'airfield', conf: 0.87 }, catalog);
+  assert.deepEqual([hi.packId, hi.source], ['airfield', 'auto']);
+  const lo = selectPackFromVerdict({ packId: 'airfield', conf: 0.6 }, catalog);
+  assert.equal(lo.source, 'suggest');
+  assert.equal(selectPackFromVerdict({ packId: 'nope', conf: 0.99 }, catalog), null,
+    '未知包=无效裁决（fail-closed）');
+  assert.equal(selectPackFromVerdict(null, catalog), null);
+});
+
+test('_bootstrap 引导包：通过校验、hidden 不入人工目录、不抢缺省', () => {
+  const b = MODE_PACKS['_bootstrap'];
+  assert.deepEqual(validatePack(b), []);
+  assert.equal(b.bootstrap, true);
+  assert.equal(b.hidden, true);
+  assert.equal(getModePack(undefined), MODE_PACKS.airfield, '缺省仍回退首包');
+  // 场景目录（人工选择列表）必须排除引导包
+  const visible = Object.values(MODE_PACKS).filter(p => !p.hidden);
+  assert.ok(visible.every(p => !p.bootstrap));
 });
 
 // ==================== 检测头解码器（注册表契约） ====================

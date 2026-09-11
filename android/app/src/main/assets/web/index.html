@@ -166,6 +166,13 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:20px;heigh
     <button class="btn small" id="btnProbeReset">重置学习</button>
   </div>
   <div class="row">
+    <label>场景</label>
+    <select id="sceneSel" style="flex:1;background:#05080d;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:8px 10px;font-size:12px;min-width:0">
+      <option value="">— 识别中 / 待选择 —</option>
+    </select>
+    <button class="btn small" id="btnSceneRe">重新识别</button>
+  </div>
+  <div class="row">
     <label>桥</label>
     <input id="bridgeUrl" placeholder="ws://192.168.1.10:8390" style="flex:1;background:#05080d;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:8px 10px;font-size:12px;min-width:0">
     <input id="bridgeToken" type="password" placeholder="令牌" style="flex:0 0 88px;background:#05080d;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:8px 10px;font-size:12px">
@@ -499,14 +506,32 @@ const octx=overlay.getContext('2d');
 const stage=document.getElementById('stage');
 const teleOut=document.getElementById('tele');
 
-// 场所模式包：?mode= 参数选择，缺省首包（注册表在 mode-packs.js——领域数据唯一居所）
-// fail-closed：未知模式返回 null，绝不静默回退到别的场所（选错模式比配置非法更危险）
+// ---------- 场景自识别（§9）：人工指定 > 自动识别 > 未识别（观察模式） ----------
+// 模式包是摄像头的运行时状态：无场景时跑通用人员引导包（观察模式：检测/跟踪/
+// 证据照常，告警全抑制），首个确认事件触发慢脑场景识别，识别结果高置信（≥0.85）
+// 自动布防，用户可随时在"场景"下拉人工改配——人工永不自动覆盖。
 const modeParam=new URLSearchParams(location.search).get('mode');
-const pack=window.SEMANTIC_GET_MODE_PACK(modeParam);
-const packErrs=(modeParam && !pack) ? ['未知模式：'+modeParam+'（拒绝布防）']
-  : validatePack(pack);
+let scenePackKey=localStorage.getItem('scene_pack');
+let sceneSource=localStorage.getItem('scene_source')||'none';
+let sceneState='unidentified';   // unidentified|identifying|identified|failed
+let pack=null, packErrs=[];
+if(modeParam && MODE_PACKS[modeParam]){
+  pack=MODE_PACKS[modeParam]; scenePackKey=modeParam; sceneSource='manual'; sceneState='identified';
+  packErrs=validatePack(pack);
+  if(packErrs.length){ pack=MODE_PACKS['_bootstrap']; sceneState='failed'; }   // 校验败→观察态占位
+} else if(modeParam){
+  // 显式指定了不存在的模式：不猜测意图，进入观察模式并提示（绝不静默改跑别家告警）
+  pack=MODE_PACKS['_bootstrap']; sceneState='failed';
+  packErrs=['未知模式：'+modeParam+'（观察模式，仅记录；可在"场景"中手动选择）'];
+} else if(scenePackKey && MODE_PACKS[scenePackKey]){
+  pack=MODE_PACKS[scenePackKey]; sceneState='identified';
+  packErrs=validatePack(pack);
+  if(packErrs.length){ pack=MODE_PACKS['_bootstrap']; sceneState='failed'; }
+} else {
+  pack=MODE_PACKS['_bootstrap'];   // 无场景记录 → 观察模式，首个确认事件触发识别
+}
 // 配置指纹：进入每条证据事件，证明当时生效的模式包内容（非加密哈希，防漂移不防篡改）
-const MODE_HASH=pack ? stableHash(pack) : null;
+let MODE_HASH=pack ? stableHash(pack) : null;
 let policy=pack ? new JepaPolicy(pack) : null;          // 四态全自动裁决（无人工判定环节）
 let arb=pack ? new ArbitrationQueue(pack.arb) : null;   // 慢脑仲裁队列（预算硬上限 + 轨迹去重）
 let zoneEngine=pack ? new ZoneEngine(pack.zones) : null; // 区域规则引擎（场所时空语义）
@@ -526,11 +551,21 @@ let lastDet=0;
 let detecting=false;                // 慢系统在飞标志：wasm 推理期间 raf 重入不重复派发
 let frameCount=0, flip=false;
 let pendingJepa=null;      // 最近一次裁决(供 HUD 显示)
-document.getElementById('modeName').textContent=
-  (modeParam && !pack) ? '⚠ 未知模式：'+modeParam+'（拒绝布防）'
-  : packErrs.length ? '⚠ 模式包非法：'+packErrs[0]+'（拒绝布防）'
-  : pack.name+' · v'+pack.version+' · '+(jepa?'JEPA 全自动判别':'检测器权威')
-    +(pack.schedule?' · 定时布防':'')+(pack.zones?' · 区域规则':'');
+let sceneSamples=[];               // 场景识别采样 [{wide, crops[]}]（引导包观察态攒样）
+let sceneFirstSampleAt=0;
+let sceneIdentifying=false;
+const SCENE_WINDOW=180000;         // 攒样窗口 3min：到期即用现有样本识别（1~3 帧）
+const SCENE_MAX_SAMPLES=3;
+function updateModeName(){
+  const nm=document.getElementById('modeName');
+  if(packErrs.length){ nm.textContent='⚠ '+packErrs[0]; return; }
+  if(pack.bootstrap){ nm.textContent='场景识别中…（观察模式 · 仅记录）'; return; }
+  let s=pack.name+' · v'+pack.version+' · '+(jepa?'JEPA 全自动判别':'检测器权威')
+    +(pack.schedule?' · 定时布防':'')+(pack.zones?' · 区域规则':'')
+    +(sceneSource==='manual'?' · 人工指定':(sceneSource==='auto'?' · 自动识别':''));
+  nm.textContent=s;
+}
+updateModeName();
 
 // 变焦状态(平滑)
 let smZoom=1;
@@ -729,7 +764,8 @@ function bridgeConnect(){
       return { send:t=>ws.send(t), close:()=>ws.close() };
     },
     onState:s=>{ document.getElementById('bridgeState').textContent=
-      s==='open'?'在线':(s==='connecting'?'…':'离线'); },
+      s==='open'?'在线':(s==='connecting'?'…':'离线');
+      if(s==='open') trySceneIdentify(); },   // 桥恢复时若有攒样立即识别
   });
   bridge.connect();
 }
@@ -754,6 +790,112 @@ document.getElementById('btnBridge').onclick=bridgeConnect;
   if(t!==null) document.getElementById('bridgeToken').value=t;
 })();
 
+// ---------- 场景自识别（§9）：引导包观察态攒样 → 慢脑识别 → 选包收口 ----------
+function captureWideJPEG(vw,vh){
+  try{
+    const w=640, h=Math.max(1,Math.round(vh*(w/vw)));
+    const cw=document.createElement('canvas'); cw.width=w; cw.height=h;
+    cw.getContext('2d').drawImage(srcCanvas,0,0,w,h);
+    return cw.toDataURL('image/jpeg',0.6);
+  }catch(e){ return null; }
+}
+function collectSceneSample(t, now){
+  if(sceneIdentifying || !bridge || bridge.state!=='open') return;   // 桥未通：桥开时再识别
+  if(!sceneFirstSampleAt) sceneFirstSampleAt=now;
+  if(sceneSamples.length>=SCENE_MAX_SAMPLES ||
+     (sceneSamples.length && now-sceneFirstSampleAt>SCENE_WINDOW)){ trySceneIdentify(); return; }
+  const wide=captureWideJPEG(vw,vh);
+  const crop=captureCropJPEG(t.box,vw,vh);
+  if(!wide) return;
+  sceneSamples.push({wide, crops: crop?[crop]:[]});
+  if(sceneSamples.length>=SCENE_MAX_SAMPLES ||
+     (now-sceneFirstSampleAt>SCENE_WINDOW && sceneSamples.length)) trySceneIdentify();
+}
+function trySceneIdentify(){
+  if(sceneState!=='unidentified' || sceneIdentifying || !sceneSamples.length) return;
+  if(!bridge || bridge.state!=='open') return;   // 桥未通：保持样本，open 事件里重试
+  sceneIdentifying=true; sceneState='identifying'; updateModeName();
+  const requestId='scene-'+Date.now();
+  const catalog=Object.values(MODE_PACKS).filter(p=>!p.hidden)
+    .map(p=>({id:p.id, description:p.description||p.name}));
+  tele._log({ty:'sys',msg:'场景识别中（'+sceneSamples.length+' 样本）…'});
+  bridge.request({ type:'scene-identify', requestId, catalog,
+      frames:sceneSamples, ts:Date.now() })
+    .then(v=>applySceneVerdict(v))
+    .catch(e=>{
+      sceneIdentifying=false; sceneState='unidentified'; updateModeName();
+      tele._log({ty:'sys',msg:'场景识别降级('+e.message+')——保持观察模式，可手动选择场景'});
+    });
+}
+function applySceneVerdict(v){
+  sceneIdentifying=false;
+  const catalog=Object.values(MODE_PACKS).filter(p=>!p.hidden);
+  const sel=selectPackFromVerdict(v, catalog);
+  if(!sel){
+    sceneState='failed'; updateModeName();
+    toast('场景识别无果，请在"场景"中手动选择');
+    tele._log({ty:'sys',msg:'场景识别失败：'+((v&&v.rationale)||'无效裁决')});
+    return;
+  }
+  if(sel.source==='auto'){
+    const nm=MODE_PACKS[sel.packId].name;
+    if(applyPack(MODE_PACKS[sel.packId],'auto',sel.conf))
+      toast('场景已识别：'+nm+'（'+Math.round(sel.conf*100)+'%）已布防，可在"场景"中更改');
+  } else {
+    sceneState='failed'; updateModeName();
+    sceneSel.value=sel.packId;
+    toast('疑似「'+MODE_PACKS[sel.packId].name+'」置信不足，请在"场景"中确认');
+    tele._log({ty:'sys',msg:'场景建议 '+sel.packId+' conf='+sel.conf.toFixed(2)+'——待人工确认'});
+  }
+}
+function applyPack(np, source, conf, state){
+  const errs=validatePack(np);
+  if(errs.length){ toast('目标模式包非法：'+errs[0]); return false; }
+  pack=np;
+  MODE_HASH=stableHash(pack);
+  policy=new JepaPolicy(pack);
+  arb=new ArbitrationQueue(pack.arb);
+  zoneEngine=new ZoneEngine(pack.zones);
+  detector=pack.detector.engine==='mock'? new MockDetector(pack) : new OnnxDetector(pack);
+  jepa=pack.discriminator? new JepaDiscriminator(pack) : null;
+  tracker=new Tracker();               // 类别体系变化，轨迹重建
+  pendingJepa=null; pendingArb.clear();
+  sceneSamples=[]; sceneFirstSampleAt=0; sceneIdentifying=false;
+  scenePackKey=pack.id; sceneSource=source; sceneConf=conf||0;
+  sceneState=state||'identified';
+  localStorage.setItem('scene_pack', pack.id);
+  localStorage.setItem('scene_source', source);
+  localStorage.setItem('scene_conf', String(conf||0));
+  detector.load().catch(()=>{});
+  updateModeName(); syncSceneSel();
+  tele._log({ty:'sys',msg:'模式包切换 '+pack.id+' v'+pack.version+' source='+source});
+  return true;
+}
+function switchPack(key, source, conf){ return applyPack(MODE_PACKS[key], source, conf); }
+const sceneSel=document.getElementById('sceneSel');
+(function(){
+  for(const p of Object.values(MODE_PACKS)){
+    if(p.hidden) continue;
+    const o=document.createElement('option');
+    o.value=p.id; o.textContent=p.name+' · v'+p.version;
+    sceneSel.appendChild(o);
+  }
+  syncSceneSel();
+  sceneSel.onchange=()=>{ if(sceneSel.value) switchPack(sceneSel.value,'manual',0); };
+  document.getElementById('btnSceneRe').onclick=()=>{
+    localStorage.removeItem('scene_pack');
+    localStorage.removeItem('scene_source');
+    localStorage.removeItem('scene_conf');
+    if(applyPack(MODE_PACKS['_bootstrap'],'none',0,'unidentified'))
+      toast('已重置场景，等待首个确认事件触发识别…');
+  };
+})();
+function syncSceneSel(){
+  if(pack.hidden){ sceneSel.selectedIndex=-1; return; }
+  sceneSel.value=pack.id;
+  if(sceneSel.value!==pack.id) sceneSel.selectedIndex=-1;
+}
+
 // ---------- 判别头运维：重置学习（恢复初始化权重，非判定环节） ----------
 document.getElementById('btnProbeReset').onclick=async()=>{
   if(!jepa){ toast('本模式无判别头（检测器权威）'); return; }
@@ -774,7 +916,9 @@ function stop(){
 // ---------- 主循环 ----------
 function startLoop(){
   // fail-closed：模式包校验不过拒绝布防（渲染层仍可预览画面，但不进流水线）
-  if(packErrs.length){ toast('模式包配置非法或未知模式，拒绝布防'); return; }
+  // 场景未识别/配置异常时跑引导包观察模式（检测/证据照常，告警由场景层全抑制）——
+  // 不再整体拒绝启动：什么都不记录才是最大的漏报
+  if(pack.bootstrap){ toast('观察模式：场景识别中，可在"场景"中手动选择'); }
   running=true;
   if(!tele.recording) tele.start();
   const resize=()=>{ const r=overlay.getBoundingClientRect();
@@ -910,11 +1054,15 @@ async function loop(){
                            now-t.lastConfirmAt>=CFG.reconfirmInterval)){
           const v=t.verdict;
           let dec=v || policy.decideDetector(t.cls, t.conf===undefined?0:t.conf);
+          // 场景门控：观察态（引导包）下告警全抑制——检测/跟踪/证据照常，什么都不丢
+          dec=applySceneGate(dec, !pack.bootstrap);
           // 场所规则：有 zones 时，告警还须"在区内滞留达标"；区外目标降级为记录
           let zr=null;
           if(pack.zones && pack.zones.length) zr=zoneEngine.update(t, now);
           dec=applyZonePolicy(dec, zr, pack.zones);
           const act=dec.action;
+          // 场景自识别采样（仅引导包观察态；首个确认事件触发，攒样后经桥识别）
+          if(pack.bootstrap && sceneState==='unidentified') collectSceneSample(t, now);
           const dist=estimateDist(t.box[3]*vh,vh,sizeForClass(pack,t.cls));
           tele.conf({id:t.id,dist,act,armed});
           // 版本化证据事件（sc.evidence/v1）：稳定事件 ID、双时间戳、配置指纹、
