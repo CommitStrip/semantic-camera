@@ -18,7 +18,7 @@ const { CFG, estimateDist, sizeForClass, iou, Tracker, MotionGate,
   HEAD_DECODERS, decodeV8Head, decodeNanoDetHead, boxIoU, nms,
   pointInPolygon, ZoneEngine, applyZonePolicy, BridgeLink,
   SCENE_AUTO_ARM_CONF, applySceneGate, selectPackFromVerdict,
-  segSide, segIntersect, RuleEngine, FrameRing } = require('../web/core.js');
+  segSide, segIntersect, RuleEngine, FrameRing, Outbox } = require('../web/core.js');
 const { MODE_PACKS, getModePack } = require('../web/mode-packs.js');
 const { createHash } = await import('node:crypto');
 
@@ -559,6 +559,44 @@ test('applyZonePolicy：countGte 人数不足降级（聚集规则）', () => {
   const crowd = applyZonePolicy(alert, hit, zones, 3);
   assert.equal(crowd.action, 'alert');
   assert.equal(crowd.reason, 'zone-intrusion');
+});
+
+// ==================== 告警出口 Outbox（确定性主链） ====================
+
+test('Outbox：event_id 幂等去重 + 到期投递 + 确认', () => {
+  const ob = new Outbox({ maxAttempts: 3, backoffBase: 100, backoffMax: 1000 });
+  const ev = { event_id: 'cam:m:alert:1:100', kind: 'alert' };
+  assert.equal(ob.enqueue(ev, 0), true);
+  assert.equal(ob.enqueue({ event_id: 'cam:m:alert:1:100' }, 100), false, '同 id 幂等拒绝');
+  assert.equal(ob.due(0).length, 1, '到期即可投');
+  ob.markDelivered('cam:m:alert:1:100');
+  assert.equal(ob.due(100).length, 0, '已确认不再投');
+  assert.equal(ob.stats().delivered, 1);
+});
+
+test('Outbox：失败指数退避 + 死信不静默丢弃', async () => {
+  const ob = new Outbox({ maxAttempts: 3, backoffBase: 100, backoffMax: 1000 });
+  const ev = { event_id: 'e1' };
+  ob.enqueue(ev, 0);
+  ob.markFailed('e1', 0);                    // 第 1 次失败 → 100ms 后重试
+  assert.equal(ob.due(50).length, 0, '退避期内不到期');
+  assert.equal(ob.due(150).length, 1, '退避到期重新可投');
+  ob.markFailed('e1', 150);                  // 第 2 次失败 → 200ms
+  assert.equal(ob.due(200).length, 0);
+  assert.equal(ob.due(400).length, 1);
+  ob.markFailed('e1', 400);                  // 第 3 次失败 → maxAttempts 耗尽 → 死信
+  assert.equal(ob.due(100000).length, 0, '死信不再投递');
+  assert.equal(ob.stats().dead, 1, '死信保留可见，不静默丢弃');
+});
+
+test('Outbox：不同事件互不影响', () => {
+  const ob = new Outbox({ maxAttempts: 2, backoffBase: 100, backoffMax: 400 });
+  ob.enqueue({ event_id: 'a' }, 0);
+  ob.enqueue({ event_id: 'b' }, 0);
+  ob.markFailed('a', 0);
+  assert.equal(ob.due(10).length, 1, 'b 不受 a 退避影响');
+  ob.markDelivered('b');
+  assert.equal(ob.due(10).length, 0);
 });
 
 // ==================== 证据帧环形缓冲（告警前因帧） ====================

@@ -179,6 +179,11 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:20px;heigh
     <button class="btn small" id="btnBridge">连接</button>
     <span id="bridgeState" style="font-size:11px;color:var(--dim);min-width:34px;text-align:right">—</span>
   </div>
+  <div class="row">
+    <label>出口</label>
+    <input id="sinkUrl" placeholder="http://…/hook（告警出口 webhook，可选）" style="flex:1;background:#05080d;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:8px 10px;font-size:12px;min-width:0">
+    <span id="sinkState" style="font-size:11px;color:var(--dim);min-width:70px;text-align:right">—</span>
+  </div>
   <div class="recpanel" id="recpanel">
     <div class="rp-head"><span>遥测记录 <b id="evCount">0 条</b></span><span>已记录 <b id="recTime">00:00</b></span></div>
     <div class="log" id="log"></div>
@@ -740,6 +745,44 @@ document.getElementById('btnExpCSV').onclick=()=>tele.exportCSV();
 document.getElementById('btnExpJSON').onclick=()=>tele.exportJSON();
 document.getElementById('btnClear').onclick=()=>{ tele.events=[]; document.getElementById('log').innerHTML=''; document.getElementById('evCount').textContent='0 条'; };
 
+// ---------- 告警出口（§14 确定性主链）：Outbox at-least-once → webhook（默认脱敏） ----------
+let outbox=new Outbox({ maxAttempts:5, backoffBase:1000, backoffMax:60000 });
+let sinkUrl=localStorage.getItem('sink_url')||'';
+let sinkDelivering=false;
+const sinkStateEl=document.getElementById('sinkState');
+function sinkRefreshState(){
+  const st=outbox.stats();
+  sinkStateEl.textContent=st.pending?('待'+st.pending):(st.dead?('死信'+st.dead):'就绪');
+}
+function sinkDeliver(now){
+  if(!sinkUrl || sinkDelivering) return;
+  const due=outbox.due(now);
+  if(!due.length) return;
+  sinkDelivering=true;
+  (async()=>{
+    for(const ev of due){
+      // §13 脱敏：webhook 默认只发事件元数据与内容哈希，不附图
+      const meta=Object.assign({}, ev, { evidence: ev.evidence?{
+        videoTs:ev.evidence.videoTs, frame:ev.evidence.frame,
+        cropSha256:ev.evidence.cropSha256||null } : null });
+      try{
+        const r=await fetch(sinkUrl,{method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify(meta)});
+        if(r.ok) outbox.markDelivered(ev.event_id);
+        else outbox.markFailed(ev.event_id, performance.now());
+      }catch(e){ outbox.markFailed(ev.event_id, performance.now()); }
+    }
+    sinkDelivering=false; sinkRefreshState();
+  })();
+}
+document.getElementById('sinkUrl').value=sinkUrl;
+document.getElementById('sinkUrl').onchange=e=>{
+  sinkUrl=e.target.value.trim();
+  localStorage.setItem('sink_url',sinkUrl);
+  toast(sinkUrl?'告警出口已设置':'告警出口已清空');
+};
+
 // ---------- vus 桥（M2）：灰区案件升级慢脑仲裁，结论回灌探针 ----------
 let bridge=null;
 function captureCropJPEG(bbox, vw, vh){
@@ -975,6 +1018,8 @@ async function loop(){
     const j=captureWideJPEG(vw,vh,320);
     if(j) evidenceRing.push({jpeg:j, ts:video.currentTime}, now);
   }
+  // 告警出口投递（Outbox 到期事件 → webhook；at-least-once + 退避）
+  sinkDeliver(now);
   let dets=[];
   const due = motion.length>0
     ? now-lastDet>=CFG.motionDetInterval
@@ -1108,6 +1153,10 @@ async function loop(){
               preRoll:evidenceRing.peek(), zoneId:(zr&&zr.zoneId)||null},
           });
           tele._log({ty:'ev',ev});
+          // 告警出口：notify/review 级事件入 Outbox（确定性主链 at-least-once）
+          if(sinkUrl && (ev.action_recommended==='notify' || ev.action_recommended==='review')){
+            if(outbox.enqueue(ev, now)) sinkDeliver(now);
+          }
           // 证据内容哈希尽力补齐（异步写回事件对象，导出时已带上）
           if(cropJpeg && typeof atob==='function'){
             try{

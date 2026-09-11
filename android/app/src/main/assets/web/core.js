@@ -680,6 +680,49 @@ function buildEvidenceEvent(o) {
   };
 }
 
+// ---------- 告警出口确定性主链（§14）：Outbox（at-least-once + 幂等 + 退避 + 死信） ----------
+// 事件经 Outbox 排队投递到出口（webhook 等），可靠性由本类保证：
+//   幂等      event_id 去重，同 id 不重复入队
+//   退避      失败按 2^n 退避重试，至 maxAttempts 后转死信（保留待人工/复训，不静默丢弃）
+// 传输（fetch/webhook）由边缘层注入式完成，本类只管确定性语义。
+class Outbox {
+  constructor(opts) {
+    this.maxAttempts = opts.maxAttempts || 5;
+    this.backoffBase = opts.backoffBase || 1000;
+    this.backoffMax = opts.backoffMax || 60000;
+    this.items = [];               // {ev, attempts, nextAt, delivered, dead}
+    this.seen = new Set();         // event_id 幂等集
+  }
+  enqueue(ev, now) {
+    if (!ev || !ev.event_id || this.seen.has(ev.event_id)) return false;
+    this.seen.add(ev.event_id);
+    this.items.push({ ev, attempts: 0, nextAt: now, delivered: false, dead: false });
+    return true;
+  }
+  // 到期待投递事件（调用方逐个投递后 markDelivered / markFailed）
+  due(now) {
+    return this.items
+      .filter(i => !i.delivered && !i.dead && now >= i.nextAt)
+      .map(i => i.ev);
+  }
+  markDelivered(eventId) {
+    const it = this.items.find(i => i.ev.event_id === eventId);
+    if (it) it.delivered = true;
+  }
+  markFailed(eventId, now) {
+    const it = this.items.find(i => i.ev.event_id === eventId);
+    if (!it) return;
+    it.attempts++;
+    it.nextAt = now + Math.min(this.backoffBase * Math.pow(2, it.attempts - 1), this.backoffMax);
+    if (it.attempts >= this.maxAttempts) it.dead = true;   // 死信：不静默丢弃
+  }
+  stats() {
+    return { pending: this.items.filter(i => !i.delivered && !i.dead).length,
+             delivered: this.items.filter(i => i.delivered).length,
+             dead: this.items.filter(i => i.dead).length };
+  }
+}
+
 // ---------- vus 桥客户端链路（纯逻辑：状态机/指数退避/请求关联/超时；传输注入以便单测） ----------
 // 语义：state offline→connecting→open；离线请求入队（上限保护），open 后按序发出；
 // 案件-裁决按 requestId 关联；超时/断线/拥塞分别以 bridge-timeout/bridge-offline/bridge-busy 拒绝，
@@ -803,5 +846,5 @@ if (typeof module!=='undefined' && module.exports) {
     HEAD_DECODERS, decodeV8Head, decodeNanoDetHead, boxIoU, nms,
     pointInPolygon, ZoneEngine, applyZonePolicy, BridgeLink,
     SCENE_AUTO_ARM_CONF, applySceneGate, selectPackFromVerdict,
-    segSide, segIntersect, RuleEngine, FrameRing };
+    segSide, segIntersect, RuleEngine, FrameRing, Outbox };
 }
