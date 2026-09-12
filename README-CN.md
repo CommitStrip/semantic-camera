@@ -4,7 +4,7 @@
 
 [English](README.md) | **简体中文**
 
-**A budget-aware, mode-configurable edge vision event runtime**（预算受控、模式可配置的端侧视觉事件运行时）——**语义摄像头 = NVR 标准件之上的场所语义判别层**。把一路实时视频流（海康 RTSP / 手机相机 / 本地视频）变成端侧实时的语义理解与告警：帧差运动门控 → 触发式检测 → 恒速跟踪 + 多帧确认 → 全自动语义判别 → 按场所模式包决定告警与处置。判别按**场所模式包**组织——扩展新场所只需在 `web/mode-packs.js` 新增数据（+ 可选模型/判别头文件），**核心流水线零改动，且由 CI 双模式验收与源码洁净度测试强制**。平台化设计（多相机调度 / 时空规则引擎 / 开放集 / 隐私合规 / 持续学习治理 / 评测闸门）见 [docs/semantic-camera-design.md](docs/semantic-camera-design.md)。
+**A budget-aware, mode-configurable edge vision event runtime**（预算受控、模式可配置的端侧视觉事件运行时）——**语义摄像头 = NVR 标准件之上的场所语义判别层**。把一路实时视频流（海康 RTSP / 手机相机 / 本地视频）变成端侧实时的语义理解与告警：帧差运动门控 → 触发式检测 → 恒速跟踪 + 多帧确认 → 全自动语义判别 → 按场所模式包决定告警与处置。判别按**场所模式包**组织——扩展新场所只需在 `web/mode-packs.js` 新增数据（+ 可选模型/判别头文件），**核心流水线零改动，且由 CI 双模式验收与源码洁净度测试强制**。平台化设计（多相机调度 / 时空规则引擎 / 开放集 / 隐私合规 / 持续学习治理 / 评测闸门）见 [docs/semantic-camera-design.md](docs/semantic-camera-design.md)，运行时实体关系图见 [docs/architecture-er.html](docs/architecture-er.html)（浏览器直接打开）。
 
 本仓是库系主线：`vus` 为通用视频理解引擎，`rvs` 为机器人增量层，前身仓 `anti-drone-monitor`（反无人机单场景演示）已冻结并由此仓继承演进。
 
@@ -131,7 +131,7 @@ CI（node 20/22 矩阵）：JS 语法检查 → 单元测试 → 三副本一致
 
 ## 平台路线图
 
-里程碑 M1（判别自动化）→ M1.5（独立建仓+配置治理）→ M1.6（平台化收敛：核心去领域化 + 双模式验收 + 证据事件）→ **M1.7（溯源加固：模式选择 fail-closed + 证据溯源字段 + 自训练默认关闭，本轮）** → **P1-①②（restricted-area 真实模型+区域规则 / 模型资产单源化，本轮）**→ M2（vus 桥仲裁回灌）→ M3（时空规则引擎+开放集+油库烟火包）→ M4（多相机调度+健康监控）→ M5（复训闭环+评测闸门+告警出口+许可决策——自训练开启的前置）→ M6（单盒多路网关）。细节与风险见 [docs/semantic-camera-design.md](docs/semantic-camera-design.md)。
+里程碑 M1（判别自动化）→ M1.5（独立建仓+配置治理）→ M1.6（平台化收敛：核心去领域化 + 双模式验收 + 证据事件）→ **M1.7（溯源加固：模式选择 fail-closed + 证据溯源字段 + 自训练默认关闭，本轮）** → P1-①②（restricted-area 真实模型+区域规则 / 模型资产单源化）→ M2（vus 桥仲裁回灌，✅）→ **M2.6 场景自识别（本轮）** → **M3-a/b（越线/计数/证据帧环，本轮）** → **M5-部分（Outbox+webhook 告警出口，本轮）** → M3（时空规则引擎+开放集+油库烟火包）→ M4（多相机调度+健康监控）→ M5（复训闭环+评测闸门+告警出口+许可决策——自训练开启的前置）→ M6（单盒多路网关）。细节与风险见 [docs/semantic-camera-design.md](docs/semantic-camera-design.md)。
 
 ## 平台与硬件
 

@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>semantic-camera · 运行时实体关系图</title>
+<style>
+  body { margin:0; background:#0a0f18; display:flex; flex-direction:column; align-items:center; }
+  h1 { font-size:20px; color:#d7e3f4; font-family:"PingFang SC","Microsoft YaHei",sans-serif; margin:18px 0 4px; }
+  p.sub { font-size:12px; color:#7e8ea6; margin:0 0 10px; font-family:"PingFang SC","Microsoft YaHei",sans-serif; }
+  svg { max-width:100%; height:auto; }
+</style>
+</head>
+<body>
+<h1>语义摄像头 · 运行时实体关系图（四态全自动裁决 · 场景自识别 · sc.evidence/v1）</h1>
+<p class="sub">五视角：配置(琥珀) · 运行(绿) · 证据(青) · 出口(粉) · 桥+学习(紫)　｜　虚线=异步数据流　｜　实线=结构关系（标注基数）　｜　领域词全部收敛在「模式包」</p>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1700 1240" font-family="PingFang SC, Microsoft YaHei, sans-serif">
+<rect width="1700" height="1240" fill="#0a0f18"/>
+
+<!-- ═══ 关系连线（先画，压盒下） ═══ -->
+<g stroke-width="1.4" fill="none">
+  <path d="M 340 140 L 400 140" stroke="#7c8da6"/>
+  <path d="M 340 190 L 375 190 L 375 288 L 400 288" stroke="#7c8da6"/>
+  <path d="M 340 210 L 368 210 L 368 405 L 400 405" stroke="#7c8da6"/>
+  <path d="M 150 217 L 150 370" stroke="#7c8da6"/>
+  <path d="M 70 217 L 25 217 L 25 545 L 40 545" stroke="#7c8da6"/>
+  <path d="M 860 144 L 860 172" stroke="#7c8da6"/>
+  <path d="M 800 172 L 800 60 L 200 60 L 200 100" stroke="#7c8da6" stroke-dasharray="7 5"/>
+  <path d="M 735 144 L 712 144 L 712 318 L 720 318" stroke="#7c8da6"/>
+  <path d="M 880 450 L 880 482" stroke="#7c8da6"/>
+  <path d="M 1040 510 L 1120 510" stroke="#7c8da6"/>
+  <path d="M 880 580 L 880 612" stroke="#7c8da6"/>
+  <path d="M 1120 640 L 1080 640" stroke="#7c8da6"/>
+  <path d="M 1080 750 L 1120 750" stroke="#7c8da6"/>
+  <path d="M 1250 806 L 1250 835" stroke="#7c8da6"/>
+  <path d="M 750 580 L 700 580 L 700 935 L 720 935" stroke="#7c8da6"/>
+  <path d="M 1000 967 L 1030 967 L 1030 960 L 1060 960" stroke="#7c8da6"/>
+  <path d="M 1060 995 L 1030 995 L 1030 1090 L 1000 1090" stroke="#7c8da6"/>
+  <path d="M 1000 1095 L 1060 1095" stroke="#7c8da6"/>
+  <path d="M 1320 1095 L 1370 1095" stroke="#7c8da6"/>
+  <path d="M 1340 935 L 1690 935 L 1690 480 L 525 480 L 525 505" stroke="#c792ea" stroke-dasharray="7 5"/>
+  <path d="M 720 440 L 675 440 L 675 555 L 650 555" stroke="#c792ea" stroke-dasharray="7 5"/>
+  <path d="M 735 287 L 706 287 L 706 1090 L 720 1090" stroke="#c792ea" stroke-dasharray="7 5"/>
+</g>
+<g font-size="11" fill="#9fb0c8">
+  <text x="342" y="132">1:1 检测配置</text>
+  <text x="352" y="240">0..1 判别头</text>
+  <text x="372" y="395">0..1 自训练</text>
+  <text x="155" y="352">1:N zones</text>
+  <text x="30" y="340">1:N rules.lines</text>
+  <text x="866" y="162">1:1</text>
+  <text x="420" y="52">挂载（人工 &gt; 自动 &gt; 观察）</text>
+  <text x="620" y="290">1:N 产出轨迹</text>
+  <text x="885" y="474">四态裁决</text>
+  <text x="1045" y="502">判别可信时携带</text>
+  <text x="885" y="606">确认即产出</text>
+  <text x="1085" y="632">preRoll</text>
+  <text x="1085" y="742">告警级入箱</text>
+  <text x="1258" y="824">at-least-once</text>
+  <text x="700" y="800">escalate 灰区升级</text>
+  <text x="985" y="940">预算内经桥</text>
+  <text x="1012" y="1050">WS+令牌</text>
+  <text x="1012" y="1088">可插拔</text>
+  <text x="1325" y="1088">CLIP/ollama</text>
+  <text x="1180" y="922">伪标签回灌（arbFeedback 开关）</text>
+  <text x="560" y="445">自训练（默认关）</text>
+  <text x="1120" y="105">scene-identify / scene-verdict 选包收口</text>
+</g>
+
+<!-- ══════════ 配置面（琥珀） ══════════ -->
+<g>
+  <rect x="40" y="100" width="300" height="217" rx="8" fill="#0f1726" stroke="#ffb454" stroke-width="1.5"/>
+  <text x="50" y="116" font-size="12.5" font-weight="700" fill="#ffb454">模式包 MODE_PACK（聚合根）</text>
+  <line x1="40" y1="122" x2="340" y2="122" stroke="#ffb454" stroke-opacity="0.35"/>
+  <g font-size="11" fill="#c9d6e8">
+    <text x="50" y="136">id : airfield / restricted-area / _bootstrap</text>
+    <text x="50" y="153">version : 版本（证据事件溯源）</text>
+    <text x="50" y="170">description : 场所描述（场景识别素材）</text>
+    <text x="50" y="187">detectorHead : yolo8head/nanodethead/mock</text>
+    <text x="50" y="204">detectorModel : ONNX 路径</text>
+    <text x="50" y="221">classes : 对外类名（keepIndices）</text>
+    <text x="50" y="238">detectorAlertConf : 检测器权威闸门</text>
+    <text x="50" y="255">alertCls : 本场所告警类别</text>
+    <text x="50" y="272">schedule : 布防窗口（可跨零点）</text>
+    <text x="50" y="289">arbFeedback : 桥裁决回灌开关</text>
+    <text x="50" y="306">bootstrap : 引导包标记（观察模式）</text>
+  </g>
+</g>
+<g>
+  <rect x="400" y="100" width="250" height="132" rx="8" fill="#0f1726" stroke="#ffb454" stroke-width="1.5"/>
+  <text x="410" y="116" font-size="12.5" font-weight="700" fill="#ffb454">检测器配置 DETECTOR_CFG</text>
+  <line x1="400" y1="122" x2="650" y2="122" stroke="#ffb454" stroke-opacity="0.35"/>
+  <g font-size="11" fill="#c9d6e8">
+    <text x="410" y="136">engine : onnx | mock</text>
+    <text x="410" y="153">inputSize : 416 / 640</text>
+    <text x="410" y="170">confThresh : 检出置信阈值</text>
+    <text x="410" y="187">keepIndices : COCO person=0</text>
+    <text x="410" y="204">numClasses : 模型总类数</text>
+    <text x="410" y="221">sizeByClass : 估距尺寸（米）</text>
+  </g>
+</g>
+<g>
+  <rect x="400" y="262" width="250" height="81" rx="8" fill="#0f1726" stroke="#ffb454" stroke-width="1.5"/>
+  <text x="410" y="278" font-size="12.5" font-weight="700" fill="#ffb454">判别头 DISCRIMINATOR（可选）</text>
+  <line x1="400" y1="284" x2="650" y2="284" stroke="#ffb454" stroke-opacity="0.35"/>
+  <g font-size="11" fill="#c9d6e8">
+    <text x="410" y="298">classes : [bird, drone]</text>
+    <text x="410" y="315">probe : 初始化探针文件</text>
+    <text x="410" y="332">alertConf : 0.80</text>
+  </g>
+</g>
+<g>
+  <rect x="400" y="375" width="250" height="98" rx="8" fill="#0f1726" stroke="#ffb454" stroke-width="1.5"/>
+  <text x="410" y="391" font-size="12.5" font-weight="700" fill="#ffb454">自训练配置 SELF_TRAIN_CFG</text>
+  <line x1="400" y1="397" x2="650" y2="397" stroke="#ffb454" stroke-opacity="0.35"/>
+  <g font-size="11" fill="#c9d6e8">
+    <text x="410" y="411">enabled : false（默认关闭）</text>
+    <text x="410" y="428">minConf : 0.90 · marginRatio : 0.80</text>
+    <text x="410" y="445">cooldownMs : 60000</text>
+  </g>
+</g>
+<g>
+  <rect x="40" y="370" width="300" height="115" rx="8" fill="#0f1726" stroke="#ffb454" stroke-width="1.5"/>
+  <text x="50" y="386" font-size="12.5" font-weight="700" fill="#ffb454">区域 ZONE</text>
+  <line x1="40" y1="392" x2="340" y2="392" stroke="#ffb454" stroke-opacity="0.35"/>
+  <g font-size="11" fill="#c9d6e8">
+    <text x="50" y="406">id</text>
+    <text x="50" y="423">polygon : ≥3 点（归一化）</text>
+    <text x="50" y="440">dwellMs : 滞留门槛</text>
+    <text x="50" y="457">countGte : 占驻计数门槛</text>
+    <text x="50" y="474">classes : 类别过滤</text>
+  </g>
+</g>
+<g>
+  <rect x="40" y="515" width="300" height="98" rx="8" fill="#0f1726" stroke="#ffb454" stroke-width="1.5"/>
+  <text x="50" y="531" font-size="12.5" font-weight="700" fill="#ffb454">警戒线 LINE_RULE</text>
+  <line x1="40" y1="537" x2="340" y2="537" stroke="#ffb454" stroke-opacity="0.35"/>
+  <g font-size="11" fill="#c9d6e8">
+    <text x="50" y="551">id</text>
+    <text x="50" y="568">a / b : 线段端点</text>
+    <text x="50" y="585">dir : any | AB | BA</text>
+    <text x="50" y="602">classes : 类别过滤</text>
+  </g>
+</g>
+
+<!-- ══════════ 运行面（绿） ══════════ -->
+<g>
+  <rect x="720" y="80" width="280" height="64" rx="8" fill="#0f1726" stroke="#35e0a1" stroke-width="1.5"/>
+  <text x="730" y="96" font-size="12.5" font-weight="700" fill="#35e0a1">相机 CAMERA（运行时）</text>
+  <line x1="720" y1="102" x2="1000" y2="102" stroke="#35e0a1" stroke-opacity="0.35"/>
+  <g font-size="11" fill="#c9d6e8">
+    <text x="730" y="116">cameraId</text>
+    <text x="730" y="133">videoSource : 相机/文件/海康 WHEP</text>
+  </g>
+</g>
+<g>
+  <rect x="720" y="172" width="280" height="115" rx="8" fill="#0f1726" stroke="#35e0a1" stroke-width="1.5"/>
+  <text x="730" y="188" font-size="12.5" font-weight="700" fill="#35e0a1">场景状态机 SCENE_STATE</text>
+  <line x1="720" y1="194" x2="1000" y2="194" stroke="#35e0a1" stroke-opacity="0.35"/>
+  <g font-size="11" fill="#c9d6e8">
+    <text x="730" y="208">state : unidentified→identifying</text>
+    <text x="730" y="225">　→ identified / failed</text>
+    <text x="730" y="242">packId FK : 当前挂载模式包</text>
+    <text x="730" y="259">source : manual &gt; auto &gt; none</text>
+    <text x="730" y="276">conf : 识别置信（≥0.85 自动布防）</text>
+  </g>
+</g>
+<g>
+  <rect x="720" y="318" width="320" height="132" rx="8" fill="#0f1726" stroke="#35e0a1" stroke-width="1.5"/>
+  <text x="730" y="334" font-size="12.5" font-weight="700" fill="#35e0a1">轨迹 TRACK</text>
+  <line x1="720" y1="340" x2="1040" y2="340" stroke="#35e0a1" stroke-opacity="0.35"/>
+  <g font-size="11" fill="#c9d6e8">
+    <text x="730" y="354">id</text>
+    <text x="730" y="371">cls / conf : 检测类别与置信</text>
+    <text x="730" y="388">hist : 轨迹历史 ≤32 点</text>
+    <text x="730" y="405">zoneId FK : 当前所在区域</text>
+    <text x="730" y="422">zoneDwellMs : 滞留时长</text>
+    <text x="730" y="439">confirmed : 多帧确认</text>
+  </g>
+</g>
+<g>
+  <rect x="720" y="482" width="320" height="98" rx="8" fill="#0f1726" stroke="#35e0a1" stroke-width="1.5"/>
+  <text x="730" y="498" font-size="12.5" font-weight="700" fill="#35e0a1">四态裁决 VERDICT</text>
+  <line x1="720" y1="504" x2="1040" y2="504" stroke="#35e0a1" stroke-opacity="0.35"/>
+  <g font-size="11" fill="#c9d6e8">
+    <text x="730" y="518">action : alert/escalate/clear/suppress/record</text>
+    <text x="730" y="535">via : detector | discriminator</text>
+    <text x="730" y="552">reason : zone-intrusion / line-cross /</text>
+    <text x="730" y="569">　outside-zone / zone-count / scene-unidentified</text>
+  </g>
+</g>
+<g>
+  <rect x="1120" y="482" width="260" height="81" rx="8" fill="#0f1726" stroke="#35e0a1" stroke-width="1.5"/>
+  <text x="1130" y="498" font-size="12.5" font-weight="700" fill="#35e0a1">判别置信 BELIEF</text>
+  <line x1="1120" y1="504" x2="1380" y2="504" stroke="#35e0a1" stroke-opacity="0.35"/>
+  <g font-size="11" fill="#c9d6e8">
+    <text x="1130" y="518">label : 判别类别</text>
+    <text x="1130" y="535">conf : 判别置信（独立于检测）</text>
+    <text x="1130" y="552">probeVersion : 探针版本</text>
+  </g>
+</g>
+
+<!-- ══════════ 证据面（青） ══════════ -->
+<g>
+  <rect x="720" y="612" width="360" height="183" rx="8" fill="#0f1726" stroke="#4fd2ff" stroke-width="1.5"/>
+  <text x="730" y="628" font-size="12.5" font-weight="700" fill="#4fd2ff">证据事件 sc.evidence/v1</text>
+  <line x1="720" y1="634" x2="1080" y2="634" stroke="#4fd2ff" stroke-opacity="0.35"/>
+  <g font-size="11" fill="#c9d6e8">
+    <text x="730" y="648">event_id PK : cam:mode:kind:track:ms</text>
+    <text x="730" y="665">kind : alert/arbitration/record/disarm</text>
+    <text x="730" y="682">time : 源时间 + 处理时间（双时间戳）</text>
+    <text x="730" y="699">mode_hash : 配置指纹（当时生效的包）</text>
+    <text x="730" y="716">policy_version : four-state/2</text>
+    <text x="730" y="733">cropJpeg + cropSha256 : 裁剪帧+哈希</text>
+    <text x="730" y="750">preRoll : 前因帧序列（6s 帧环）</text>
+    <text x="730" y="767">zoneId : 触发区域</text>
+    <text x="730" y="784">action_recommended : notify/review/record</text>
+  </g>
+</g>
+<g>
+  <rect x="1120" y="612" width="260" height="81" rx="8" fill="#0f1726" stroke="#4fd2ff" stroke-width="1.5"/>
+  <text x="1130" y="628" font-size="12.5" font-weight="700" fill="#4fd2ff">前因帧环 FRAME_RING</text>
+  <line x1="1120" y1="634" x2="1380" y2="634" stroke="#4fd2ff" stroke-opacity="0.35"/>
+  <g font-size="11" fill="#c9d6e8">
+    <text x="1130" y="648">max : 12 帧</text>
+    <text x="1130" y="665">minIntervalMs : 500</text>
+    <text x="1130" y="682">≈ 6 秒前因</text>
+  </g>
+</g>
+
+<!-- ══════════ 出口面（粉） ══════════ -->
+<g>
+  <rect x="1120" y="725" width="260" height="81" rx="8" fill="#0f1726" stroke="#ff7a9c" stroke-width="1.5"/>
+  <text x="1130" y="741" font-size="12.5" font-weight="700" fill="#ff7a9c">告警出口箱 OUTBOX</text>
+  <line x1="1120" y1="747" x2="1380" y2="747" stroke="#ff7a9c" stroke-opacity="0.35"/>
+  <g font-size="11" fill="#c9d6e8">
+    <text x="1130" y="761">status : pending/sent/failed 死信</text>
+    <text x="1130" y="778">tries : 退避重试（2^n）</text>
+    <text x="1130" y="795">幂等 : event_id 去重</text>
+  </g>
+</g>
+<g>
+  <rect x="1120" y="835" width="260" height="64" rx="8" fill="#0f1726" stroke="#ff7a9c" stroke-width="1.5"/>
+  <text x="1130" y="851" font-size="12.5" font-weight="700" fill="#ff7a9c">Webhook 出口</text>
+  <line x1="1120" y1="857" x2="1380" y2="857" stroke="#ff7a9c" stroke-opacity="0.35"/>
+  <g font-size="11" fill="#c9d6e8">
+    <text x="1130" y="871">url : 本地配置持久化</text>
+    <text x="1130" y="888">payload : 默认脱敏（元数据+哈希，不附图）</text>
+  </g>
+</g>
+
+<!-- ══════════ 桥面（紫）+ 学习 ══════════ -->
+<g>
+  <rect x="720" y="935" width="280" height="64" rx="8" fill="#0f1726" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="730" y="951" font-size="12.5" font-weight="700" fill="#a78bfa">仲裁队列 ARB_QUEUE</text>
+  <line x1="720" y1="957" x2="1000" y2="957" stroke="#a78bfa" stroke-opacity="0.35"/>
+  <g font-size="11" fill="#c9d6e8">
+    <text x="730" y="971">budgetPerHour : 20 件/时（硬上限）</text>
+    <text x="730" y="988">ttlMs : 15s 轨迹去重</text>
+  </g>
+</g>
+<g>
+  <rect x="1060" y="935" width="280" height="81" rx="8" fill="#0f1726" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="1070" y="951" font-size="12.5" font-weight="700" fill="#a78bfa">仲裁案件 ARBITRATION_CASE</text>
+  <line x1="1060" y1="957" x2="1340" y2="957" stroke="#a78bfa" stroke-opacity="0.35"/>
+  <g font-size="11" fill="#c9d6e8">
+    <text x="1070" y="971">requestId PK</text>
+    <text x="1070" y="988">cropJpeg : 灰区裁剪帧</text>
+    <text x="1070" y="1005">verdict : label / conf</text>
+  </g>
+</g>
+<g>
+  <rect x="720" y="1065" width="280" height="81" rx="8" fill="#0f1726" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="730" y="1081" font-size="12.5" font-weight="700" fill="#a78bfa">vus 仲裁桥 BRIDGE_SERVER</text>
+  <line x1="720" y1="1087" x2="1000" y2="1087" stroke="#a78bfa" stroke-opacity="0.35"/>
+  <g font-size="11" fill="#c9d6e8">
+    <text x="730" y="1101">host : 默认仅内网</text>
+    <text x="730" y="1118">token : 令牌鉴权（5s 握手）</text>
+    <text x="730" y="1135">archive : JSONL 案件归档（复训语料）</text>
+  </g>
+</g>
+<g>
+  <rect x="1060" y="1065" width="260" height="64" rx="8" fill="#0f1726" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="1070" y="1081" font-size="12.5" font-weight="700" fill="#a78bfa">仲裁器 ARBITER（可插拔）</text>
+  <line x1="1060" y1="1087" x2="1320" y2="1087" stroke="#a78bfa" stroke-opacity="0.35"/>
+  <g font-size="11" fill="#c9d6e8">
+    <text x="1070" y="1101">type : abstain 诚实弃权</text>
+    <text x="1070" y="1118">　| clip 零样本 | ollama VLM</text>
+  </g>
+</g>
+<g>
+  <rect x="1370" y="1065" width="280" height="81" rx="8" fill="#0f1726" stroke="#8fa3bf" stroke-width="1.5"/>
+  <text x="1380" y="1081" font-size="12.5" font-weight="700" fill="#8fa3bf">vus 慢脑（外部系统）</text>
+  <line x1="1370" y1="1087" x2="1650" y2="1087" stroke="#8fa3bf" stroke-opacity="0.35"/>
+  <g font-size="11" fill="#c9d6e8">
+    <text x="1380" y="1101">clipModel : 完整 CLIPModel ONNX</text>
+    <text x="1380" y="1118">　（复用 vus models 资产，153MB）</text>
+    <text x="1380" y="1135">ollama : 本机视觉模型（可选）</text>
+  </g>
+</g>
+<g>
+  <rect x="400" y="505" width="250" height="98" rx="8" fill="#0f1726" stroke="#c792ea" stroke-width="1.5"/>
+  <text x="410" y="521" font-size="12.5" font-weight="700" fill="#c792ea">探针学习状态 PROBE_STATE</text>
+  <line x1="400" y1="527" x2="650" y2="527" stroke="#c792ea" stroke-opacity="0.35"/>
+  <g font-size="11" fill="#c9d6e8">
+    <text x="410" y="541">storageKey : probe_v2:&lt;modeId&gt;</text>
+    <text x="410" y="558">protos : 二类质心</text>
+    <text x="410" y="575">logreg : 线性头</text>
+    <text x="410" y="592">ns : 样本计数</text>
+  </g>
+</g>
+
+<text x="850" y="1226" text-anchor="middle" font-size="12" fill="#7e8ea6">红线：判别全自动（无人工判定环节） · 成本硬上限（预算制） · 新场所不改核心（模式包=纯数据）　｜　灰区宁可弃权不虚报，判别未出前检测器权威</text>
+</svg>
+</body>
+</html>
