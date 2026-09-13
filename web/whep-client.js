@@ -50,8 +50,22 @@
     }
 
     #auth() {
+      if (this.conf.user && this.conf.authQuery) return {};   // query 鉴权：凭证拼到 URL（见 #url）
       if (this.conf.user) return { Authorization: 'Basic ' + btoa(this.conf.user + ':' + (this.conf.pass || '')) };
       return {};
+    }
+
+    #url() {
+      // 鉴权模式 authQuery：MediaMTX 家庭网关常用——凭证走 URL 查询参数
+      if (this.conf.user && this.conf.authQuery) {
+        try {
+          const u = new URL(this.conf.url);
+          u.searchParams.set('user', this.conf.user);
+          u.searchParams.set('pass', this.conf.pass || '');
+          return u.toString();
+        } catch (e) { /* URL 非法则原样返回，走上层报错 */ }
+      }
+      return this.conf.url;
     }
 
     #err(msg) {
@@ -61,7 +75,7 @@
     #connect() {
       if (this.closed) return;
       // 1. 取 ICE 服务器
-      fetch(this.conf.url, { method: 'OPTIONS', headers: this.#auth() })
+      fetch(this.#url(), { method: 'OPTIONS', headers: this.#auth() })
         .then((res) => this.#linkIce(res.headers.get('Link')))
         // 2. 建 PeerConnection + 发 offer
         .then((iceServers) => this.#setup(iceServers))
@@ -133,14 +147,14 @@
 
     #sendOffer(offer) {
       if (this.closed) throw new Error('closed');
-      return fetch(this.conf.url, {
+      return fetch(this.#url(), {
         method: 'POST',
         headers: Object.assign({}, this.#auth(), { 'Content-Type': 'application/sdp' }),
         body: offer,
       }).then((res) => {
         if (res.status === 404) throw new Error('stream not found: ' + this.conf.url);
         if (res.status >= 400) return res.text().then((t) => { throw new Error('bad status ' + res.status + ' ' + t.slice(0, 120)); });
-        this.sessionUrl = new URL(res.headers.get('location'), this.conf.url).toString();
+        this.sessionUrl = new URL(res.headers.get('location'), this.#url()).toString();
         return res.text();
       });
     }
