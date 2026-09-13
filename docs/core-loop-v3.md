@@ -1,5 +1,6 @@
 # 核心循环 v3 —— 环境详析 → 快系统值守 → 事件分段 → 慢脑命名 → 习惯化
 
+*v3.5 · 2026-09-10 ·（v3.5：四组件实现落地+默认端到端闭环打通+合成 ICR 回放达标，成熟度刷新）*  
 *v3.4 · 2026-09-10 · 本文档重定义产品核心循环，取代 v2 的"模式包选配 + 闭集场景识别"循环；
 v3.4 修订（外部评审 6 项全采纳）：信任分层（model-verified/human-verified/deployment-approved——模型自洽不等于正确性）/VenuePattern+CameraAppearanceProfile（跨相机只产 transfer-candidate，不继承信任）/行为触发策略（proposalTriggers+segment-end-only+behavior-check 预算边界）/证据修订契约（sc.segment·segment-label·incident-story 三 schema，revision 递增不可变投递）/数据生命周期节（stores·保留·逐出·单写者·PIN）/ICR 可判定转移表（多信号表决+硬件优先+N 帧候选+滑动窗+重启恢复+跨窗三边界）/成熟度声明与实施顺序；
 v3.3 修订（用户领域纠正）：**"光照突变"实为成像模态切换**——监控相机 IR-CUT 滤光片在黄昏/夜间机械切换，整帧彩色↔黑白(红外)，帧级速度、一夜可振荡多次；§6 重写为成像模态状态机（快速接受+最小驻留+振荡态），切换窗处置=门控软重置/新轨迹降级/学习冻结；模式库跨模态双嵌入档案（一个事件昼夜两个长相一个名字，计数跨模态持久）；
@@ -286,19 +287,19 @@ draft（LLM 命名 1 次）
 | 维度 | 状态 |
 |---|---|
 | 设计主轴 | 可接受（方向评审通过） |
-| Schema/状态机 | 自本版起冻结（§4.6 三 schema + §6.2 转移表 + §6.5 生命周期） |
-| 模块实现 | 仓库内未开始 |
-| 默认端到端闭环 | 未建立 |
-| 真实 ICR/昼夜录像验证 | 未提供 |
+| Schema/状态机 | ✅ 已冻结（v3.4：§4.6 三 schema + §6.2 转移表 + §6.5 生命周期） |
+| 模块实现 | ✅ 已落地（ImagingModality/EventSegmenter/命名管线/PatternLibrary 四组件，99 例测试） |
+| 默认端到端闭环 | ✅ 已打通（关段→门控→模板 r1→LLM 覆写 r2→Outbox→UI；桥断/预算耗尽走降级模板名） |
+| 真实 ICR/昼夜录像验证 | ⏳ 合成回放达标（误触发 0/漏检 0/时延 1.0s/稳定 2.5s）；真实录像待补 |
 | 真实危险行为质量 | 未验证 |
 
 **实施顺序**（评审建议采纳——契约先于模块，闭环先于学习）：
 
 1. 冻结契约：ImagingModality 转移表 + SegmentRecord schema + 时间语义 + 持久化（本文 §4.6/§6.2/§6.5）；
 2. **M3-c**：真实昼夜切换录像**逐帧回放**验证（单测之外必做：误触发/漏检/稳定时间/转换窗假运动抑制四指标）；
-3. **M3-d**：单相机 EventSegmenter（绝对时间戳/强制切段/忙碌场景/跨 ICR 行为）；
-4. **默认端到端闭环**：段结束 → 降级命名/慢脑命名 → 不可变修订 → Outbox → UI（M2.7 一并落地）；
-5. **M3-e**：PatternLibrary（第一版限单相机；跨相机只产 transfer-candidate）；
+3. **M3-d ✅**：EventSegmenter + sc.segment/v1 + IndexedDB 落地（52a56f4）；
+4. **默认端到端闭环 ✅**：M2.7 命名管线落地（d21b829：segment-name/behavior-check 双协议 E2E、预算门控、revision 修订链、Outbox 发布）；
+5. **M3-e ✅**：PatternLibrary 落地（ee52b01：信任分层/审计抽检/预期窗口/偏离检测，第一版单相机；跨相机 transfer-candidate 未实现）；
 6. **IncidentStory 与 Venue 级共享最后**（基础证据契约稳定前不引入联动）；M4-a admin UI 收尾。
 
 ## 9. 循环指标（v3.1 新增，结论只认实测）

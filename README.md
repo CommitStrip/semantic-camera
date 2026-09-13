@@ -12,7 +12,7 @@ Three design red lines: **the discrimination pipeline runs fully automatically w
 
 **Claims discipline**: today's algorithms are a "configurable event camera + per-venue discrimination heads" — we do not claim universal scene understanding, zero false alarms, human-level semantics, or "zero-code venue onboarding" (the accurate claim: new venues require no core-logic changes, while still adding registry data and redeploying); we report measured numbers only, and everything unmeasured is marked "pending / design / roadmap".
 
-Current validation status: probe-head offline accuracy **98.15%** (162 authoritative Drone-vs-Bird samples, evidence `web/jepa_probe_init.json`: acc=0.9815, n_train=162, dim=768, inherited as measured from the predecessor repo); **the person model is validated on real street footage**: NanoDet-Plus-m-1.5x@416 (Apache-2.0) detects 7–58 persons/frame on sampled frames of a CC-licensed Shibuya crossing video at 23–24 ms/frame CPU (selection and measurements in [docs/model-selection.md](docs/model-selection.md)); WHEP signaling verified end-to-end against a local MediaMTX v1.20.0 + H.264 test stream; **73 unit tests + GitHub Actions CI all green** (including two-mode end-to-end acceptance, source-cleanliness, evidence-schema contract, mode-selection fail-closed, asset-integrity, and spatiotemporal-rule gates). On-device end-to-end fps/latency benchmarks are **pending**.
+Current validation status: probe-head offline accuracy **98.15%** (162 authoritative Drone-vs-Bird samples, evidence `web/jepa_probe_init.json`: acc=0.9815, n_train=162, dim=768, inherited as measured from the predecessor repo); **the person model is validated on real street footage**: NanoDet-Plus-m-1.5x@416 (Apache-2.0) detects 7–58 persons/frame on sampled frames of a CC-licensed Shibuya crossing video at 23–24 ms/frame CPU (selection and measurements in [docs/model-selection.md](docs/model-selection.md)); WHEP signaling verified end-to-end against a local MediaMTX v1.20.0 + H.264 test stream; **99 unit tests + GitHub Actions CI all green** (including two-mode end-to-end acceptance, source-cleanliness, evidence-schema contract, mode-selection fail-closed, asset-integrity, and spatiotemporal-rule gates). On-device end-to-end fps/latency benchmarks are **pending**.
 
 ## Key capabilities
 
@@ -106,7 +106,7 @@ See `harmony/README.md`. The core runs in an ArkWeb component; `javaScriptProxy`
 ## Development: tests, CI and multi-copy sync
 
 ```bash
-node --test tests/core.test.mjs     # 73 unit tests (node:test, zero deps)
+node --test tests/core.test.mjs     # 99 unit tests (node:test, zero deps)
 python scripts/verify_models.py    # model asset sha256 integrity (fail-closed)
 bash scripts/sync-web.sh            # web/ → android assets + harmony rawfile
 bash scripts/sync-web.sh --check    # consistency check only (same as CI)
@@ -120,7 +120,7 @@ CI (node 20/22 matrix): JS syntax checks → unit tests → three-copy consisten
 |----|------|
 | WHEP signaling end-to-end | ✅ verified (MediaMTX v1.20.0 + H.264 test stream, OPTIONS→POST→PATCH→DELETE all pass) |
 | Probe-head offline accuracy | ✅ 98.15% (162 samples, `web/jepa_probe_init.json`, inherited as measured from the predecessor) |
-| Unit tests / CI | ✅ 69 tests green (incl. two-mode acceptance, cleanliness, schema contract, fail-closed, asset-integrity, spatiotemporal-rule gates), node 20/22 matrix |
+| Unit tests / CI | ✅ 99 tests green (incl. two-mode acceptance, cleanliness, schema contract, fail-closed, asset-integrity, spatiotemporal-rule gates), node 20/22 matrix |
 | Person model on real street footage | ✅ NanoDet-Plus@416: 7–58 persons/frame on sampled frames, 23–24 ms/frame CPU ([selection record](docs/model-selection.md)); browser wasm fps ⏳ pending |
 | On-device fps/latency | ⏳ pending — telemetry already records per-frame `detMs/trackMs/motionRatio`; export CSV/JSON for measured data |
 
@@ -130,7 +130,7 @@ Model size & strategy: YOLOv8s fp32 43 MB + DINOv2 85 MB; a single wasm-side inf
 
 ## Platform roadmap
 
-Milestones M1 (discrimination automation) → M1.5 (standalone repo + config governance) → M1.6 (platform consolidation: domain-free core + two-mode acceptance + evidence events) → M1.7 (provenance hardening: fail-closed mode selection + evidence provenance fields + self-training off by default) → **P1-①② (real restricted-area model + zone rules / single-source model assets, this release)** → M2 (vus bridge arbitration feedback, ✅) → **M2.6 scene auto-recognition (this release)** → **M3-a/b (line-crossing/counting/evidence frame ring, this release)** → **M5-partial (Outbox + webhook alert outlet, this release)** → M3 (spatiotemporal rules + open-set + smoke/fire pack) → M4 (multi-camera scheduling + health monitoring) → M5 (retraining loop + evaluation gates + alert sinks + license decision — the precondition for enabling self-training) → M6 (multi-stream gateway box). Details and risks in [docs/semantic-camera-design.md](docs/semantic-camera-design.md).
+Milestones M1 (discrimination automation) → M1.5 (standalone repo + config governance) → M1.6 (platform consolidation: domain-free core + two-mode acceptance + evidence events) → M1.7 (provenance hardening: fail-closed mode selection + evidence provenance fields + self-training off by default) → **P1-①② (real restricted-area model + zone rules / single-source model assets, this release)** → M2 (vus bridge arbitration feedback, ✅) → → M2.6 scene auto-recognition (✅) → M3-a/b (✅) → M5-partial Outbox (✅) → **v3 core loop (M3-c imaging modality / M3-d segmentation / M2.7 naming / M3-e habituation, this release)** → M3 (spatiotemporal rules + open-set + smoke/fire pack) → M4 (multi-camera scheduling + health monitoring) → M5 (retraining loop + evaluation gates + alert sinks + license decision — the precondition for enabling self-training) → M6 (multi-stream gateway box). Details and risks in [docs/semantic-camera-design.md](docs/semantic-camera-design.md).
 
 ## Platforms & hardware
 
