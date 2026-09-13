@@ -19,22 +19,13 @@
     _bootstrap: {
       id: '_bootstrap',
       name: '观察模式（场景未识别）',
-      version: 1,
-      bootstrap: true,             // 场景自识别前的占位：检测/跟踪/证据照常，告警由场景层全抑制
+      version: 2,
+      bootstrap: true,             // 场景自识别前的占位：纯 vus 感知（门控→段→关键帧→慢脑），
+                                   // 告警由场景层全抑制——开放集，不预设任何目标类型
       hidden: true,                // 不出现在人工场景选择列表
       detector: {
-        engine: 'onnx',
-        head: 'nanodethead',
-        model: './person-detector.onnx',  // 通用人员检测作引导——任何场所都成立，且为场景识别提供素材
-        inputSize: 416,
-        classes: ['person'],
-        keepIndices: [0],
-        numClasses: 80,
-        strides: [8, 16, 32, 64],
-        regBins: 8,
-        confThresh: 0.4,
-        sizeByClass: { person: 1.7 },
-        defaultSizeM: 1.7,
+        engine: 'none',            // v3.6 层级反转：观察模式零检测模型（变化感知即活动信号）
+        classes: [],
       },
       discriminator: null,
       detectorAlertConf: 0.60,

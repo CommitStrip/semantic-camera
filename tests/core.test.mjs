@@ -22,7 +22,8 @@ const { CFG, estimateDist, sizeForClass, iou, Tracker, MotionGate,
   MODALITY_PROFILES, ICR_TRANSITION_WINDOW_MS, icrVote, ImagingModality,
   SEGMENT_SCHEMA, todBucket, durBucket, countBucket, buildSignature, segmentSimilarity,
   EventSegmenter, SEGMENT_LABEL_SCHEMA, NamingGate, templateName, buildSegmentLabel,
-  LabelChain, PATTERN_VERIFY_N, PATTERN_AUDIT_RATE, PatternLibrary } = require('../web/core.js');
+  LabelChain, PATTERN_VERIFY_N, PATTERN_AUDIT_RATE, PatternLibrary,
+  aHash, hamming, estimateSegmentTokens, KeyframeSelector } = require('../web/core.js');
 const { MODE_PACKS, getModePack } = require('../web/mode-packs.js');
 const { createHash } = await import('node:crypto');
 
@@ -207,8 +208,9 @@ test('模式包注册表：双包存在；缺省回退首包但未知模式必�
 test('模式包不变量（schema v3）：两包差异必须足够大，证明抽象非单场景定制', () => {
   for (const p of Object.values(MODE_PACKS)) {
     assert.deepEqual(validatePack(p), [], p.id + ' 应通过校验');
-    assert.ok(Array.isArray(p.detector.classes) && p.detector.classes.length >= 1);
-    assert.ok(p.detector.engine === 'onnx' || p.detector.engine === 'mock');
+    assert.ok(Array.isArray(p.detector.classes) &&
+      (p.detector.engine === 'none' || p.detector.classes.length >= 1), 'classes 合法');
+    assert.ok(['onnx', 'mock', 'none'].includes(p.detector.engine), '引擎枚举合法');
     if (p.discriminator) {
       assert.equal(p.discriminator.classes.length, 2);
       assert.ok(p.discriminator.alertConf > 0.5 && p.discriminator.alertConf < 1);
@@ -219,6 +221,7 @@ test('模式包不变量（schema v3）：两包差异必须足够大，证明�
     } else {
       assert.equal(p.selfTrain, null, '无判别头必须显式 selfTrain:null');
     }
+    if (p.bootstrap) assert.equal(p.detector.engine, 'none', '观察模式=零检测模型（纯 vus 感知）');
   }
   const air = MODE_PACKS.airfield, ra = MODE_PACKS['restricted-area'];
   assert.notEqual(air.detector.head, ra.detector.head, '解码头必须不同（yolo8head vs nanodethead）');
@@ -985,6 +988,69 @@ test('PatternLibrary：serialize/restore + draft 逐出上限', () => {
   const lib2 = new PatternLibrary();
   lib2.restore(lib.serialize());
   assert.equal(lib2.patterns.size, lib.patterns.size);
+});
+
+// ==================== vus 地基（aHash/选帧器/none 模式/运动活动） ====================
+
+function grayPattern(v) { return new Array(1024).fill(v); }
+
+test('aHash：有结构图案哈希互异；平坦图=零结构；hamming 正确', () => {
+  const mk = (l, r) => { const g = []; for (let y = 0; y < 32; y++) for (let x = 0; x < 32; x++) g.push(x < 16 ? l : r); return g; };
+  const left = aHash(mk(200, 30)), right = aHash(mk(30, 200));
+  assert.equal(left.length, 64);
+  assert.notEqual(left, right, '反相图案哈希互异');
+  assert.equal(hamming(left, left), 0);
+  assert.equal(hamming(left, right), 64, '全反相=64');
+  assert.equal(aHash(grayPattern(100)), aHash(grayPattern(200)),
+    '平坦图无结构 → 同为零哈希（aHash 语义正确）');
+});
+
+test('KeyframeSelector：多样性去重（近帧丢弃、异帧入选）+ 上限滑窗 + 间隔节流', () => {
+  const sel = new KeyframeSelector({ max: 3, minGapMs: 500, distMin: 12 });
+  // 左半亮右半暗 → 左亮右暗的哈希
+  const mk = (leftV, rightV) => {
+    const g = [];
+    for (let y = 0; y < 32; y++) for (let x = 0; x < 32; x++) g.push(x < 16 ? leftV : rightV);
+    return g;
+  };
+  assert.equal(sel.feed(mk(200, 30), 0, () => 'a').jpeg, 'a', '首帧入选');
+  assert.equal(sel.feed(mk(200, 30), 100), null, '间隔不足');
+  assert.equal(sel.feed(mk(200, 30), 600), null, '同帧内容过近=无新信息');
+  assert.equal(sel.feed(mk(30, 200), 700, () => 'b').jpeg, 'b', '反相内容入选');
+  assert.equal(sel.feed(mk(120, 120), 1300, () => 'c').jpeg, 'c', '第三种构图入选（间隔 600ms>500ms）');
+  assert.equal(sel.feed(mk(200, 30), 1900, () => 'd'), null, '重复最早构图被去重');
+  assert.equal(sel.items.length, 3, '上限滑窗');
+  const drained = sel.drain();
+  assert.equal(drained.length, 3);
+  assert.equal(sel.items.length, 0, 'drain 复位');
+});
+
+test("detector.engine 'none'：无检测器模式合法（纯 vus 感知：门控→段→关键帧→慢脑）", () => {
+  const pack = { id: 'obs', name: '观察', version: 1,
+    detector: { engine: 'none', classes: [] },
+    discriminator: null, detectorAlertConf: 0.6, alertCls: 'person',
+    arb: { budgetPerHour: 10, ttlMs: 15000 }, selfTrain: null };
+  assert.deepEqual(validatePack(pack), [], 'none 模式合法');
+  const bad = JSON.parse(JSON.stringify(pack));
+  bad.detector.keepIndices = [0];
+  assert.ok(validatePack(bad).length > 0, 'none 模式带 keepIndices 报错');
+});
+
+test('EventSegmenter：运动活动开段（none 模式的活动信号）', () => {
+  const seg = new EventSegmenter({ cameraId: 'cam', silenceMs: 20000, maxMs: 120000 });
+  seg.feed(0, 'DAY-COLOR', [], [], false);
+  assert.equal(seg.active, null, '无活动不开段');
+  seg.feed(1000, 'DAY-COLOR', [], [], true);            // 门控命中
+  assert.ok(seg.active, '运动活动开段');
+  assert.equal(seg.active.peakCount, 1, '运动计为活动密度 1');
+  const closed = seg.feed(1000 + 20000, 'DAY-COLOR', [], [], false);
+  assert.equal(closed.length, 1, '静默关段');
+  assert.equal(closed[0].summary.peakCount, 1);
+});
+
+test('estimateSegmentTokens：粗估口径（发前知道上下文成本）', () => {
+  assert.equal(estimateSegmentTokens(0, 0), 0);
+  assert.equal(estimateSegmentTokens(3, 100), 800);     // 3×250 + 100/2
 });
 
 // ==================== 检测头解码器（注册表契约） ====================

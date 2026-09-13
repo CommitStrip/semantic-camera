@@ -331,7 +331,8 @@ function validatePack(pack) {
   const det = pack.detector;
   if (!det || typeof det !== 'object') errs.push('缺少 detector');
   else {
-    if (det.engine !== 'onnx' && det.engine !== 'mock') errs.push('detector.engine 必须为 onnx|mock');
+    if (det.engine !== 'onnx' && det.engine !== 'mock' && det.engine !== 'none')
+      errs.push('detector.engine 必须为 onnx|mock|none（none=纯 vus 感知：门控→段→关键帧→慢脑）');
     if (det.engine === 'onnx') {
       if (!det.model || typeof det.model !== 'string')
         errs.push('onnx 检测器必须给出 model 路径');
@@ -344,14 +345,19 @@ function validatePack(pack) {
         if (!(det.regBins >= 2)) errs.push('nanodethead 需要 regBins≥2');
       }
     }
+    if (det.engine === 'none' && det.keepIndices !== undefined)
+      errs.push('none 引擎不需要 keepIndices');
     if (det.keepIndices !== undefined &&
         (!Array.isArray(det.keepIndices) || det.keepIndices.some(k => !(k >= 0))))
       errs.push('keepIndices 必须为非负索引数组');
-    if (!Array.isArray(det.classes) || det.classes.length === 0 ||
-        det.classes.some(c => typeof c !== 'string' || !c)) errs.push('detector.classes 非法');
-    if (typeof det.confThresh !== 'number' || !(det.confThresh > 0) || !(det.confThresh < 1))
+    if (det.engine !== 'none' && (!Array.isArray(det.classes) || det.classes.length === 0 ||
+        det.classes.some(c => typeof c !== 'string' || !c))) errs.push('detector.classes 非法');
+    if (det.engine === 'none' && det.classes !== undefined &&
+        (!Array.isArray(det.classes) || det.classes.some(c => typeof c !== 'string' || !c)))
+      errs.push('none 引擎的 classes（若有）必须为字符串数组');
+    if (det.engine !== 'none' && (typeof det.confThresh !== 'number' || !(det.confThresh > 0) || !(det.confThresh < 1)))
       errs.push('detector.confThresh 必须在 (0,1)');
-    if (!(det.defaultSizeM > 0)) errs.push('detector.defaultSizeM 必须为正数');
+    if (det.engine !== 'none' && !(det.defaultSizeM > 0)) errs.push('detector.defaultSizeM 必须为正数');
     if (det.mockScript !== undefined && !Array.isArray(det.mockScript))
       errs.push('mockScript 必须为时间线数组');
   }
@@ -393,7 +399,7 @@ function validatePack(pack) {
     }
   }
   if (det && Array.isArray(det.classes)) {
-    if (!pack.alertCls || !det.classes.includes(pack.alertCls))
+    if (det.engine !== 'none' && (!pack.alertCls || !det.classes.includes(pack.alertCls)))
       errs.push('alertCls 必须在检测类别中');
     if (disc && typeof disc === 'object' && Array.isArray(disc.classes) &&
         !disc.classes.includes(pack.alertCls))
@@ -804,6 +810,63 @@ class FrameRing {
   clear() { this.items.length = 0; }
 }
 
+// ---------- 关键帧选帧器（vus 三层压缩思路的端侧化，v3.6 主感知层） ----------
+// 多信号选帧：aHash 块均值哈希多样性去重（与已选帧全部保持汉明距离）+ 最小间隔。
+// 段关闭时 items 即该段的语义代表帧序列——LLM 包的图像来源（不依赖任何检测模型）。
+function aHash(gray32) {
+  // 32x32 灰度 → 64bit 均值哈希（8x8 块均值二值化，aHash 近似——pHash 的 DCT 在
+  // 端侧偏重，此处以 aHash 折中并诚实标注）
+  if (!gray32 || gray32.length !== 1024) return null;
+  const blocks = new Array(64).fill(0);
+  for (let y = 0; y < 32; y++)
+    for (let x = 0; x < 32; x++)
+      blocks[(y >> 2) * 8 + (x >> 2)] += gray32[y * 32 + x];
+  const means = blocks.map(v => v / 16);
+  const avg = means.reduce((a, b) => a + b, 0) / 64;
+  let bits = '';
+  for (let i = 0; i < 64; i++) bits += means[i] > avg ? '1' : '0';
+  return bits;
+}
+function hamming(a, b) {
+  if (!a || !b) return Infinity;
+  let d = 0;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) d++;
+  return d;
+}
+// 段命名/行为判定的 LLM 包 token 粗估（vus llm_export 思路：发前知道上下文成本）。
+// 视觉分量按单帧 224px 约 250 token 上限口径粗估，文本按约 2 字符/token——粗估非精确。
+function estimateSegmentTokens(keyframeCount, textChars) {
+  return Math.round(keyframeCount * 250 + (textChars || 0) / 2);
+}
+
+class KeyframeSelector {
+  constructor(opts) {
+    opts = opts || {};
+    this.max = opts.max || 5;              // 每段代表帧上限
+    this.minGapMs = opts.minGapMs || 800;  // 最小入选间隔
+    this.distMin = opts.distMin || 12;     // 与已选帧的最小汉明距离（多样性闸门）
+    this.items = [];                       // {seq, at, hash, jpeg}
+    this.lastAt = -Infinity;
+    this.seq = 1;
+  }
+  // gray32: 32x32 灰度数组（调用方从缩略画布取）；renderJpeg: 可选回调返回 base64
+  feed(gray32, now, renderJpeg) {
+    if (now - this.lastAt < this.minGapMs) return null;
+    const h = aHash(gray32);
+    if (!h) return null;
+    for (const it of this.items)
+      if (hamming(h, it.hash) <= this.distMin) return null;   // 与已选帧过近=无新信息
+    this.lastAt = now;
+    const it = { seq: this.seq++, at: now, hash: h, jpeg: renderJpeg ? renderJpeg() : null };
+    this.items.push(it);
+    if (this.items.length > this.max) this.items.shift();     // 保最新（段内滑窗）
+    return it;
+  }
+  // 段关闭时取走代表帧并复位（下段重新累积）
+  drain() { const out = this.items; this.items = []; this.lastAt = -Infinity; return out; }
+  reset() { this.items = []; this.lastAt = -Infinity; }
+}
+
 // ---------- 事件分段（EventSegmenter，core-loop-v3 §3/Phase B） ----------
 // 把持续流切成"事件时间段"：起于活动（确认轨迹或规则命中），止于静默
 // （缺省 20s）或段上限（缺省 120s，忙碌场景防饿死命名管线）。
@@ -902,9 +965,9 @@ class EventSegmenter {
   }
   // 逐检测周期喂入。tracks: 确认轨迹快照（含 cls/zoneId/zoneDwellMs/bornAt）；
   // ruleHits: [{ruleId, trackId, dir}]；返回本次关闭的 SegmentRecord 数组
-  feed(now, modality, tracks, ruleHits) {
+  feed(now, modality, tracks, ruleHits, motion) {
     tracks = tracks || []; ruleHits = ruleHits || [];
-    const activity = tracks.length > 0 || ruleHits.length > 0;
+    const activity = tracks.length > 0 || ruleHits.length > 0 || !!motion;
     const closed = [];
     if (!this.active) {
       if (activity) this._open(now, modality);
@@ -913,7 +976,8 @@ class EventSegmenter {
     const seg = this.active;
     if (activity) seg.lastActivityAt = now;
     // 聚合
-    if (tracks.length > seg.peakCount) { seg.peakCount = tracks.length; seg.keyframes.push({ t: now, kind: 'peak' }); }
+    const actCount = tracks.length || (motion ? 1 : 0);
+    if (actCount > seg.peakCount) { seg.peakCount = actCount; seg.keyframes.push({ t: now, kind: 'peak' }); }
     for (const t of tracks) {
       seg.classes.add(t.cls);
       if (t.zoneId !== undefined) seg.zones.add(t.zoneId);
@@ -923,7 +987,7 @@ class EventSegmenter {
     for (const h of ruleHits) seg.lines.add(h.ruleId);
     if (!seg.modalities.includes(modality)) seg.modalities.push(modality);   // 跨 ICR 不关段
     seg.modality = seg.modalities[seg.modalities.length - 1];
-    seg.density.push({ at: now, count: tracks.length });
+    seg.density.push({ at: now, count: actCount });
     if (seg.density.length > 240) seg.density.shift();
     // 止段：静默或上限
     if (now - seg.lastActivityAt >= this.silenceMs) {
@@ -1405,5 +1469,6 @@ if (typeof module!=='undefined' && module.exports) {
     SEGMENT_SCHEMA, SEGMENT_SILENCE_MS, SEGMENT_MAX_MS,
     todBucket, durBucket, countBucket, buildSignature, segmentSimilarity, EventSegmenter,
     SEGMENT_LABEL_SCHEMA, NamingGate, templateName, buildSegmentLabel, LabelChain,
-    PATTERN_VERIFY_N, PATTERN_AUDIT_RATE, PatternLibrary };
+    PATTERN_VERIFY_N, PATTERN_AUDIT_RATE, PatternLibrary,
+    aHash, hamming, estimateSegmentTokens, KeyframeSelector };
 }
