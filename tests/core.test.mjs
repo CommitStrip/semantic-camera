@@ -18,7 +18,8 @@ const { CFG, estimateDist, sizeForClass, iou, Tracker, MotionGate,
   HEAD_DECODERS, decodeV8Head, decodeNanoDetHead, boxIoU, nms,
   pointInPolygon, ZoneEngine, applyZonePolicy, BridgeLink,
   SCENE_AUTO_ARM_CONF, applySceneGate, selectPackFromVerdict,
-  segSide, segIntersect, RuleEngine, FrameRing, Outbox } = require('../web/core.js');
+  segSide, segIntersect, RuleEngine, FrameRing, Outbox,
+  MODALITY_PROFILES, ICR_TRANSITION_WINDOW_MS, icrVote, ImagingModality } = require('../web/core.js');
 const { MODE_PACKS, getModePack } = require('../web/mode-packs.js');
 const { createHash } = await import('node:crypto');
 
@@ -615,6 +616,135 @@ test('FrameRing：节流入环 + 容量截断 + 快照语义', () => {
   assert.notEqual(snap, ring.items, '快照为数组拷贝');
   ring.clear();
   assert.equal(ring.items.length, 0);
+});
+
+// ==================== 成像模态状态机（ImagingModality，ICR） ====================
+
+const DAY = { sat: 0.30, noise: 2, luma: 0.50 };
+const NIGHT_BW = { sat: 0.01, noise: 4, luma: 0.20 };
+const NIGHT_LIT = { sat: 0.20, noise: 3.5, luma: 0.30 };
+
+function feedSeq(m, stats, t0, step = 100) {
+  const ev = [];
+  stats.forEach((st, i) => ev.push(...m.feed(st, t0 + i * step)));
+  return ev;
+}
+const types = evs => evs.map(e => e.type).join(',');
+
+test('ImagingModality：昼→黑白夜 阶跃切换全链（候选→TRANSITION→落定 NIGHT-BW）', () => {
+  const m = new ImagingModality({ confirmFrames: 3, settleFrames: 3 });
+  feedSeq(m, [DAY, DAY, DAY, DAY], 0);
+  assert.equal(m.state, 'DAY-COLOR');
+  const ev = feedSeq(m, [NIGHT_BW, NIGHT_BW, NIGHT_BW], 1000);
+  assert.equal(m.state, 'TRANSITION', '3 帧候选确认进入 TRANSITION');
+  assert.equal(ev[0].type, 'switch-begin');
+  assert.equal(m.profile, MODALITY_PROFILES['NIGHT-BW'], '剖面立即切换（等不得）');
+  assert.equal(m.learningFrozen(1100), true, '转换期学习冻结');
+  const ev2 = feedSeq(m, [NIGHT_BW, NIGHT_BW, NIGHT_BW], 2000);
+  assert.equal(m.state, 'NIGHT-BW', '低饱和落定黑白夜');
+  assert.ok(types(ev2).includes('switch-done'));
+  assert.equal(m.learningFrozen(12000), false, '稳定后解冻');
+});
+
+test('ImagingModality：夜间彩色常亮落定 NIGHT-LIT', () => {
+  const m = new ImagingModality({ confirmFrames: 3, settleFrames: 3 });
+  feedSeq(m, [DAY, DAY, DAY, DAY], 0);
+  feedSeq(m, [NIGHT_LIT, NIGHT_LIT, NIGHT_LIT], 1000);
+  feedSeq(m, [NIGHT_LIT, NIGHT_LIT, NIGHT_LIT], 2000);
+  assert.equal(m.state, 'NIGHT-LIT', '残余饱和度 ≥0.10 落定彩色夜');
+});
+
+test('ImagingModality：90s 最小驻留内反向候选 → 立即换回（dwell-reverse）', () => {
+  const m = new ImagingModality({ confirmFrames: 3, settleFrames: 3, minDwellMs: 90000 });
+  feedSeq(m, [DAY, DAY, DAY, DAY], 0);
+  feedSeq(m, [NIGHT_BW, NIGHT_BW, NIGHT_BW], 1000);   // begin
+  feedSeq(m, [NIGHT_BW, NIGHT_BW, NIGHT_BW], 2000);   // settle → NIGHT-BW @~2.9s
+  assert.equal(m.state, 'NIGHT-BW');
+  const ev = feedSeq(m, [DAY, DAY, DAY, DAY], 5000);  // 驻留内反向
+  assert.equal(m.state, 'DAY-COLOR', '立即换回，不进 TRANSITION');
+  assert.ok(types(ev).includes('switch-done'));
+  assert.equal(ev.find(e => e.type === 'switch-done').cause, 'dwell-reverse');
+});
+
+test('ImagingModality：10 分钟滑动窗内 3 次切换 → OSCILLATION，稳定 5 分钟退出', () => {
+  const m = new ImagingModality({ confirmFrames: 3, settleFrames: 3, minDwellMs: 90000,
+    oscWindowMs: 600000, oscMaxSwitches: 3, oscExitMs: 300000 });
+  // 切1（驻留期外的正常候选→落定）
+  feedSeq(m, [DAY, DAY, DAY, DAY], 0);
+  feedSeq(m, [NIGHT_BW, NIGHT_BW, NIGHT_BW], 1000);       // 候选 → begin
+  feedSeq(m, [NIGHT_BW, NIGHT_BW, NIGHT_BW], 2000);       // settle → 切1 done
+  assert.equal(m.state, 'NIGHT-BW');
+  // 切2：120s 处驻留(90s)已过，反向走正常候选→落定
+  feedSeq(m, [DAY, DAY, DAY, DAY], 120000);
+  feedSeq(m, [DAY, DAY, DAY], 121000);
+  assert.equal(m.state, 'DAY-COLOR');
+  // 切3：候选→落定 → 滑动窗内第 3 次 → OSCILLATION
+  feedSeq(m, [NIGHT_BW, NIGHT_BW, NIGHT_BW], 240000);
+  feedSeq(m, [NIGHT_BW, NIGHT_BW, NIGHT_BW], 241000);
+  assert.equal(m.state, 'OSCILLATION', '窗内 ≥3 次切换进入振荡态');
+  assert.equal(m.profile, MODALITY_PROFILES['OSCILLATION']);
+  feedSeq(m, [NIGHT_BW, NIGHT_BW], 242000);
+  assert.equal(m.state, 'OSCILLATION', '振荡态不因投票再切换');
+  feedSeq(m, [NIGHT_BW], m.lastSwitchAt + 300001);        // 稳定 5 分钟
+  assert.equal(m.state, 'NIGHT-BW', '稳定退出振荡到上一模态');
+});
+
+test('ImagingModality：硬件日夜事件优先且立即生效，锚点重播种', () => {
+  const m = new ImagingModality({ confirmFrames: 3, settleFrames: 3 });
+  feedSeq(m, [DAY, DAY, DAY], 0);
+  const ev = m.feedHardwareEvent('night', 500);
+  assert.equal(m.state, 'NIGHT-BW', '硬件信号立即切换');
+  assert.equal(ev[0].cause, 'hw');
+  const after = feedSeq(m, [NIGHT_BW, NIGHT_BW, NIGHT_BW], 600);
+  assert.equal(m.state, 'NIGHT-BW', '硬件后图像样本不误触发转移');
+  assert.ok(!types(after).includes('switch-begin'));
+});
+
+test('ImagingModality：原生黑白相机常驻 NIGHT-BW，不参与切换', () => {
+  const m = new ImagingModality({ nativeBW: true });
+  feedSeq(m, [DAY, DAY, DAY, DAY, NIGHT_BW, NIGHT_BW], 0);
+  assert.equal(m.state, 'NIGHT-BW');
+  assert.equal(m.learningFrozen(0), false);
+  assert.equal(m.feedHardwareEvent('day', 100).length, 0);
+});
+
+test('ImagingModality：serialize/restore 重启恢复（状态+切换历史）', () => {
+  const m = new ImagingModality({ confirmFrames: 3, settleFrames: 3 });
+  feedSeq(m, [DAY, DAY, DAY, DAY], 0);
+  feedSeq(m, [NIGHT_BW, NIGHT_BW, NIGHT_BW], 1000);
+  feedSeq(m, [NIGHT_BW, NIGHT_BW, NIGHT_BW], 2000);
+  const snap = m.serialize();
+  const m2 = new ImagingModality({ confirmFrames: 3, settleFrames: 3 });
+  m2.restore(JSON.parse(JSON.stringify(snap)));
+  assert.equal(m2.state, 'NIGHT-BW');
+  assert.equal(m2.switches.length, m.switches.length);
+  assert.equal(m2.isTransitionWindow(snap.lastSwitchAt), true);
+});
+
+test('ImagingModality：模态内缓慢漂移不触发切换（锚点 EMA 跟踪）', () => {
+  const m = new ImagingModality({ confirmFrames: 3, settleFrames: 3 });
+  feedSeq(m, [DAY], 0);
+  let st = { sat: 0.30, noise: 2, luma: 0.5 };
+  const evs = [];
+  for (let i = 1; i <= 40; i++) {          // 每采样饱和度 -0.5%（总 -20%，低于 30% 闸门）
+    st = { sat: st.sat - 0.0015, noise: st.noise + 0.01, luma: st.luma - 0.002 };
+    evs.push(...m.feed(st, i * 100));
+  }
+  assert.ok(!types(evs).includes('switch-begin'), '缓慢漂移被锚点 EMA 吸收');
+  assert.equal(m.state, 'DAY-COLOR');
+});
+
+test('MotionGate.resetBackground：软重置抑制切换瞬间假触发', () => {
+  const g = new MotionGate();
+  const a = baseGray(), GW2 = 96, GH2 = 54;
+  g.detect(a, GW2, GH2);
+  const switched = baseGray().map(v => Math.max(0, v - 60));   // 模拟 ICR 全帧变暗
+  const burst = g.detect(switched, GW2, GH2);
+  assert.ok(burst.length > 0 && g.lastRatio > 0.5, '未重置时切换=全画面假运动');
+  g.detect(switched, GW2, GH2);
+  g.resetBackground(switched);                                  // 软重置
+  const after = g.detect(baseGray().map(v => Math.max(0, v - 60)), GW2, GH2);
+  assert.deepEqual(after, [], '重置后同帧不再触发');
 });
 
 // ==================== 检测头解码器（注册表契约） ====================

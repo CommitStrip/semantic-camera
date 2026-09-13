@@ -372,7 +372,7 @@ class OnnxDetector{
     const od=out[this.session.outputNames[0]];
     const det=this.det;
     const raw=HEAD_DECODERS[det.head](od.data, od.dims, {
-      conf:det.confThresh, keepIndices:det.keepIndices,
+      conf:det.confThresh*(this.confScale||1), keepIndices:det.keepIndices,
       inputSize:det.inputSize, strides:det.strides, regBins:det.regBins,
       numClasses:det.numClasses,
     });
@@ -541,7 +541,29 @@ let policy=pack ? new JepaPolicy(pack) : null;
 let arb=pack ? new ArbitrationQueue(pack.arb) : null;
 let zoneEngine=pack ? new ZoneEngine(pack.zones) : null;
 let ruleEngine=pack ? new RuleEngine(pack.rules) : null; // 时空规则引擎（越线等）
-let pendingArb=new Map();                // requestId → {feat}（桥裁决回灌探针用）
+
+// 成像模态状态机（ICR 感知）：彩色↔黑白帧级切换的多信号表决与剖面管理
+const modality = new ImagingModality({});
+let lastGray = null, modalityStatsAt = 0;
+const statCv = document.createElement('canvas'); statCv.width = 48; statCv.height = 27;
+const statCtx = statCv.getContext('2d', {willReadFrequently: true});
+function computeFrameStats(src) {
+  try {
+    statCtx.drawImage(src, 0, 0, 48, 27);
+    const d = statCtx.getImageData(0, 0, 48, 27).data;
+    let satSum = 0, lumaSum = 0, noiseSum = 0, n = 0;
+    for (let y = 0; y < 27; y++) for (let x = 0; x < 48; x++) {
+      const i = (y * 48 + x) * 4, r = d[i], g = d[i + 1], b = d[i + 2];
+      const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+      satSum += mx === 0 ? 0 : (mx - mn) / mx;
+      const l = 0.299 * r + 0.587 * g + 0.114 * b;
+      lumaSum += l;
+      if (x < 47) { const j = i + 4; noiseSum += Math.abs(l - (0.299 * d[j] + 0.587 * d[j + 1] + 0.114 * d[j + 2])); }
+      n++;
+    }
+    return n ? { sat: satSum / n, noise: noiseSum / n, luma: lumaSum / n / 255 } : null;
+  } catch (e) { return null; }
+}let pendingArb=new Map();                // requestId → {feat}（桥裁决回灌探针用）
 let stream=null, running=false, raf=null;
 let srcCanvas=document.createElement('canvas');
 let sctx=srcCanvas.getContext('2d');
@@ -552,6 +574,7 @@ let motionGate=new MotionGate();
 let detector=pack
   ? (pack.detector.engine==='mock' ? new MockDetector(pack) : new OnnxDetector(pack))
   : null;
+detector && (detector.confScale = 1);   // 成像模态剖面缩放（ImagingModality 驱动）
 let jepa=pack && pack.discriminator ? new JepaDiscriminator(pack) : null;   // null=检测器权威模式
 let lastDet=0;
 let detecting=false;                // 慢系统在飞标志：wasm 推理期间 raf 重入不重复派发
@@ -1009,6 +1032,28 @@ async function loop(){
   for(let i=0;i<gray.length;i++) gray[i]=gdata[i*4];
   const motion=motionGate.detect(gray,gw,gh);
   const t1=performance.now();
+  lastGray = gray;
+  // 成像模态状态机（~500ms 采样；T0 级成本）：切换即软重置门控+换剖面
+  if (now - modalityStatsAt > 500) {
+    modalityStatsAt = now;
+    const st = computeFrameStats(srcCanvas);
+    if (st) {
+      const mev = modality.feed(st, now);
+      for (const e of mev) {
+        if (e.type === 'switch-begin' || e.type === 'switch-done') {
+          motionGate.resetBackground(lastGray);   // 切换瞬间整帧变化=假运动，软重置抑制
+          tele._log({ty:'sys', msg:'成像模态 ' + e.from + ' → ' + e.to + ' (' + e.cause + ')'});
+        } else if (e.type === 'oscillation-enter') {
+          tele._log({ty:'sys', msg:'ICR 振荡态：切换过于频繁，保守剖面运行'});
+        } else if (e.type === 'oscillation-exit') {
+          tele._log({ty:'sys', msg:'ICR 振荡退出 → ' + e.to});
+        }
+      }
+      if (detector) detector.confScale = modality.profile.confScale;
+      motionGate.threshScale = modality.profile.gateThreshScale;
+      motionGate.minAreaScale = modality.profile.minAreaScale;
+    }
+  }
 
   // 慢系统：触发式检测——有运动即检（间隔≥motionDetInterval），无运动按巡检间隔兜底
   const now=performance.now();
@@ -1068,6 +1113,7 @@ async function loop(){
               // 独立证据（同一特征空间），在冻结 golden set/版本化回滚/开放集拒识
              // 完备（M5 治理栈）前不得在线修改判别头；开启后双信号一致才更新
               if(pack.selfTrain && pack.selfTrain.enabled===true
+                 && !(modality && modality.learningFrozen(now))
                  && shouldSelfTrain(jepa.probe,feat,pack.selfTrain)
                  && (!trk2 || now-(trk2.autoLearnedAt||0)>pack.selfTrain.cooldownMs)){
                 const n=jepa.learn(feat,
@@ -1124,6 +1170,11 @@ async function loop(){
           const hits=ruleHits && ruleHits.get(t.id);
           if(hits && hits.length && dec.action==='record')
             dec=Object.assign({},dec,{action:'alert',reason:'line-cross',ruleId:hits[0].ruleId});
+          // ICR 转换窗：切换窗内诞生的新轨迹语义告警延后（已有确认轨迹照常——几何跟踪不依赖色彩）
+          if (modality && modality.isTransitionWindow(now) &&
+              t.bornAt !== undefined && t.bornAt >= modality.lastSwitchAt &&
+              dec.action === 'alert')
+            dec = Object.assign({}, dec, { action: 'record', reason: 'icr-transition' });
           // 场景门控最后：观察态（引导包）全抑制——检测/跟踪/证据照常
           dec=applySceneGate(dec, !pack.bootstrap);
           const act=dec.action;
@@ -1284,7 +1335,8 @@ function drawOverlay(vw,vh,t0){
 
   // 遥测 HUD
   teleOut.innerHTML=`<div>帧率 <b>${(1000/(performance.now()-t0+1)).toFixed(1)}</b></div>
-    <div>桥 <b style="color:${bridge&&bridge.state==='open'?'var(--accent)':'var(--dim)'}">${bridge?bridge.state:'—'}</b>${pendingArb.size?` <span style="color:var(--accent2)">仲裁中${pendingArb.size}</span>`:''}</div>
+    <div>模态 <b>${modality.state}</b></div>
+     style="color:${bridge&&bridge.state==='open'?'var(--accent)':'var(--dim)'}">${bridge?bridge.state:'—'}</b>${pendingArb.size?` <span style="color:var(--accent2)">仲裁中${pendingArb.size}</span>`:''}</div>
     <div>变焦 <b>${zoom.toFixed(1)}×</b></div>
     <div>目标 <b>${[...tracker.tracks.values()].length}</b> <span style="color:var(--dim)">确认</span> <b style="color:var(--warn)">${tracker.getConfirmed().length}</b></div>
     <div style="color:var(--dim)">判别<sup>${!jepa?'—':(jepa.loading?'load…':(jepa.loaded?'ON':'off'))}</sup>

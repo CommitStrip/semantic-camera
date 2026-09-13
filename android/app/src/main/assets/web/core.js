@@ -94,7 +94,7 @@ class Tracker{
       }else{
         const id=this.nextId++;
         this.tracks.set(id,{id,box:d.bbox.slice(),cx:d.cx,cy:d.cy,vx:0,vy:0,
-          cls:d.cls,conf:d.conf,last:now,count:1,confirmed:false,
+          cls:d.cls,conf:d.conf,last:now,count:1,confirmed:false,bornAt:now,
           hist:[{x:d.cx,y:d.cy,t:now}]});
         active.add(id); d.trackId=id; d.dup=1;
       }
@@ -111,7 +111,8 @@ class Tracker{
 
 // ---------- 帧差运动门控(快系统)：逐帧廉价运行，有运动才升级慢系统检测 ----------
 class MotionGate{
-  constructor(){ this.prev=null; this.lastRatio=0; }
+  constructor(){ this.prev=null; this.lastRatio=0;
+    this.threshScale=1; this.minAreaScale=1; }
   // gray: 扁平灰度数组；返回降采样坐标系运动框，无运动返回 []
   // lastRatio: 本帧运动像素占比（供遥测采集，做离线阈值校准）
   detect(gray,gw,gh){
@@ -122,7 +123,7 @@ class MotionGate{
     }
     let cnt=0,minX=gw,maxX=0,minY=gh,maxY=0;
     for(let i=0;i<gray.length;i++){
-      if(Math.abs(gray[i]-this.prev[i])>CFG.motionThresh){
+      if(Math.abs(gray[i]-this.prev[i])>CFG.motionThresh*this.threshScale){
         cnt++;
         const x=i%gw, y=(i/gw)|0;
         if(x<minX)minX=x; if(x>maxX)maxX=x; if(y<minY)minY=y; if(y>maxY)maxY=y;
@@ -130,10 +131,194 @@ class MotionGate{
     }
     this.prev=gray;
     this.lastRatio=cnt/gw/gh;
-    if(!cnt || this.lastRatio<=CFG.minAreaRatio) return [];
+    if(!cnt || this.lastRatio<=CFG.minAreaRatio*this.minAreaScale) return [];
     return [{x:minX,y:minY,w:maxX-minX,h:maxY-minY}];
   }
+  // 软重置（成像模态切换窗专用）：以当前帧为新背景基准，抑制切换瞬间的
+  // 整帧帧差爆炸——重置而非清零（vus 慢系统漂移修复的同族经验）
+  resetBackground(gray){ if(gray) this.prev=gray; this.lastRatio=0; }
 }
+
+// ---------- 成像模态状态机（ImagingModality，ICR 感知，设计文档 core-loop-v3 §6） ----------
+// 监控相机 IR-CUT 滤光片切换使整帧彩色↔黑白（红外）帧级跳变、一夜可振荡多次。
+// 多信号 2of3 表决 + N=3 帧候选确认 + 90s 最小驻留 + 10min 滑动窗振荡检测；
+// 切换即换参数剖面（错误剖面下每帧都在劣化，等不得）；转换窗内学习冻结。
+// 本类为纯逻辑：帧统计（sat/noise/luma）由调用方逐采样提供，硬件日夜事件走
+// feedHardwareEvent 优先于图像推断。原生黑白相机声明后常驻 NIGHT-BW 不参与切换。
+const MODALITY_PROFILES = {
+  // 保守缺省剖面（详析分模态标定后由环境模型覆盖，env_hash 溯源）
+  'DAY-COLOR':   { confScale: 1.00, minAreaScale: 1.00, gateThreshScale: 1.00 },
+  'NIGHT-BW':    { confScale: 0.85, minAreaScale: 1.40, gateThreshScale: 1.15 },
+  'NIGHT-LIT':   { confScale: 0.95, minAreaScale: 1.10, gateThreshScale: 1.05 },
+  'OSCILLATION': { confScale: 0.80, minAreaScale: 1.50, gateThreshScale: 1.20 },
+};
+const ICR_TRANSITION_WINDOW_MS = 1500;   // 切换前后标记窗（学习冻结/告警降级）
+
+function icrVote(prev, cur, th) {
+  // 2of3 表决：返回 'night' | 'day' | null（prev/cur: {sat, noise, luma}）
+  if (!prev || !cur) return null;
+  const night = [], day = [];
+  if (prev.sat > 0 && cur.sat < prev.sat * (1 - th.satDrop)) night.push('sat');
+  if (prev.sat > 0 && cur.sat > prev.sat * (1 + th.satRise)) day.push('sat');
+  if (cur.noise > prev.noise * th.noiseRise) night.push('noise');
+  if (cur.noise > 0 && cur.noise < prev.noise * th.noiseFall) day.push('noise');
+  if (cur.luma < prev.luma * (1 - th.lumaDrop)) night.push('luma');
+  if (cur.luma > prev.luma * (1 + th.lumaRise)) day.push('luma');
+  if (night.length >= 2) return 'night';
+  if (day.length >= 2) return 'day';
+  return null;
+}
+
+class ImagingModality {
+  constructor(opts) {
+    opts = opts || {};
+    this.nativeBW = !!opts.nativeBW;                 // 原生黑白相机声明
+    this.confirmFrames = opts.confirmFrames || 3;    // N=3 帧候选确认
+    this.settleFrames = opts.settleFrames || 3;      // TRANSITION 稳定确认采样
+    this.minDwellMs = opts.minDwellMs || 90000;      // 90s 最小驻留
+    this.oscWindowMs = opts.oscWindowMs || 600000;   // 10min 滑动窗
+    this.oscMaxSwitches = opts.oscMaxSwitches || 3;  // 窗内 ≥3 次切换 → 振荡态
+    this.oscExitMs = opts.oscExitMs || 300000;       // 稳定 5min 退出振荡
+    this.thresh = Object.assign({
+      satDrop: 0.30, satRise: 0.30, satLit: 0.10,    // satLit: 夜间残余饱和度（→NIGHT-LIT）
+      noiseRise: 1.5, noiseFall: 1 / 1.5,
+      lumaDrop: 0.25, lumaRise: 0.25,
+    }, opts.thresholds || {});
+    this.state = this.nativeBW ? 'NIGHT-BW' : 'DAY-COLOR';
+    this.profile = MODALITY_PROFILES[this.state];
+    this.switches = [];            // [{at, from, to}] 持久化（重启恢复）
+    this.lastSwitchAt = this.nativeBW ? 0 : -Infinity;
+    this._cand = null; this._candCount = 0;
+    this._settle = null; this._settleCount = 0;
+    this._lastStats = null;
+    this._anchor = null; this._prevStats = null;   // 稳定态参考（模态落定时重置）
+  }
+  // 硬件日夜事件（ONVIF/厂商回调）：直接换剖面 + 记切换，图像表决让位
+  feedHardwareEvent(mode, now) {
+    if (this.nativeBW || (mode !== 'day' && mode !== 'night')) return [];
+    const ev = this._accept(mode === 'day' ? 'DAY-COLOR' : 'NIGHT-BW', now, 'hw');
+    this._anchor = null;   // 新模态参考未知，下一采样播种
+    return ev;
+  }
+  // 逐采样推进。stats: {sat,noise,luma}；返回本次产生的事件数组
+  // [{type:'switch-begin'|'switch-done'|'oscillation-enter'|'oscillation-exit', ...}]
+  feed(stats, now) {
+    const ev = this._maybeExitOscillation(now);
+    if (this.nativeBW) return ev;
+    this._lastStats = stats;
+    if (this.state === 'TRANSITION') {
+      // 稳定确认：新模态特征持续 settleFrames 采样 → 落定到具体夜间变体/昼
+      const vote = icrVote(this._transRef, stats, this.thresh);
+      const still = this._transTo === 'night'
+        ? (vote !== 'day') : (vote !== 'night');
+      this._settleCount = still ? this._settleCount + 1 : 0;
+      if (this._settleCount >= this.settleFrames) {
+        const to = this._transTo === 'night'
+          ? (stats.sat >= this.thresh.satLit ? 'NIGHT-LIT' : 'NIGHT-BW')
+          : 'DAY-COLOR';
+        ev.push(...this._accept(to, now, 'settle'));
+        this._anchor = stats;   // 新模态参考 = 落定时刻统计
+      }
+      return ev;
+    }
+    if (this.state === 'OSCILLATION') { this._prevStats = stats; return ev; }  // 振荡态只等稳定计时
+    // 稳定态：候选表决——与当前稳定态的参考（anchor）比对，而非相邻采样：
+    // 阶跃变化后每个采样都持续投票，N 帧候选才可能确认；无票时参考以 α=0.05
+    // 缓慢跟踪模态内漂移（天气等），防止参考陈旧引发假转移
+    if (!this._anchor) { this._anchor = stats; return ev; }
+    const vote = icrVote(this._anchor, stats, this.thresh);
+    // 同族票忽略：DAY 态的 'day' 票 / NIGHT-BW 态的 'night' 票不构成转移
+    // （NIGHT-LIT 的 'night' 票有意义=灯光熄灭滑向 NIGHT-BW），锚点照常 EMA 跟踪
+    const sameFamily = (this.state === 'DAY-COLOR' && vote === 'day') ||
+                       (this.state === 'NIGHT-BW' && vote === 'night');
+    if (!vote || sameFamily) {
+      const a = this._anchor, k = 0.05;
+      this._anchor = { sat: a.sat + (stats.sat - a.sat) * k,
+                       noise: a.noise + (stats.noise - a.noise) * k,
+                       luma: a.luma + (stats.luma - a.luma) * k };
+      this._cand = null; this._candCount = 0;
+      return ev;
+    }
+    // 反向候选落在最小驻留内：参数跟物理事实走——立即换回并记 OSC。
+    // backTo 不可用（同态/无历史）时不吞候选，落入常规计数
+    if (now - this.lastSwitchAt < this.minDwellMs) {
+      const last = this.switches[this.switches.length - 1];
+      const backTo = last ? last.from : null;
+      if (backTo && backTo !== this.state) {
+        ev.push(...this._accept(backTo, now, 'dwell-reverse'));
+        this._anchor = stats;
+        this._cand = null; this._candCount = 0;
+        return ev;
+      }
+    }
+    if (this._cand === vote) this._candCount++; else { this._cand = vote; this._candCount = 1; }
+    if (this._candCount >= this.confirmFrames) {
+      this._cand = null; this._candCount = 0;
+      this._transTo = vote; this._transRef = stats;
+      this._settleCount = 0;
+      const from = this.state;
+      this.state = 'TRANSITION';
+      this.profile = MODALITY_PROFILES[vote === 'night' ? 'NIGHT-BW' : 'DAY-COLOR'];
+      ev.push({ type: 'switch-begin', from, to: vote, cause: 'image' });
+    }
+    return ev;
+  }
+  _stateBefore() { return this.switches.length ? this.switches[this.switches.length - 1].to : 'DAY-COLOR'; }
+  _accept(toState, now, cause) {
+    if (toState === this.state) return [];   // 同态空转移防御（不污染切换历史）
+    const from = this.state === 'TRANSITION' ? this._stateBefore() : this.state;
+    this.state = toState;
+    this.profile = MODALITY_PROFILES[toState] || this.profile;
+    this.lastSwitchAt = now;
+    this.switches.push({ at: now, from, to: toState });
+    if (this.switches.length > 64) this.switches.shift();   // 有界历史
+    const out = [{ type: 'switch-done', from, to: toState, cause }];
+    // 振荡检测：滑动窗内切换次数
+    const recent = this.switches.filter(sw => now - sw.at <= this.oscWindowMs).length;
+    if (recent >= this.oscMaxSwitches && this.state !== 'OSCILLATION') {
+      this.state = 'OSCILLATION';
+      this.profile = MODALITY_PROFILES['OSCILLATION'];
+      out.push({ type: 'oscillation-enter', recent });
+    }
+    return out;
+  }
+  // OSCILLATION 退出：单模态稳定 oscExitMs 后回到该模态（简单化：由 feed 的
+  // 无候选持续时长判定）
+  _maybeExitOscillation(now) {
+    if (this.state !== 'OSCILLATION') return [];
+    if (now - this.lastSwitchAt < this.oscExitMs) return [];
+    const back = this.switches.length ? this.switches[this.switches.length - 1].to : 'DAY-COLOR';
+    if (back === 'OSCILLATION') return [];
+    const from = this.state;
+    this.state = back;
+    this.profile = MODALITY_PROFILES[back] || this.profile;
+    return [{ type: 'oscillation-exit', from, to: back }];
+  }
+  // 转换窗：切换前后 ±ICR_TRANSITION_WINDOW_MS
+  isTransitionWindow(now) {
+    if (this.state === 'TRANSITION') return true;
+    return Math.abs(now - this.lastSwitchAt) <= ICR_TRANSITION_WINDOW_MS;
+  }
+  // 学习冻结：TRANSITION / 振荡态 / 转换窗内一切学习暂停
+  learningFrozen(now) {
+    if (this.nativeBW) return false;
+    return this.state === 'TRANSITION' || this.state === 'OSCILLATION'
+      || this.isTransitionWindow(now);
+  }
+  serialize() {
+    return { state: this.state, switches: this.switches.slice(-16),
+             lastSwitchAt: this.lastSwitchAt, nativeBW: this.nativeBW, anchor: this._anchor };
+  }
+  restore(obj) {
+    if (!obj || !obj.state) return;
+    this.state = obj.state;
+    this.switches = obj.switches || [];
+    this.lastSwitchAt = obj.lastSwitchAt || 0;
+    this._anchor = obj.anchor || null;
+    this.profile = MODALITY_PROFILES[this.state] || this.profile;
+  }
+}
+
 
 // ---------- 模式包校验（fail-closed：坏配置拒绝布防，不带病上线） ----------
 // 返回错误串数组；空数组 = 通过。与安全告警的 fail-open 相对：
@@ -846,5 +1031,6 @@ if (typeof module!=='undefined' && module.exports) {
     HEAD_DECODERS, decodeV8Head, decodeNanoDetHead, boxIoU, nms,
     pointInPolygon, ZoneEngine, applyZonePolicy, BridgeLink,
     SCENE_AUTO_ARM_CONF, applySceneGate, selectPackFromVerdict,
-    segSide, segIntersect, RuleEngine, FrameRing, Outbox };
+    segSide, segIntersect, RuleEngine, FrameRing, Outbox,
+    MODALITY_PROFILES, ICR_TRANSITION_WINDOW_MS, icrVote, ImagingModality };
 }

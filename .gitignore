@@ -40,3 +40,6 @@ bridge/archive/
 # ---- Python 运行时（不入库）----
 __pycache__/
 *.pyc
+
+# ---- 回放产物（不入库）----
+scripts/out/
