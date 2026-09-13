@@ -22,7 +22,7 @@ const { CFG, estimateDist, sizeForClass, iou, Tracker, MotionGate,
   MODALITY_PROFILES, ICR_TRANSITION_WINDOW_MS, icrVote, ImagingModality,
   SEGMENT_SCHEMA, todBucket, durBucket, countBucket, buildSignature, segmentSimilarity,
   EventSegmenter, SEGMENT_LABEL_SCHEMA, NamingGate, templateName, buildSegmentLabel,
-  LabelChain } = require('../web/core.js');
+  LabelChain, PATTERN_VERIFY_N, PATTERN_AUDIT_RATE, PatternLibrary } = require('../web/core.js');
 const { MODE_PACKS, getModePack } = require('../web/mode-packs.js');
 const { createHash } = await import('node:crypto');
 
@@ -890,6 +890,101 @@ test('buildSegmentLabel：schema 契约（字段齐全）', () => {
   assert.deepEqual(lb.matchedBehaviors, ['b1']);
   assert.equal(lb.pattern.id, 'p1');
   assert.throws(() => buildSegmentLabel({ source: 'llm', name: 'x' }), /segmentId/);
+});
+
+// ==================== 模式库（PatternLibrary，习惯化学习主轴） ====================
+
+function mkSig(cls = 'person', zone = 'z1', modality = 'DAY-COLOR', tod = 'day') {
+  return buildSignature({ classes: [cls], peakCount: 1, zones: [zone], lines: [],
+    modality, tod, durMs: 5000 });
+}
+
+test('PatternLibrary：匹配命中累积 count 与预期窗口；未命中建档', () => {
+  const lib = new PatternLibrary();
+  const sig = mkSig();
+  const first = lib.matchOrRecord(sig);
+  assert.equal(first.hit, false, '首次未命中→建档');
+  assert.equal(first.pattern.state, 'draft');
+  const hit = lib.matchOrRecord(sig);
+  assert.equal(hit.hit, true, '同签名命中');
+  assert.equal(hit.pattern.id, first.pattern.id);
+  const info = lib.recordHit(hit.pattern, { peakCount: 1, tod: 'day', modality: 'DAY-COLOR' });
+  assert.equal(hit.pattern.count, 1);
+  assert.deepEqual(hit.pattern.expectedWindow.tod, ['day']);
+  assert.equal(info.deviation, false);
+});
+
+test('PatternLibrary：draft→model-verified 生命周期（5 次一致）', () => {
+  const lib = new PatternLibrary();
+  const { pattern: p } = lib.matchOrRecord(mkSig());
+  for (let i = 1; i < PATTERN_VERIFY_N; i++) lib.recordLlmName(p.id, '员工进门', true);
+  assert.equal(p.state, 'draft', '不足 5 次仍为 draft');
+  lib.recordLlmName(p.id, '员工进门', true);
+  assert.equal(p.state, 'model-verified', '第 5 次一致晋升');
+  assert.equal(p.name, '员工进门');
+});
+
+test('PatternLibrary：审计不一致降级保留 count 且 version 递增', () => {
+  const lib = new PatternLibrary();
+  const { pattern: p } = lib.matchOrRecord(mkSig());
+  for (let i = 0; i < PATTERN_VERIFY_N; i++)
+    lib.recordHit(p, { peakCount: 1, tod: 'day', modality: 'DAY-COLOR' });
+  for (let i = 0; i < PATTERN_VERIFY_N; i++) lib.recordLlmName(p.id, '员工进门', true);
+  const v0 = p.version;
+  assert.equal(p.count, PATTERN_VERIFY_N, '前置：命中计数已累计');
+  lib.auditResult(p.id, false);                       // 抽检不一致
+  assert.equal(p.state, 'draft', '降级回 draft');
+  assert.equal(p.count, PATTERN_VERIFY_N, 'count 保留');
+  assert.equal(p.version, v0 + 1, '版本递增');
+  assert.equal(p.llmAgree, 0, '一致计数清零（re-verify 补差额）');
+});
+
+test('PatternLibrary：human 金标（3 代表样本 → human-verified，改名 version+1）', () => {
+  const lib = new PatternLibrary();
+  const { pattern: p } = lib.matchOrRecord(mkSig());
+  lib.humanConfirm(p.id, '员工上班进门');
+  assert.equal(p.name, '员工上班进门');
+  assert.equal(p.state, 'draft', '1 样本不足');
+  lib.humanConfirm(p.id, '员工上班进门');
+  lib.humanConfirm(p.id, '员工上班进门');
+  assert.equal(p.state, 'human-verified', '3 代表样本金标');
+  assert.ok(p.version >= 1);
+});
+
+test('PatternLibrary：审计抽检 5%（注入确定性随机）', () => {
+  const lib = new PatternLibrary({ random: () => 0.01 });   // 恒小于 0.05
+  const { pattern: p } = lib.matchOrRecord(mkSig());
+  for (let i = 0; i < PATTERN_VERIFY_N; i++) lib.recordLlmName(p.id, 'n', true);
+  assert.equal(lib.shouldAudit(p), true, '0.01 < 0.05 必抽检');
+  const lib2 = new PatternLibrary({ random: () => 0.99 });
+  const { pattern: p2 } = lib2.matchOrRecord(mkSig());
+  for (let i = 0; i < PATTERN_VERIFY_N; i++) lib2.recordLlmName(p2.id, 'n', true);
+  assert.equal(lib2.shouldAudit(p2), false, '0.99 > 0.05 不抽检');
+});
+
+test('PatternLibrary：偏离检测（数量超历史 P95/P5）与预期窗口异常', () => {
+  const lib = new PatternLibrary();
+  const { pattern: p } = lib.matchOrRecord(mkSig());
+  for (let i = 0; i < 10; i++)
+    lib.recordHit(p, { peakCount: 10, tod: 'night', modality: 'NIGHT-BW' });
+  assert.equal(p.expectedWindow.tod.length, 1, '窗口学习');
+  const dev = lib.recordHit(p, { peakCount: 1, tod: 'night', modality: 'NIGHT-BW' });
+  assert.equal(dev.deviation, true, '数量 1 跌破历史下界 → 偏离');
+  const win = lib.recordHit(p, { peakCount: 10, tod: 'day', modality: 'DAY-COLOR' });
+  assert.equal(win.outsideWindow, true, '白天出现夜班模式 → 窗口外异常');
+  // 窗口学会 day 后，day 样本不再异常（预期窗口语义正确）；改验数量偏离：
+  // 历史 10 人档，100 人 = 超历史 P95 → anomalous
+  assert.equal(lib.anomalous(p, { peakCount: 100, tod: 'night', modality: 'NIGHT-BW' }), true);
+  assert.equal(lib.anomalous(p, { peakCount: 10, tod: 'night', modality: 'NIGHT-BW' }), false);
+});
+
+test('PatternLibrary：serialize/restore + draft 逐出上限', () => {
+  const lib = new PatternLibrary({ maxPatterns: 3 });
+  for (let i = 0; i < 5; i++) lib.matchOrRecord(mkSig('person', 'z' + i));
+  assert.ok(lib.patterns.size <= 3, '上限逐出（仅 draft）');
+  const lib2 = new PatternLibrary();
+  lib2.restore(lib.serialize());
+  assert.equal(lib2.patterns.size, lib.patterns.size);
 });
 
 // ==================== 检测头解码器（注册表契约） ====================

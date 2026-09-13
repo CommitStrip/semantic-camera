@@ -1048,6 +1048,131 @@ class LabelChain {
   get size() { return this.map.size; }
 }
 
+// ---------- 模式库（PatternLibrary，M3-e，core-loop-v3 §5：习惯化学习主轴） ----------
+// 重复事件模式 → 自命名免 LLM。信任分层（v3.4）：model-verified 仅模型自洽
+// （只可命名非安全输出），human-verified/deployment-approved 才可背书安全语义。
+// 审计抽检 = 降低未经发现的漂移风险，不是"保证准确性"。
+const PATTERN_VERIFY_N = 5;        // model-verified 需连续一致命名次数
+const PATTERN_HUMAN_N = 3;         // human-verified 需代表性样本数
+const PATTERN_AUDIT_RATE = 0.05;   // model-verified 命中的抽检概率
+
+class PatternLibrary {
+  constructor(opts) {
+    opts = opts || {};
+    this.simThreshold = opts.simThreshold !== undefined ? opts.simThreshold : 0.82;
+    this.auditRate = opts.auditRate !== undefined ? opts.auditRate : PATTERN_AUDIT_RATE;
+    this.verifyN = opts.verifyN || PATTERN_VERIFY_N;
+    this.humanN = opts.humanN || PATTERN_HUMAN_N;
+    this.maxPatterns = opts.maxPatterns || 500;
+    this.random = opts.random || Math.random;    // 测试可注入确定性随机
+    this.patterns = new Map();                   // id → pattern
+    this.seq = 1;
+  }
+  // 匹配或建档：相似度 ≥阈值 → 命中；否则新建 draft
+  matchOrRecord(signature) {
+    let best = null, bestSim = 0;
+    for (const p of this.patterns.values()) {
+      const sim = segmentSimilarity(signature, p.signature);
+      if (sim > bestSim) { bestSim = sim; best = p; }
+    }
+    if (best && bestSim >= this.simThreshold) return { pattern: best, sim: bestSim, hit: true };
+    const p = {
+      id: 'pat-' + Date.now().toString(36) + '-' + (this.seq++),
+      signature: JSON.parse(JSON.stringify(signature)),
+      name: null, count: 0, llmAgree: 0, humanSamples: 0,
+      state: 'draft', version: 1, lastAudit: null,
+      expectedWindow: { tod: [], modality: [] },   // 命中学到的时段/模态分布
+      countHistory: [],                             // 峰值数历史（偏离检测）
+    };
+    this.patterns.set(p.id, p);
+    this._prune();
+    return { pattern: p, sim: bestSim, hit: false };
+  }
+  // 命中统计：先判偏离/窗口（历史与窗口不含本样本），再入档更新
+  recordHit(pattern, meta) {
+    pattern.count++;
+    const deviation = this._deviation(pattern, meta.peakCount || 1);
+    const outsideWindow = this._outsideWindow(pattern, meta);
+    pattern.countHistory.push(meta.peakCount || 1);
+    if (pattern.countHistory.length > 20) pattern.countHistory.shift();
+    const ew = pattern.expectedWindow;
+    if (!ew.tod.includes(meta.tod)) ew.tod.push(meta.tod);
+    if (!ew.modality.includes(meta.modality)) ew.modality.push(meta.modality);
+    return { deviation, outsideWindow };
+  }
+  _deviation(pattern, peakCount) {
+    const h = pattern.countHistory;
+    if (h.length < 5) return false;                // 样本不足不判偏离
+    const sorted = [...h].sort((a, b) => a - b);
+    const p5 = sorted[Math.floor(sorted.length * 0.05)];
+    const p95 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))];
+    return peakCount < p5 || peakCount > p95;
+  }
+  _outsideWindow(pattern, meta) {
+    if (pattern.count < 5) return false;           // 历史不足不判（窗口未成形）
+    const ew = pattern.expectedWindow;
+    return !ew.tod.includes(meta.tod) || !ew.modality.includes(meta.modality);
+  }
+  // LLM 命名结果回写：draft 阶段累计一致次数；一致达 verifyN → model-verified。
+  // inconsistent（审计抽检不一致）→ 降级回 draft：保留 count，version+1。
+  recordLlmName(patternId, name, consistent) {
+    const p = this.patterns.get(patternId);
+    if (!p) return null;
+    if (!p.name) p.name = name;                    // 首次命名定名
+    if (consistent) {
+      p.llmAgree++;
+      if (p.state === 'draft' && p.llmAgree >= this.verifyN) {
+        p.state = 'model-verified';                // 仅模型自洽——非安全输出可用
+      }
+    } else {
+      this._downgrade(p);
+    }
+    return p;
+  }
+  // admin 金标：代表性样本确认（≥humanN → human-verified）；改名即金标
+  humanConfirm(patternId, name) {
+    const p = this.patterns.get(patternId);
+    if (!p) return null;
+    if (name && name !== p.name) { p.name = name; p.version++; }
+    p.humanSamples++;
+    p.llmAgree = Math.max(p.llmAgree, p.humanSamples);
+    if (p.humanSamples >= this.humanN) p.state = 'human-verified';
+    return p;
+  }
+  shouldAudit(pattern) {
+    return pattern.state === 'model-verified' && this.random() < this.auditRate;
+  }
+  auditResult(patternId, agree) {
+    const p = this.patterns.get(patternId);
+    if (!p) return null;
+    p.lastAudit = { agree, at: Date.now() };
+    if (!agree) this._downgrade(p);
+    return p;
+  }
+  _downgrade(p) {
+    if (p.state !== 'draft') { p.state = 'draft'; p.version++; p.llmAgree = 0; }
+  }
+  _prune() {
+    if (this.patterns.size <= this.maxPatterns) return;
+    const drafts = [...this.patterns.values()].filter(p => p.state === 'draft')
+      .sort((a, b) => (a.count * 1) - (b.count * 1));
+    for (const d of drafts) {
+      this.patterns.delete(d.id);
+      if (this.patterns.size <= this.maxPatterns) break;
+    }
+  }
+  // 异常上下文（v3.2）：命中落在预期窗口外——照常命名但标记并提高审计概率
+  anomalous(pattern, meta) {
+    return this._outsideWindow(pattern, meta) || this._deviation(pattern, meta.peakCount || 1);
+  }
+  serialize() {
+    return [...this.patterns.values()].map(p => JSON.parse(JSON.stringify(p)));
+  }
+  restore(list) {
+    for (const p of list || []) this.patterns.set(p.id, p);
+  }
+}
+
 // ---------- 证据事件（机器可消费的版本化事件，从"帧"到"有证据的事件"） ----------
 const EVIDENCE_SCHEMA = 'sc.evidence/v1';
 const POLICY_VERSION = 'four-state/2';
@@ -1279,5 +1404,6 @@ if (typeof module!=='undefined' && module.exports) {
     MODALITY_PROFILES, ICR_TRANSITION_WINDOW_MS, icrVote, ImagingModality,
     SEGMENT_SCHEMA, SEGMENT_SILENCE_MS, SEGMENT_MAX_MS,
     todBucket, durBucket, countBucket, buildSignature, segmentSimilarity, EventSegmenter,
-    SEGMENT_LABEL_SCHEMA, NamingGate, templateName, buildSegmentLabel, LabelChain };
+    SEGMENT_LABEL_SCHEMA, NamingGate, templateName, buildSegmentLabel, LabelChain,
+    PATTERN_VERIFY_N, PATTERN_AUDIT_RATE, PatternLibrary };
 }

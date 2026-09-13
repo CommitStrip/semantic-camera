@@ -319,7 +319,6 @@ const SegmentStore = {
     } catch (e) {}
   },
 };
-SegmentStore.open();
 
 // 几何/跟踪/门控逻辑见 web/core.js
 
@@ -583,10 +582,47 @@ let ruleEngine=pack ? new RuleEngine(pack.rules) : null; // 时空规则引擎�
 // 成像模态状态机（ICR 感知）：彩色↔黑白帧级切换的多信号表决与剖面管理
 const modality = new ImagingModality({});
 // 事件分段器（Phase B）：活动起段 → 静默/上限止段 → sc.segment/v1 记录入 IndexedDB
+const patternLib = new PatternLibrary({});
+PatternStore.open(patternLib);   // 异步载入已存模式库
 const segmenter = new EventSegmenter({ cameraId: 'cam-1', venueId: pack.id, modeHash: MODE_HASH });
+// 模式库持久化（IndexedDB patterns：永久保留，上限逐出在核心层）
+const PatternStore = {
+  db: null,
+  async open(lib) {
+    if (this.db || !window.indexedDB) return;
+    try {
+      const req = indexedDB.open('semanticCameraPatterns', 1);
+      req.onupgradeneeded = e => {
+        const d = e.target.result;
+        if (!d.objectStoreNames.contains('patterns')) d.createObjectStore('patterns', { keyPath: 'id' });
+      };
+      this.db = await new Promise((res, rej) => { req.onsuccess = () => res(req.result); req.onerror = () => rej(req.error); });
+      const tx = this.db.transaction('patterns', 'readonly');
+      const all = await new Promise((res, rej) => {
+        const rq = tx.objectStore('patterns').getAll();
+        rq.onsuccess = () => res(rq.result || []); rq.onerror = () => rej(rq.error);
+      });
+      lib.restore(all);
+    } catch (e) { /* 无 IndexedDB 时降级内存 */ }
+  },
+  put(pattern) {
+    if (!this.db) return;
+    try {
+      const tx = this.db.transaction('patterns', 'readwrite');
+      tx.objectStore('patterns').put(JSON.parse(JSON.stringify(pattern)));
+    } catch (e) {}
+  },
+};
 // 命名管线（M2.7）：预算门控（30/时+同签名去重）→ 桥 LLM 命名（可覆写）→ 降级模板名兜底
 const namingGate = new NamingGate({ budgetPerHour: 30 });
 const labelChain = new LabelChain();
+// admin 金标入口（M4-a UI 前置的最低可用形态）：scHumanVerify(patternId, name)
+window.scHumanVerify = function (patternId, name) {
+  const p = patternLib.humanConfirm(patternId, name);
+  if (p) { PatternStore.put(p); tele._log({ty:'sys', msg:'金标确认 ' + p.name +
+    ' → ' + p.state + ' (样本 ' + p.humanSamples + '/' + 3 + ')'}); }
+  return p;
+};
 const sigName = new Map();   // sigKey → {name, conf}（同签名复用已得名，Phase D 习惯化雏形）
 let lastGray = null, modalityStatsAt = 0;
 const statCv = document.createElement('canvas'); statCv.width = 48; statCv.height = 27;
@@ -868,7 +904,7 @@ function applySegmentLabel(rec, o) {
     decision: { action: 'record', reason: 'segment-named' } });
   return out;
 }
-function sendSegmentName(rec, sigKey) {
+function sendSegmentName(rec, sigKey, patternId) {
   // 异步送桥命名（SLA 30s 超时由 BridgeLink 承担）；回来覆写 r2 并记录签名→名映射
   const requestId = 'segname-' + rec.segment_id;
   const keyframes = evidenceRing.peek().slice(-3).map(f => f.jpeg);
@@ -877,7 +913,12 @@ function sendSegmentName(rec, sigKey) {
       keyframes, behaviors: pack.behaviors || [], ts: Date.now() })
     .then(v => {
       if (v.name) {
-        sigName.set(sigKey, { name: v.name, conf: v.conf });
+        if (patternId) {
+          const consistent = patternLib.latest(patternId) && patternLib.latest(patternId).name === v.name;
+          patternLib.recordLlmName(patternId, v.name, consistent);
+          const pat = patternLib.patterns.get(patternId);
+          if (pat) PatternStore.put(pat);
+        }
         applySegmentLabel(rec, { source: 'llm', name: v.name, conf: v.conf,
           matchedBehaviors: v.matchedBehaviors || [], rationale: v.rationale });
         tele._log({ty:'sys', msg:'LLM 命名覆写完成（' + v.latencyMs + 'ms）'});
@@ -1322,24 +1363,42 @@ async function loop(){
         [...ruleHits.values()].flat());
       for (const rec of closedSegs) {
         SegmentStore.put(rec);
-        // 命名管线：门控（预算+去重）→ 桥 LLM（占位 r1 先上，覆写 r2）或模板名终态
-        const imp = rec.summary.lines.length ? 2 : (rec.summary.zones.length ? 1 : 0);
+        // 命名管线（M3-e）：模式库匹配 → 命中即自命名（免 LLM）；
+        // draft 阶段按预算送 LLM 累积一致（≥5 次 → model-verified）；
+        // model-verified 命中按 5% 审计抽检；偏离/窗口外标记 anomalous
+        const mr = patternLib.matchOrRecord(rec.signature);
+        const pat = mr.pattern;
+        const hitInfo = patternLib.recordHit(pat, { peakCount: rec.summary.peakCount,
+          tod: rec.signature.tod, modality: rec.signature.modality });
         const sigKey = stableStringify(rec.signature);
         const gate = namingGate.request(rec.signature, now);
         const tName = templateName(rec.signature, rec.summary);
+        const anomalous = patternLib.anomalous(pat, { peakCount: rec.summary.peakCount,
+          tod: rec.signature.tod, modality: rec.signature.modality });
         let waitLlm = false;
-        if (gate === 'dup' && sigName.has(sigKey)) {
-          // 同签名复用已得名（习惯化雏形）：不调 LLM 直接采用
-          applySegmentLabel(rec, { source: 'pattern', name: sigName.get(sigKey).name,
-            conf: sigName.get(sigKey).conf, matchedBehaviors: [] });
+        if (pat.name && pat.state !== 'draft') {
+          // 习惯化命中：直接自命名（免 LLM）；model-verified 按 5% 审计抽检
+          const audit = patternLib.shouldAudit(pat);
+          applySegmentLabel(rec, { source: 'pattern', name: pat.name,
+            conf: pat.state === 'human-verified' ? 0.95 : 0.85,
+            matchedBehaviors: [], patternRef: { id: pat.id, version: pat.version } });
+          if (hitInfo.deviation || hitInfo.outsideWindow || anomalous)
+            tele._log({ty:'sys', msg:'习惯命中但异常标记 ' + pat.name +
+              (hitInfo.deviation ? '（数量偏离）' : '') + (hitInfo.outsideWindow ? '（窗口外）' : '')});
+          if (audit && bridge && bridge.state === 'open') sendSegmentName(rec, sigKey, pat.id);
         } else if (gate === 'accepted' && bridge && bridge.state === 'open') {
-          applySegmentLabel(rec, { source: 'template', name: tName, conf: 0.5 });
+          // draft：模板占位 r1 先上（可读），LLM 命名回写 r2 并累积一致次数
+          const first = !pat.name;
+          applySegmentLabel(rec, { source: 'template', name: pat.name || tName, conf: 0.5,
+            patternRef: { id: pat.id, version: pat.version } });
+          if (first) pat.name = tName;
           waitLlm = true;
-          sendSegmentName(rec, sigKey);
+          sendSegmentName(rec, sigKey, pat.id);
         } else {
-          // 预算耗尽/桥不可达：模板名立即终态（事件流永远可读）
-          applySegmentLabel(rec, { source: 'template', name: tName, conf: 0.5 });
+          applySegmentLabel(rec, { source: 'template', name: pat.name || tName, conf: 0.5,
+            patternRef: { id: pat.id, version: pat.version } });
           if (gate === 'budget') tele._log({ty:'sys', msg:'命名预算耗尽，段走模板名（窗口滚动恢复）'});
+          PatternStore.put(pat);
         }
         if (!waitLlm) continue;
       }
