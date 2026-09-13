@@ -21,7 +21,8 @@ const { CFG, estimateDist, sizeForClass, iou, Tracker, MotionGate,
   segSide, segIntersect, RuleEngine, FrameRing, Outbox,
   MODALITY_PROFILES, ICR_TRANSITION_WINDOW_MS, icrVote, ImagingModality,
   SEGMENT_SCHEMA, todBucket, durBucket, countBucket, buildSignature, segmentSimilarity,
-  EventSegmenter } = require('../web/core.js');
+  EventSegmenter, SEGMENT_LABEL_SCHEMA, NamingGate, templateName, buildSegmentLabel,
+  LabelChain } = require('../web/core.js');
 const { MODE_PACKS, getModePack } = require('../web/mode-packs.js');
 const { createHash } = await import('node:crypto');
 
@@ -834,6 +835,61 @@ test('时段/时长/数量桶：边界语义', () => {
   assert.equal(durBucket(59000), 's60');
   assert.equal(countBucket(4), 'c4-9');
   assert.equal(countBucket(11), 'c10+');
+});
+
+// ==================== 命名管线（NamingGate/LabelChain/降级命名） ====================
+
+test('NamingGate：小时窗预算 + 同签名去重', () => {
+  const g = new NamingGate({ budgetPerHour: 3 });
+  const sigA = buildSignature({ classes: ['person'], peakCount: 1, zones: ['z1'],
+    lines: [], modality: 'DAY-COLOR', tod: 'day', durMs: 5000 });
+  assert.equal(g.request(sigA, 0), 'accepted');
+  assert.equal(g.request(sigA, 1000), 'dup', '同签名窗内只送一次');
+  const sigB = buildSignature({ classes: ['vehicle'], peakCount: 4, zones: ['z2'],
+    lines: [], modality: 'DAY-COLOR', tod: 'day', durMs: 5000 });
+  assert.equal(g.request(sigB, 2000), 'accepted');
+  assert.equal(g.request(sigB, 3000), 'dup');
+  const sigC = buildSignature({ classes: ['animal'], peakCount: 1, zones: ['z3'],
+    lines: [], modality: 'NIGHT-BW', tod: 'night', durMs: 5000 });
+  assert.equal(g.request(sigC, 4000), 'accepted');
+  assert.equal(g.request(sigC, 5000), 'dup', '同签名去重优先于预算');
+  const sigD = buildSignature({ classes: ['x'], peakCount: 2, zones: ['z4'],
+    lines: [], modality: 'NIGHT-BW', tod: 'night', durMs: 5000 });
+  assert.equal(g.request(sigD, 6000), 'budget', '第 4 个不同签名超小时窗预算');
+  assert.equal(g.request(sigA, 3600001), 'accepted', '窗口滚动预算恢复');
+});
+
+test('templateName：签名模板占位名（降级命名可读性）', () => {
+  const sig = buildSignature({ classes: ['person'], peakCount: 2, zones: ['z1', 'z2'],
+    lines: ['gate-line'], modality: 'NIGHT-BW', tod: 'night', durMs: 45000 });
+  const name = templateName(sig, { peakCount: 2, zones: ['z1', 'z2'], lines: ['gate-line'] });
+  assert.ok(name.includes('personx2'), name);
+  assert.ok(name.includes('z1'), name);
+  assert.ok(name.includes('gate-line'), name);
+});
+
+test('LabelChain：revision 递增不可变 + 显式冲突拒绝', () => {
+  const ch = new LabelChain();
+  const r1 = ch.apply({ segment_id: 's1', source: 'template', name: '占位' });
+  assert.equal(r1.revision, 1, '首修订自动 r1');
+  const r2 = ch.apply({ segment_id: 's1', source: 'llm', name: '员工上班刷卡进入', conf: 0.87 });
+  assert.equal(r2.revision, 2, 'LLM 覆写递增 r2');
+  assert.equal(ch.apply({ segment_id: 's1', source: 'llm', revision: 9, name: 'x' }), null,
+    '显式 revision 跳号拒绝');
+  assert.equal(ch.latest('s1').name, '员工上班刷卡进入');
+  assert.equal(ch.size, 1);
+});
+
+test('buildSegmentLabel：schema 契约（字段齐全）', () => {
+  const lb = buildSegmentLabel({ segmentId: 'cam:123', source: 'llm', name: '车辆驶过',
+    conf: 0.9, matchedBehaviors: ['b1'], patternRef: { id: 'p1', version: 2 },
+    time: '2026-09-10T00:00:00Z', rationale: '直线穿越' });
+  assert.equal(lb.schema, SEGMENT_LABEL_SCHEMA);
+  assert.equal(lb.segment_id, 'cam:123');
+  assert.equal(lb.revision, undefined, 'revision 由 LabelChain 分配');
+  assert.deepEqual(lb.matchedBehaviors, ['b1']);
+  assert.equal(lb.pattern.id, 'p1');
+  assert.throws(() => buildSegmentLabel({ source: 'llm', name: 'x' }), /segmentId/);
 });
 
 // ==================== 检测头解码器（注册表契约） ====================

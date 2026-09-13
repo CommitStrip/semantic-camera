@@ -584,6 +584,10 @@ let ruleEngine=pack ? new RuleEngine(pack.rules) : null; // 时空规则引擎�
 const modality = new ImagingModality({});
 // 事件分段器（Phase B）：活动起段 → 静默/上限止段 → sc.segment/v1 记录入 IndexedDB
 const segmenter = new EventSegmenter({ cameraId: 'cam-1', venueId: pack.id, modeHash: MODE_HASH });
+// 命名管线（M2.7）：预算门控（30/时+同签名去重）→ 桥 LLM 命名（可覆写）→ 降级模板名兜底
+const namingGate = new NamingGate({ budgetPerHour: 30 });
+const labelChain = new LabelChain();
+const sigName = new Map();   // sigKey → {name, conf}（同签名复用已得名，Phase D 习惯化雏形）
 let lastGray = null, modalityStatsAt = 0;
 const statCv = document.createElement('canvas'); statCv.width = 48; statCv.height = 27;
 const statCtx = statCv.getContext('2d', {willReadFrequently: true});
@@ -845,6 +849,44 @@ document.getElementById('sinkUrl').onchange=e=>{
   localStorage.setItem('sink_url',sinkUrl);
   toast(sinkUrl?'告警出口已设置':'告警出口已清空');
 };
+
+// ---------- 段命名管线（M2.7）：标签修订链 + Outbox 发布 + 桥回写 ----------
+function applySegmentLabel(rec, o) {
+  // o: {source, name, conf, matchedBehaviors, rationale?}
+  const out = labelChain.apply(buildSegmentLabel({
+    segmentId: rec.segment_id, source: o.source, name: o.name,
+    conf: o.conf, matchedBehaviors: o.matchedBehaviors || [],
+    time: new Date().toISOString(),
+  }));
+  if (!out) return null;
+  tele._log({ty:'sys', msg:'段命名 [r' + out.revision + '/' + out.source + '] ' +
+    out.name + (o.rationale ? ' · ' + o.rationale : '')});
+  outbox.enqueue({ schema: 'sc.segment-label/v1', event_id: out.segment_id + ':r' + out.revision,
+    kind: 'segment-label', segment_id: out.segment_id, revision: out.revision,
+    source: out.source, name: out.name, conf: out.conf,
+    matchedBehaviors: out.matchedBehaviors, time: out.time,
+    decision: { action: 'record', reason: 'segment-named' } });
+  return out;
+}
+function sendSegmentName(rec, sigKey) {
+  // 异步送桥命名（SLA 30s 超时由 BridgeLink 承担）；回来覆写 r2 并记录签名→名映射
+  const requestId = 'segname-' + rec.segment_id;
+  const keyframes = evidenceRing.peek().slice(-3).map(f => f.jpeg);
+  bridge.request({ type: 'segment-name', requestId, segmentId: rec.segment_id,
+      packId: pack.id, summary: rec.summary, signature: rec.signature,
+      keyframes, behaviors: pack.behaviors || [], ts: Date.now() })
+    .then(v => {
+      if (v.name) {
+        sigName.set(sigKey, { name: v.name, conf: v.conf });
+        applySegmentLabel(rec, { source: 'llm', name: v.name, conf: v.conf,
+          matchedBehaviors: v.matchedBehaviors || [], rationale: v.rationale });
+        tele._log({ty:'sys', msg:'LLM 命名覆写完成（' + v.latencyMs + 'ms）'});
+      } else {
+        tele._log({ty:'sys', msg:'LLM 命名弃权（' + (v.rationale || 'undecidable') + '），保留模板名'});
+      }
+    })
+    .catch(err => tele._log({ty:'sys', msg:'LLM 命名失败(' + err.message + ')，保留模板名'}));
+}
 
 // ---------- vus 桥（M2）：灰区案件升级慢脑仲裁，结论回灌探针 ----------
 let bridge=null;
@@ -1280,10 +1322,26 @@ async function loop(){
         [...ruleHits.values()].flat());
       for (const rec of closedSegs) {
         SegmentStore.put(rec);
-        tele._log({ty:'sys', msg:'事件段关闭 ' + rec.segment_id.split(':')[1] + 's+' +
-          Math.round((new Date(rec.t_end) - new Date(rec.t_start))/1000) + 's ' +
-          rec.summary.classes.join('/') + ' x' + rec.summary.peakCount +
-          ' (' + rec.reason + ')'});
+        // 命名管线：门控（预算+去重）→ 桥 LLM（占位 r1 先上，覆写 r2）或模板名终态
+        const imp = rec.summary.lines.length ? 2 : (rec.summary.zones.length ? 1 : 0);
+        const sigKey = stableStringify(rec.signature);
+        const gate = namingGate.request(rec.signature, now);
+        const tName = templateName(rec.signature, rec.summary);
+        let waitLlm = false;
+        if (gate === 'dup' && sigName.has(sigKey)) {
+          // 同签名复用已得名（习惯化雏形）：不调 LLM 直接采用
+          applySegmentLabel(rec, { source: 'pattern', name: sigName.get(sigKey).name,
+            conf: sigName.get(sigKey).conf, matchedBehaviors: [] });
+        } else if (gate === 'accepted' && bridge && bridge.state === 'open') {
+          applySegmentLabel(rec, { source: 'template', name: tName, conf: 0.5 });
+          waitLlm = true;
+          sendSegmentName(rec, sigKey);
+        } else {
+          // 预算耗尽/桥不可达：模板名立即终态（事件流永远可读）
+          applySegmentLabel(rec, { source: 'template', name: tName, conf: 0.5 });
+          if (gate === 'budget') tele._log({ty:'sys', msg:'命名预算耗尽，段走模板名（窗口滚动恢复）'});
+        }
+        if (!waitLlm) continue;
       }
       const t5=performance.now();
       if(dets.length) tele.det(dets[0]);

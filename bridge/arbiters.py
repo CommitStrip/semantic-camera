@@ -12,6 +12,7 @@ ollama   本地 ollama 视觉模型（vus 慢脑同款路线；需本机 ollama 
 显式允许表（默认仅环回 127.0.0.1/localhost/::1），解析后的 IP 落在私网/保留段且
 未列入允许表即拒绝；http.client 直连不跟随重定向。
 """
+import asyncio
 import base64
 import http.client
 import ipaddress
@@ -74,6 +75,18 @@ class BaseArbiter:
         """场所识别（§9）：req 含 catalog[{id,description}] 与 frames[{wide,crops[]}]。
         默认弃权；返回 {packId: str|None, conf: float, rationale: str}"""
         return {'packId': None, 'conf': 0.0, 'rationale': 'arbiter 无场所识别能力'}
+
+    async def name_segment(self, req):
+        """事件段命名（M2.7）：req 含 segmentId/summary/signature/keyframes/behaviors。
+        返回 {name: str|None(=弃权/不可判定), conf, matchedBehaviors, rationale}"""
+        return {'name': None, 'conf': 0.0, 'matchedBehaviors': [],
+                'rationale': 'arbiter 无命名能力'}
+
+    async def behavior_check(self, req):
+        """行为判定：req 含 behavior{id,description,observable} 与 frames。
+        返回 {verdict: 'match'|'no'|'undecidable', conf, behaviorId}"""
+        return {'verdict': 'undecidable', 'conf': 0.0,
+                'behaviorId': (req.get('behavior') or {}).get('id')}
 
 
 class AbstainArbiter(BaseArbiter):
@@ -206,6 +219,86 @@ class OllamaArbiter(BaseArbiter):
                 return {'packId': c['id'], 'conf': 0.9,
                         'rationale': 'ollama vlm 场所识别'}
         return {'packId': None, 'conf': 0.0, 'rationale': '回复未含目录 id: ' + text[:80]}
+
+    def _extract_json(self, text):
+        """宽松提取首个 JSON 对象（VLM 输出常带前后缀）"""
+        start = text.find('{')
+        end = text.rfind('}')
+        if start < 0 or end <= start:
+            return None
+        try:
+            return json.loads(text[start:end + 1])
+        except Exception:
+            return None
+
+    async def name_segment(self, req):
+        """ollama VLM 段命名：摘要+关键帧+行为定义表 → 输出规范 JSON。
+        undecidable=画面证据不足（诚实选项，不硬猜）；无 ollama 视觉模型时走弃权。"""
+        images = [f for f in (req.get('keyframes') or []) if f][:3]
+        if not images:
+            return {'name': None, 'conf': 0.0, 'matchedBehaviors': [],
+                    'rationale': '无关键帧'}
+        behaviors = req.get('behaviors') or []
+        btable = '\n'.join(
+            f"- {b.get('id')}: {b.get('description') or ''}（观测特征: {b.get('observable') or '未填'}）"
+            for b in behaviors) or '-（无）'
+        prompt = (
+            '你是监控事件分析器。以下是一个事件时间段的结构化摘要与最多 3 张关键帧。\n'
+            f"摘要: {json.dumps(req.get('summary') or {}, ensure_ascii=False)}\n"
+            f'危险行为定义表（如命中返回其 id）:\n{btable}\n'
+            '请严格只输出一个 JSON 对象: '
+            '{"name": "不超过16个汉字的事件名", "conf": 0.0到1.0, '
+            '"matchedBehaviors": ["行为id"], "undecidable": false, '
+            '"rationale": "不超过30字的理由"}。'
+            '画面证据不足判断行为时 undecidable 置 true 且 matchedBehaviors 为空。')
+        body = json.dumps({'model': self.model, 'prompt': prompt,
+                           'images': images, 'stream': False,
+                           'options': {'temperature': 0}})
+        resp = await asyncio.to_thread(
+            post_json_http, self.host + '/api/generate', body, 90, self.allowed_hosts)
+        text = (resp.get('response') or '').strip()
+        obj = self._extract_json(text)
+        if not obj or not obj.get('name'):
+            return {'name': None, 'conf': 0.0, 'matchedBehaviors': [],
+                    'rationale': '输出无法解析: ' + text[:80]}
+        if obj.get('undecidable'):
+            return {'name': None, 'conf': 0.0, 'matchedBehaviors': [],
+                    'rationale': (obj.get('rationale') or 'undecidable')[:80]}
+        name = str(obj.get('name'))[:24]
+        mb = [b for b in (obj.get('matchedBehaviors') or [])
+              if isinstance(b, str)] if isinstance(obj.get('matchedBehaviors'), list) else []
+        conf = obj.get('conf')
+        return {'name': name,
+                'conf': round(float(conf), 3) if isinstance(conf, (int, float)) else 0.7,
+                'matchedBehaviors': mb,
+                'rationale': str(obj.get('rationale') or '')[:60]}
+
+    async def behavior_check(self, req):
+        """ollama VLM 行为判定：当前帧+单条行为定义 → match/no/undecidable"""
+        behavior = req.get('behavior') or {}
+        frames = req.get('frames') or []
+        if not frames:
+            return {'verdict': 'undecidable', 'conf': 0.0,
+                    'behaviorId': behavior.get('id')}
+        prompt = (
+            f"监控画面行为判定。行为定义: {behavior.get('name')} — "
+            f"{behavior.get('description') or ''}（观测特征: {behavior.get('observable') or '未填'}）。\n"
+            '该帧是否呈现此行为？严格只输出 JSON: '
+            '{"verdict": "match"|"no"|"undecidable", "conf": 0.0到1.0}。证据不足用 undecidable。')
+        body = json.dumps({'model': self.model, 'prompt': prompt,
+                           'images': frames[:1], 'stream': False,
+                           'options': {'temperature': 0}})
+        resp = await asyncio.to_thread(
+            post_json_http, self.host + '/api/generate', body, 60, self.allowed_hosts)
+        obj = self._extract_json((resp.get('response') or '').strip())
+        verdict = obj.get('verdict') if obj else None
+        if verdict not in ('match', 'no', 'undecidable'):
+            return {'verdict': 'undecidable', 'conf': 0.0,
+                    'behaviorId': behavior.get('id'), 'rationale': '输出无法解析'}
+        conf = obj.get('conf')
+        return {'verdict': verdict,
+                'conf': round(float(conf), 3) if isinstance(conf, (int, float)) else 0.5,
+                'behaviorId': behavior.get('id')}
 
 
 def build_arbiter(cfg):

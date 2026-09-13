@@ -974,6 +974,80 @@ class EventSegmenter {
   }
 }
 
+// ---------- 命名管线纯逻辑（M2.7，core-loop-v3 §4：预算门控/修订链/降级命名） ----------
+const SEGMENT_LABEL_SCHEMA = 'sc.segment-label/v1';
+
+// 命名预算门控：滚动小时窗（缺省 30 次/时）+ 同签名去重（同类段只送一次 LLM）。
+// 重要性（0 普通 / 1 新签名 / 2 规则命中）决定发送排序，由调用方使用。
+class NamingGate {
+  constructor(opts) {
+    opts = opts || {};
+    this.budgetPerHour = opts.budgetPerHour || 30;
+    this.items = [];                       // {at, sigKey}
+    this.sigSeen = new Map();              // sigKey → lastAt（窗内去重）
+  }
+  request(signature, now) {
+    const sigKey = stableStringify(signature);
+    this.items = this.items.filter(e => now - e.at < 3600000);
+    const last = this.sigSeen.get(sigKey);
+    if (last !== undefined && now - last < 3600000) return 'dup';   // 同签名窗内只送一次
+    if (this.items.length >= this.budgetPerHour) return 'budget';
+    this.items.push({ at: now, sigKey });
+    this.sigSeen.set(sigKey, now);
+    if (this.sigSeen.size > 256) {         // 有界去重表
+      const oldest = [...this.sigSeen.entries()].sort((a, b) => a[1] - b[1])[0][0];
+      this.sigSeen.delete(oldest);
+    }
+    return 'accepted';
+  }
+}
+
+// 降级命名（签名模板占位名）：桥不可达/预算耗尽时事件流仍可读——
+// 诚实标注 source:'template'，桥恢复后由 LLM 覆写为新 revision
+function templateName(signature, summary) {
+  const cls = (signature.cls && signature.cls.join('/')) || '目标';
+  const parts = [cls + 'x' + (summary.peakCount || 1)];
+  if (summary.zones && summary.zones.length) parts.push('进入 ' + summary.zones.join(','));
+  if (summary.lines && summary.lines.length) parts.push('越线 ' + summary.lines.join(','));
+  return parts.join(', ');
+}
+
+// sc.segment-label/v1 构建：一个段的命名修订记录（不可变，revision 递增）
+function buildSegmentLabel(o) {
+  // o: {segmentId, source:'llm'|'pattern'|'template'|'admin', name, conf,
+  //     matchedBehaviors?, patternRef?, time?, rationale?}
+  if (!o.segmentId) throw new Error('label 缺少 segmentId');
+  return {
+    schema: SEGMENT_LABEL_SCHEMA,
+    segment_id: o.segmentId,
+    revision: o.revision,
+    source: o.source,
+    name: o.name,
+    conf: typeof o.conf === 'number' ? o.conf : null,
+    matchedBehaviors: o.matchedBehaviors || [],
+    pattern: o.patternRef || null,
+    rationale: o.rationale || null,
+    time: o.time || new Date().toISOString(),
+  };
+}
+
+// 修订链：同段 label 不可变递增（迟到命名/覆写/改名 = 新 revision）。
+// apply 显式 revision 冲突时拒绝（返回 null）；省略 revision 则自动 +1。
+class LabelChain {
+  constructor() { this.map = new Map(); }
+  apply(label) {
+    if (!label || !label.segment_id) return null;
+    const cur = this.map.get(label.segment_id);
+    const rev = cur ? cur.revision + 1 : (label.revision === undefined ? 1 : label.revision);
+    if (label.revision !== undefined && label.revision !== rev) return null;   // 修订冲突
+    const out = Object.assign({}, label, { revision: rev });
+    this.map.set(label.segment_id, out);
+    return out;
+  }
+  latest(segmentId) { return this.map.get(segmentId) || null; }
+  get size() { return this.map.size; }
+}
+
 // ---------- 证据事件（机器可消费的版本化事件，从"帧"到"有证据的事件"） ----------
 const EVIDENCE_SCHEMA = 'sc.evidence/v1';
 const POLICY_VERSION = 'four-state/2';
@@ -1204,5 +1278,6 @@ if (typeof module!=='undefined' && module.exports) {
     segSide, segIntersect, RuleEngine, FrameRing, Outbox,
     MODALITY_PROFILES, ICR_TRANSITION_WINDOW_MS, icrVote, ImagingModality,
     SEGMENT_SCHEMA, SEGMENT_SILENCE_MS, SEGMENT_MAX_MS,
-    todBucket, durBucket, countBucket, buildSignature, segmentSimilarity, EventSegmenter };
+    todBucket, durBucket, countBucket, buildSignature, segmentSimilarity, EventSegmenter,
+    SEGMENT_LABEL_SCHEMA, NamingGate, templateName, buildSegmentLabel, LabelChain };
 }

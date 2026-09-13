@@ -51,6 +51,28 @@ class Bridge:
         except OSError:
             pass  # 归档失败不阻断仲裁
 
+    def archive_named(self, kind, req, out):
+        """段命名/行为判定案件归档（M2.7）——命名修订语料"""
+        try:
+            os.makedirs(self.archive_dir, exist_ok=True)
+            path = os.path.join(self.archive_dir,
+                                datetime.now().strftime('%Y%m%d') + '-' + kind + '.jsonl')
+            rec = {
+                'ts': datetime.now().isoformat(),
+                'request': {k: req.get(k) for k in
+                            ('requestId', 'segmentId', 'summary', 'behaviors', 'behavior')},
+                'verdict': {k: out.get(k) for k in
+                            ('name', 'matchedBehaviors', 'verdict', 'behaviorId',
+                             'conf', 'rationale', 'arbiter', 'latencyMs')},
+            }
+            if self.archive_crops:
+                rec['keyframes'] = req.get('keyframes')
+                rec['frames'] = req.get('frames')
+            with open(path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + '\n')
+        except OSError:
+            pass
+
     def archive_scene(self, req, out):
         """场所识别案件归档（§9）：目录/帧/裁决——模式包目录生长机制的语料"""
         try:
@@ -106,6 +128,51 @@ class Bridge:
                     break
                 self.archive_scene(req, out)
                 print(f"[bridge] 场景识别 {req.get('requestId')} → {out.get('packId')} "
+                      f"({out.get('conf')}) {out.get('latencyMs')}ms")
+                continue
+            if req.get('type') == 'segment-name':
+                # M2.7 事件段命名：摘要+关键帧+行为定义表 → 语义名称
+                t0 = time.time()
+                try:
+                    verdict = await self.arbiter.name_segment(req)
+                except Exception as e:
+                    verdict = {'name': None, 'conf': 0.0, 'matchedBehaviors': [],
+                               'rationale': str(e)[:120]}
+                out = {'type': 'segment-label', 'requestId': req.get('requestId'),
+                       'segmentId': req.get('segmentId'),
+                       'name': verdict.get('name'), 'conf': verdict.get('conf'),
+                       'matchedBehaviors': verdict.get('matchedBehaviors') or [],
+                       'rationale': verdict.get('rationale', ''),
+                       'arbiter': self.arbiter.name,
+                       'latencyMs': round((time.time() - t0) * 1000)}
+                try:
+                    await ws.send(json.dumps(out))
+                except Exception:
+                    break
+                self.archive_named('segment', req, out)
+                print(f"[bridge] 段命名 {req.get('segmentId')} → {out.get('name')} "
+                      f"({out.get('conf')}) {out.get('latencyMs')}ms")
+                continue
+            if req.get('type') == 'behavior-check':
+                # 行为判定（段中即时，独立预算在边缘侧）
+                t0 = time.time()
+                try:
+                    verdict = await self.arbiter.behavior_check(req)
+                except Exception as e:
+                    verdict = {'verdict': 'undecidable', 'conf': 0.0,
+                               'behaviorId': (req.get('behavior') or {}).get('id'),
+                               'rationale': str(e)[:120]}
+                out = {'type': 'behavior-verdict', 'requestId': req.get('requestId'),
+                       'behaviorId': verdict.get('behaviorId'),
+                       'verdict': verdict.get('verdict'), 'conf': verdict.get('conf'),
+                       'arbiter': self.arbiter.name,
+                       'latencyMs': round((time.time() - t0) * 1000)}
+                try:
+                    await ws.send(json.dumps(out))
+                except Exception:
+                    break
+                self.archive_named('behavior', req, out)
+                print(f"[bridge] 行为判定 {out.get('behaviorId')} → {out.get('verdict')} "
                       f"({out.get('conf')}) {out.get('latencyMs')}ms")
                 continue
             if req.get('type') != 'arb-request':
