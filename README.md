@@ -1,134 +1,186 @@
-# semantic-camera — Semantic Camera: Venue-Mode Realtime Video Understanding on Device
+<div align="center">
+
+<img src="docs/logo.svg" width="640" alt="semantic-camera — Semantic Camera"/>
+
+[English](README.md) · 简体中文 · [Platform design](docs/semantic-camera-design.md) · [Core loop v3](docs/core-loop-v3.md) · [Runtime ER diagram](docs/architecture-er.html)
 
 [![CI](https://github.com/CommitStrip/semantic-camera/actions/workflows/ci.yml/badge.svg)](https://github.com/CommitStrip/semantic-camera/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![GitHub tag](https://img.shields.io/github/v/tag/CommitStrip/semantic-camera)](https://github.com/CommitStrip/semantic-camera/tags)
+[![Tests](https://img.shields.io/badge/tests-99%20passed-brightgreen)](https://github.com/CommitStrip/semantic-camera/actions)
 
-**English** | [简体中文](README-CN.md)
+**A budget-aware, mode-configurable edge vision event runtime · Turn cameras into auditable semantic event sources**
 
-**A budget-aware, mode-configurable edge vision event runtime** — **a semantic camera = a venue-aware semantic discrimination layer on top of commodity NVR building blocks.** Turn a live video stream (Hikvision RTSP / phone camera / local video) into on-device realtime semantic understanding and alerting: frame-difference motion gating → triggered detection → constant-velocity tracking + multi-frame confirmation → fully-automatic semantic discrimination → venue-mode-driven alerting and disposition. Discrimination is organized as **venue mode packs** — extending to a new venue only adds data to `web/mode-packs.js` (plus optional model/discrimination head files) with **zero core changes, enforced by CI two-mode acceptance and source-cleanliness tests**. The platform design (multi-camera scheduling / spatiotemporal rule engine / open-set rejection / privacy / continual-learning governance / evaluation gates) lives in [docs/semantic-camera-design.md](docs/semantic-camera-design.md); runtime ER diagram in [docs/architecture-er.html](docs/architecture-er.html) (open directly in a browser).
+</div>
 
-This repository is the mainline of the library family: `vus` is the general video-understanding engine, `rvs` the robotics increment, and the predecessor `anti-drone-monitor` (single-scene anti-drone demo) is frozen while this repo carries the evolution forward.
+---
 
-Three design red lines: **the discrimination pipeline runs fully automatically with no human judgment step** (discrimination never waits for a human; but "automatic understanding ≠ automatic execution of everything" — human review never blocks the realtime pipeline, and whether high-impact external effects need human confirmation is decided by the effect policy); **cost has a hard cap** (budget-based, never growing linearly with runtime); **new venues require no core-logic changes** (the platform-viability criterion; mode selection is fail-closed — an unknown mode refuses to arm and never silently falls back to another venue).
+semantic-camera turns a live video stream (Hikvision RTSP / phone camera / local video) into **on-device realtime venue-semantic discrimination and alerting**: frame-difference gating → triggered detection → track confirmation → four-state fully-automatic verdicts → event segmentation → LLM naming → habituation. All inference runs in-browser as wasm (**video never leaves the device**), and everything produced is a **machine-auditable semantic event**, not raw video. This repo is the mainline of the library family: `vus` is the general video-understanding engine, `rvs` the robotics increment, and the predecessor `anti-drone-monitor` (single-scene anti-drone demo) is frozen while this repo carries the evolution forward.
 
-**Claims discipline**: today's algorithms are a "configurable event camera + per-venue discrimination heads" — we do not claim universal scene understanding, zero false alarms, human-level semantics, or "zero-code venue onboarding" (the accurate claim: new venues require no core-logic changes, while still adding registry data and redeploying); we report measured numbers only, and everything unmeasured is marked "pending / design / roadmap".
+## ✨ Key features
 
-Current validation status: probe-head offline accuracy **98.15%** (162 authoritative Drone-vs-Bird samples, evidence `web/jepa_probe_init.json`: acc=0.9815, n_train=162, dim=768, inherited as measured from the predecessor repo); **the person model is validated on real street footage**: NanoDet-Plus-m-1.5x@416 (Apache-2.0) detects 7–58 persons/frame on sampled frames of a CC-licensed Shibuya crossing video at 23–24 ms/frame CPU (selection and measurements in [docs/model-selection.md](docs/model-selection.md)); WHEP signaling verified end-to-end against a local MediaMTX v1.20.0 + H.264 test stream; **99 unit tests + GitHub Actions CI all green** (including two-mode end-to-end acceptance, source-cleanliness, evidence-schema contract, mode-selection fail-closed, asset-integrity, and spatiotemporal-rule gates). On-device end-to-end fps/latency benchmarks are **pending**.
+- **Four-tier speed stack** — T0 frame-difference gating (per-frame, milliseconds) → T1 triggered detection (400ms on motion / 5s patrol on stillness) → track confirmation (constant-velocity prediction + tiered aging, hovering targets never lost) → T1.5 edge discrimination. Expensive inference only for moments that deserve it.
+- **Four-state fully-automatic verdicts** — `alert` / `escalate` (gray zones **abstain, never fabricate**) / `clear` / `suppress`; discriminated and detector-authority paths keep separate gates (no missed alerts), and **no step of the pipeline depends on human judgment**.
+- **Venue mode packs** — detection model + discrimination head + rules + arming schedule + budgets are all **pure data** (`web/mode-packs.js`); switching venues changes zero core code; `validatePack` is fail-closed (bad configs refuse to arm) and **unknown modes never silently fall back**.
+- **Imaging-modality state machine** — multi-signal voting (2of3) for the frame-level IR-CUT color↔B/W switch + oscillation debounce + per-modality parameter profiles + learning freeze in transition windows; synthetic replay meets all four metric targets.
+- **Spatiotemporal rule engine** — polygon zones (enter + dwell + occupancy count) and trip lines (direction-filtered crossings + cooldown): rules are pure pack data with a read-only overlay.
+- **Scene auto-recognition** — starting without a mode = observation mode (records only, never fabricates); the first confirmed trigger has the slow brain identify the venue, auto-arming at conf≥0.85; **manual assignment always wins**.
+- **Event segmentation & LLM naming** — the fast system slices the stream into event time windows (busy scenes force-split at the cap), and the slow brain names them semantically under budget (30/hour); bridge down or budget exhausted → automatic template-name fallback, the event stream stays readable forever.
+- **Habituation learning** — recurring event patterns (the daily commute shot) progress draft → model-verified → human-verified; trusted hits **self-name without calling the LLM**, amortizing slow-brain cost over time; 5% audit sampling + admin golden labels + deviation detection prevent "habitual blind spots".
+- **Auditable evidence events** — `sc.evidence/v1`: stable event IDs, dual timestamps, config fingerprints, model sha256, detector/discriminator confidences kept separate, pre-roll frame ring + crop frame with content hash.
+- **Deterministic alert outlet** — Outbox (at-least-once + event_id idempotency + dead-letter retention) → webhook (redacted by default, metadata only).
+- **Pluggable detection heads** — the `HEAD_DECODERS` registry: `yolo8head` / `nanodethead` (GFL distribution regression) / `mock` (deterministic timeline); person model NanoDet-Plus (Apache-2.0, validated on real street footage).
+- **Hard cost caps** — triggered detection, arbitration 20/hour, naming 30/hour, behavior checks on their own ledger — every cost is capped, never growing linearly with runtime.
 
-## Key capabilities
+## 🚀 Quick start
 
-| Capability | Description |
-|------|------|
-| Realtime detection | Frame-difference gate (fast) → triggered detection (slow): motion fires detection within 400 ms, a 5 s patrol covers stillness; motion-area floor 0.003 suppresses sensor noise |
-| Target tracking | IoU + center-distance association + constant-velocity prediction (no track loss across long detection gaps), multi-frame confirmation (≥2) cuts false positives; confirmed targets get a 12 s survival window — hovering targets are not lost |
-| Fully-automatic semantic discrimination | Four-state verdict (discriminated / detector-authority dual paths): alert / pending-arbitration / cleared / suppressed — **no human judgment anywhere**; gray-zone cases enter a budget-capped arbitration queue; high-confidence dual-signal agreement auto-updates the probe head |
-| Venue mode packs | Modes are data + a validator: `?mode=` selects, new venues plug in with zero code; domain terms live only in `web/mode-packs.js` (enforced by a CI cleanliness test); `validatePack` is fail-closed — a bad config refuses to arm |
-| Evidence events | Versioned `sc.evidence/v1` envelope: stable event ID, dual timestamps (source/processed), mode-pack config fingerprint, policy version, model SHA-256, detector and discriminator confidences kept separate, alert crop frame with its content hash — auditable, machine-consumable events |
-| Arming schedule | Mode packs may declare arming windows (overnight-capable); outside the window alerts downgrade to records and arbitration spends no budget |
-| Spatiotemporal rules | Polygon zones (enter + dwell + occupancy count) and trip lines (direction-filtered crossing with cooldown): rules are pure pack data, read-only overlay | 
-| Scene auto-recognition | The first confirmed trigger sends frames to the slow brain to identify the venue (CLIP zero-shot fallback / ollama VLM refine); conf≥0.85 auto-arms; unidentified = observation mode (records only, never fabricates); manual assignment always wins |
-| vus bridge arbitration (M2) | Gray-zone cases escalate to a pluggable slow brain (CLIP zero-shot / ollama VLM): verdicts feed back as pseudo-labels, cases archived to JSONL; bridge down = edge stays fully autonomous, never fabricates |
-| Zone rules | Polygon zones (normalized coords): entering + dwelling past `dwellMs` escalates to an alert (`zone-intrusion`), outside-zone targets downgrade to records; read-only overlay |
-| Detector head registry | `HEAD_DECODERS`: `yolo8head` (no objectness) / `nanodethead` (GFL distribution regression) / `mock` (deterministic timeline) — the head name is a provider-registry key, extending adds no core changes |
-| Asset single-sourcing | Models/runtime live once under `assets/` (manifest with sha256/license/source), staged into local `web/`, CI hash gate against silent drift |
-| Smooth zoom | Pinch / slider / buttons + **target-following** auto-centering, smooth interpolation 1×-8× |
-| Distance estimation | Pinhole model with per-class size (drone 0.35 m / bird 0.20 m); digital zoom is a center crop and does not affect the reading |
-| Data traceability | IndexedDB persistence + CSV/JSON export + native bridge (Android JSONL / Harmony CSV); full chain detection→verdict→arbitration→self-training is logged |
+```bash
+git clone https://github.com/CommitStrip/semantic-camera.git
+cd semantic-camera
+bash scripts/sync-web.sh                 # stage assets (models/runtime) → web/ (once after clone)
 
-## System layout
-
-```
-semantic-camera/
-├── web/index.html        # shared HTML5 core (reused by both WebViews; domain-free)
-├── web/core.js           # pure-logic core (config/validation/tracking/gating/policy/queue/learning math/mock detector/evidence events)
-├── web/mode-packs.js     # venue mode-pack registry (pure data; the only home of domain terms)
-├── gateway/              # MediaMTX gateway: Hikvision RTSP → WebRTC(WHEP)/HLS
-├── bridge/               # vus slow-brain arbitration bridge (M2): gray-zone cases → CLIP/ollama verdicts → probe feedback
-└── docs/                 # platform design (architecture/roadmap/risks)
+cd web && python3 -m http.server 8899
+# open http://localhost:8899/index.html in a browser
 ```
 
-> Large files under `web/` (models/runtime) are not committed — their single source lives in `assets/`. Run `bash scripts/sync-web.sh` once after cloning to stage them into `web/`; CI verifies asset sha256 integrity.
+- **Mode selection**: `?mode=airfield` (anti-drone) / `?mode=restricted-area` (NanoDet person detection + night arming + zone rules); **no mode = scene auto-recognition** (observation mode records only, auto-arms once the bridge identifies the venue).
+- **Input sources**: ▶ Start (phone camera) / 📁 Video (local playback) / 🔌 Hikvision (RTSP→WHEP gateway; Basic or query-param auth auto-adapts).
+- **Record**: the telemetry panel accumulates live; CSV/JSON export contains the full detection→verdict→arbitration→naming chain.
 
-## Venue mode packs
+<details>
+<summary>🔌 Slow-brain arbitration bridge (optional): LLM segment naming & behavior checks</summary>
 
-A mode pack is pure data: detection model (pluggable onnx/mock) + optional discrimination head + alert rules + arming schedule + budgets, fully validated at load by `validatePack` (fail-closed: a bad config refuses to arm). **Platform-viability criterion: new venues require no core changes** — the second pack `restricted-area` proves the abstraction via a CI two-mode end-to-end test. First-wave venue catalog:
+Gray-zone cases escalate to a local slow brain (off by default):
+
+```bash
+pip install -r bridge/requirements.txt
+cp bridge/config.example.json bridge/config.json   # set token and arbiter (clip zero-shot / ollama VLM)
+python bridge/server.py --config bridge/config.json
+# in the page, fill ws://<IP>:8390 + token under "桥" → Connect
+```
+
+- **Naming**: event segments → LLM semantic naming ("employee badges in for work"); template name r1 ships first, the LLM overwrites as r2 (immutable revisions);
+- **Behavior checks**: admins define open-set dangerous behaviors in the pack (fence-climbing / tailgating / vehicle accidents … = data, not code); zone hits trigger mid-segment checks (P95 ≤15s);
+- **Budgets**: naming 30/hour + behavior checks on their own ledger (concurrency≤2 / cooldown / queue≤8); bridge down = the edge stays autonomous, never fabricates;
+- Every case is archived to JSONL (retraining corpus).
+
+</details>
+
+## 🏗️ How it works
+
+```mermaid
+flowchart LR
+    SRC["Hikvision RTSP / camera / file"] --> IN["WHEP/HLS intake"]
+    IN --> GATE["⚡ T0 frame-diff gate<br/>per-frame · milliseconds"]
+    GATE -->|activity| DET["🎯 T1 triggered detection<br/>pluggable HEAD_DECODERS"]
+    DET --> TRK["📍 track confirmation<br/>constant-velocity + history"]
+    TRK --> RULE["📐 spatiotemporal rules<br/>zone dwell/count · line direction"]
+    TRK --> VER["⚖️ four-state verdict<br/>alert/escalate/clear/suppress"]
+    VER --> EV["📦 evidence event<br/>sc.evidence/v1"]
+    EV --> OB["📤 Outbox<br/>at-least-once → webhook"]
+    VER -->|escalate gray zone| BR["🌉 vus bridge<br/>CLIP zero-shot/ollama VLM"]
+    TRK --> SEG["✂️ event segmentation<br/>20s silence/120s cap"]
+    SEG -->|within budget| NAME["🧠 LLM naming<br/>≤16-char name"]
+    SEG -->|pattern hit| HAB["🔁 habituation<br/>trusted = no LLM"]
+    NAME --> HAB
+    MOD["🌗 imaging-modality FSM<br/>ICR color↔B/W"] -.profile/freeze.-> GATE
+```
+
+| Tier | Content | Cadence | Purpose |
+|------|---------|---------|---------|
+| T0 | Frame-diff gate + imaging modality | per-frame | "is anything happening" + picture modality |
+| T1 | Triggered detection + tracking | 400ms / 5s patrol | who, where, which trajectory |
+| T1.5 | Edge discrimination + rules + verdict | per confirmed target | should this alert |
+| T2 | Slow-brain naming & arbitration | per segment (budgeted) | what to call it, gray-zone review |
+
+Two red lines run throughout: **gray zones abstain rather than fabricate, and the detector is authoritative until a verdict exists**; every LLM call goes through a budget (arbitration / naming / behavior-check, three separate ledgers).
+
+## 🏙️ Venue mode packs
 
 | Mode pack | Discrimination task | Value (false-alarm killer) | Status |
 |---|---|---|---|
-| **airfield anti-drone** | bird / drone | flocks and drifting objects don't alert; real drones do; gray zones never false-alarm | ✅ fully shipped |
-| **restricted-area intrusion** | person (detector-authority, no discrimination head) | night arming + abstain semantics; zone rules land in M3 | ✅ abstraction proven (mock demo; real model pending) |
+| **airfield anti-drone** | bird / drone (JEPA head) | flocks and drift don't alert; real drones do | ✅ fully shipped |
+| **restricted-area intrusion** | person (NanoDet-Plus@416) | night arming + 2s zone dwell escalation + line crossing | ✅ real model + zone rules (7–58 detections/frame on real street footage) |
 | **depot smoke/fire** | smoke / fog·sunset | smoke false alarms are the industry's #1 pain | M3 |
 | **site PPE compliance** | helmet / no-helmet | person detection alone cannot tell | M3 |
 | **campus perimeter** | person / shadow·objects | low-light false-alarm suppression | M3 |
 | **farm deterrence** | bird / animal / human | species decides the deterrence action | M5 |
 
-## JEPA fully-automatic discrimination + auto evolution (integrated)
+A new venue = one entry in `web/mode-packs.js` (+ optional model/head files), **zero core changes** — enforced by the CI two-mode end-to-end acceptance and source-cleanliness tests.
 
-On top of YOLO localization, a **JEPA-style self-supervised discriminator** (`web/dinov2_vits14_feat.onnx`, 85 MB, DINOv2-ViT-S feature extractor + `web/jepa_probe_init.json` linear probe head):
+## 📊 Benchmarks
 
-- **Four-state fully-automatic verdict**: the probe outputs P(target class); the policy emits `alert` (target side, high confidence → alert) / `escalate` (target side, low confidence → **abstain and queue for arbitration** — never a false alert) / `clear` (confidently not the target → suppress) / `suppress` (silent). Before a verdict exists, the detector is authoritative (no missed alerts).
-- **Auto evolution (capability shipped, disabled by default)**: on frozen features, when the logreg head and the prototype distance agree with confidence ≥0.90, the probe head can update itself (centroid moving average + one-step SGD). **Defaults to `enabled:false`** — the two signals are not independent evidence; until the governance stack (frozen evaluation set, versioned rollback, open-set rejection) is complete (M5), the head must not be modified online by default; per-venue opt-in follows. Learning state is isolated per mode pack (`jepa_probe_v2:<modeId>`) so one venue's pseudo-labels never pollute another. "Reset learning" restores the initial weights (an ops action). The manual feedback buttons are gone.
-- **Gray-zone arbitration queue**: `escalate` cases queue under a hard budget cap (20/hour) with per-track dedup (15 s TTL); milestone M2 bridges the vus slow brain (VLM arbitration) whose verdicts feed back as pseudo-labels (protocol in the design doc §8). Without the bridge the edge stays fully autonomous.
+All numbers below are measured; reproduction scripts live in `scripts/`.
 
-## Hikvision RTSP intake (verified)
+### Person model — real street footage (NanoDet-Plus-m-1.5x@416, Apache-2.0)
 
-- **Division of labor**: MediaMTX pulls the Hikvision RTSP stream (camera IP/credentials in `gateway/mediamtx.yml`) → WebRTC/WHEP (8889) or HLS (8888); `whep-client.js` implements standard WHEP signaling (exponential-backoff reconnect) and falls back to HLS on failure.
-- **How to connect**: open the page, tap "🔌 海康", enter the gateway address and stream path (e.g. `http://gatewayIP:8889` + `cam1`) — the same detection + discrimination pipeline runs on top.
-- **Hikvision RTSP URLs**: main stream `rtsp://user:pass@IP:554/Streaming/Channels/101`, sub-stream `.../102`; the main stream (1080p H.264) is recommended for detection; H.265 cameras need transcoding (see `gateway/README.md`).
-- Verified end-to-end with local MediaMTX v1.20.0 + an H.264 test stream (**full WHEP signaling**: OPTIONS→POST→PATCH→DELETE all pass).
+| Metric | Result |
+|------|------|
+| Real street detections | **7–58 persons/frame** (conf>0.4) on sampled frames of a CC BY-SA 4.0 Shibuya crossing video |
+| Detection latency | **23–24ms/frame** (Python ORT CPU, 416×416) |
+| JS decoder equivalence | matches the numpy reference per-confidence (0.676) |
 
-## Quick start (browser / phone)
+### Imaging-modality FSM — synthetic ICR replay (image-domain synthesis; real footage pending)
 
-```bash
-cd web && python3 -m http.server 8899
-# on a phone in the same network, open http://<PC-IP>:8899/index.html
-# or open web/index.html directly in a browser
+| Metric | Result (target) |
+|------|------|
+| False triggers (out-of-boundary begins) | **0** (target 0) |
+| Missed boundaries | **0** (2 suppressed-in-OSCILlation listed separately by design) |
+| Detection latency / settle time | **1.0s / 2.5s** (500ms virtual sampling) |
+| Transition-window fake motion | soft-reset coverage 100% of begins |
+
+### Protocols & links
+
+| Item | Result |
+|------|------|
+| WHEP signaling end-to-end | ✅ MediaMTX v1.20.0 + H.264 (OPTIONS→POST→PATCH→DELETE all pass); live family-gateway probe succeeded |
+| Segment naming / behavior-check protocols | ✅ two round-trip E2E tests (clip arbiter abstains honestly); ollama naming parse chain mock-verified (undecidable / JSON extraction / abstain) |
+| Probe-head offline accuracy (airfield head) | ✅ 98.15% (162 samples, inherited from the predecessor) |
+
+<details>
+<summary>📖 Honest notes & pending items</summary>
+
+- The ICR replay material is **synthetic** (real daytime frames + image-domain B/W-noise transform) — not real IR-CUT camera output; must be re-verified with real footage;
+- Browser wasm end-to-end fps/latency **pending** (telemetry already samples per frame — export is the measurement);
+- Live ollama naming on-device pending a local ollama + vision model;
+- Real dangerous-behavior judgment quality depends on real venue data — ongoing;
+- Audit disagreement rate (<5%) and the LLM-call decay curve need deployment data.
+
+</details>
+
+## 📁 Repository layout
+
+```
+web/                       browser core (opens directly in modern browsers; domain-free)
+  index.html               pipeline wiring + UI (detection/verdict/segmentation/naming/bridge/outlet)
+  core.js                  pure-logic core (validation/tracking/gating/verdict/queues/head registry/
+                           zone & rule engines/pattern library/naming gate/label chain/evidence/bridge link)
+  mode-packs.js            venue mode-pack registry (pure data; the only home of domain terms)
+  whep-client.js           WHEP player (Basic/query-param auth adaptive + exponential backoff)
+assets/                    model/runtime single source (manifest.json with sha256/license/source)
+bridge/                    vus slow-brain arbitration bridge (WS server + CLIP zero-shot/ollama arbiters
+                           + scene identify/segment naming/behavior checks + case archive JSONL)
+gateway/                   MediaMTX gateway (Hikvision RTSP → WHEP/HLS)
+scripts/                   staging/asset integrity/quantization/ICR synthetic replay/family-gateway check
+docs/                      platform design (v2.6) / core loop (v3.5) / model selection / logo / ER diagram
+tests/                     99 node:test cases (zero deps)
 ```
 
-- Tap **▶ Start** to use the phone camera, **📁 Video** for local playback, **🔌 海康** for a real camera stream.
-- Tap **⏺ Record** to open the telemetry panel; events accumulate live; **export CSV/JSON** to download.
-- Zoom via slider / ＋− buttons / two-finger pinch; enable **target-following** to auto-center on confirmed targets.
-- **Scene auto-recognition**: start without picking a mode = observation mode (person detection, records only); with the bridge connected, the first confirmed trigger auto-identifies the venue and arms (conf≥0.85); switch anytime via the "场景" dropdown.
+## 🤖 Agent consumption
 
-## Development: tests and CI
+Everything produced is machine-consumable: **evidence events** (`sc.evidence/v1`) and **named segments** (`sc.segment-label/v1`) are published via Outbox/webhook with stable IDs + immutable revisions for idempotent merging by agents; bridge-side MCP-style collaboration (query events / fetch evidence / file tickets) is an optional outlet adapter. Runtime entity relations in [docs/architecture-er.html](docs/architecture-er.html).
 
-```bash
-node --test tests/core.test.mjs     # 99 unit tests (node:test, zero deps)
-python scripts/verify_models.py    # model asset sha256 integrity (fail-closed)
-bash scripts/sync-web.sh            # stage assets → web/ local
-bash scripts/sync-web.sh --check    # consistency check only (same as CI)
-```
+## 💻 Hardware footprint
 
-CI (node 20/22 matrix): JS syntax checks → unit tests → model asset integrity. All pure logic (config/validation/IoU/tracker/gate/ranging/four-state policy/arbitration queue/arming schedule/probe-learning math/mock detector/evidence events) lives in `web/core.js` with zero DOM dependencies, directly unit-testable. Two signature tests: the **two-mode end-to-end acceptance** (the same core pipeline drives both the airfield and restricted-area packs — the standing proof of the platform abstraction) and the **source-cleanliness meta-test** (core.js and the inline script must not contain venue domain terms — preventing "platform in name, single scene in code" regression).
+No GPU dependency — all inference is wasm CPU. Python-side selection measurements: NanoDet 23–24ms/frame (desktop CPU); wasm-side is seconds-level — hence detection is **trigger-based** (gate + cooldown), not per-frame. int8 quantization verdict (predecessor repo): the current opset12 export collapses to zero detections when quantized — needs a modern-opset re-export; the validation tool ships with a task-level gate against silent failure.
 
-## Performance & validation status
+## 🙏 Acknowledgments
 
-| Item | Status |
-|----|------|
-| WHEP signaling end-to-end | ✅ verified (MediaMTX v1.20.0 + H.264 test stream, OPTIONS→POST→PATCH→DELETE all pass) |
-| Probe-head offline accuracy | ✅ 98.15% (162 samples, `web/jepa_probe_init.json`, inherited as measured from the predecessor) |
-| Unit tests / CI | ✅ 99 tests green (incl. two-mode acceptance, cleanliness, schema contract, fail-closed, asset-integrity, spatiotemporal-rule gates), node 20/22 matrix |
-| Person model on real street footage | ✅ NanoDet-Plus@416: 7–58 persons/frame on sampled frames, 23–24 ms/frame CPU ([selection record](docs/model-selection.md)); browser wasm fps ⏳ pending |
-| On-device fps/latency | ⏳ pending — telemetry already records per-frame `detMs/trackMs/motionRatio`; export CSV/JSON for measured data |
-
-Model size & strategy: YOLOv8s fp32 43 MB + DINOv2 85 MB; a single wasm-side inference takes seconds — hence detection is **trigger-based** (gating + cooldown) rather than per-frame, and JEPA runs only on confirmed targets with lazy loading.
-
-**int8 quantization — measured verdict (2026-09-06, `scripts/quantize_models.py`)**: the current model is a custom export at opset 12 and is **not quantizable into a working model** — the QOperator path shrinks 42.7→10.9 MB and speeds inference 62→34 ms (1.8×), but post-NMS detections drop 41→0 (outputs collapse to zero). The validation tool ships with a task-level gate (detections must not drop by more than 10%, mean IoU ≥ 0.8) precisely to keep such silent failures out. The real fps lever is re-exporting yolov8n with a modern opset; DINOv2 int8 is blocked by the same quantizer operator-compatibility issue and stays fp32 (it only runs on confirmed targets, so its cost is already bounded).
-
-## Platform roadmap
-
-Milestones M1 (discrimination automation) → M1.5 (standalone repo + config governance) → M1.6 (platform consolidation: domain-free core + two-mode acceptance + evidence events) → M1.7 (provenance hardening: fail-closed mode selection + evidence provenance fields + self-training off by default) → **P1-①② (real restricted-area model + zone rules / single-source model assets, this release)** → M2 (vus bridge arbitration feedback, ✅) → → M2.6 scene auto-recognition (✅) → M3-a/b (✅) → M5-partial Outbox (✅) → **v3 core loop (M3-c imaging modality / M3-d segmentation / M2.7 naming / M3-e habituation, this release)** → M3 (spatiotemporal rules + open-set + smoke/fire pack) → M4 (multi-camera scheduling + health monitoring) → M5 (retraining loop + evaluation gates + alert sinks + license decision — the precondition for enabling self-training) → M6 (multi-stream gateway box). Details and risks in [docs/semantic-camera-design.md](docs/semantic-camera-design.md).
-
-## Platforms & hardware
-
-Modern browsers (desktop/Android/iOS) need WASM and WebRTC; no GPU dependency — all inference is wasm CPU. Embedding the page in any native WebView (Android/HarmonyOS/iOS shell) also works — zero core changes.
-
-## Acknowledgments
-
-- [MediaMTX](https://github.com/bluenviron/mediamtx) — RTSP → WebRTC/HLS streaming gateway (MIT). This repo only ships configuration and a launch script under `gateway/`.
+- [NanoDet-Plus](https://github.com/RangiLyu/nanodet) (Apache-2.0) — person detection model (`person-detector.onnx` is the official COCO-pretrained export; selection and elimination evidence in [docs/model-selection.md](docs/model-selection.md)).
 - [onnxruntime-web](https://github.com/microsoft/onnxruntime) — wasm inference engine (MIT).
+- [MediaMTX](https://github.com/bluenviron/mediamtx) — RTSP → WebRTC/HLS streaming gateway (MIT). This repo only ships configuration and a launch script under `gateway/`.
 - [hls.js](https://github.com/video-dev/hls.js) — HLS fallback playback (Apache-2.0).
-- [NanoDet-Plus](https://github.com/RangiLyu/nanodet) (Apache-2.0) — person detection model (person-detector.onnx is the official COCO-pretrained export, see docs/model-selection.md).
-- [DINOv2](https://github.com/facebookresearch/dinov2) ViT-S/14 (Meta AI) — discrimination feature extractor; upstream code is Apache-2.0 while the official weights are CC-BY-NC 4.0 (non-commercial). `dinov2_vits14_feat.onnx` in this repo is an export of its vision tower; verify upstream terms before redistribution or commercial use.
+- [DINOv2](https://github.com/facebookresearch/dinov2) ViT-S/14 (Meta AI) — discrimination feature extractor; upstream code Apache-2.0, official weights CC-BY-NC 4.0 (non-commercial). `dinov2_vits14_feat.onnx` in this repo is an export of its vision tower; verify upstream terms before redistribution or commercial use.
 - [YOLOv8 / ultralytics](https://github.com/ultralytics/ultralytics) — detection architecture (AGPL-3.0). `yolov8s-drone.onnx` in this repo is a fine-tuned drone-detection export of that architecture; redistribution and commercial use must comply with AGPL-3.0 and upstream terms.
 
 ## License

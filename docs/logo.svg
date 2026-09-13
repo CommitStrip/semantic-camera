@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 200" font-family="'PingFang SC','Microsoft YaHei',sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0a0f18"/>
+      <stop offset="1" stop-color="#0f2030"/>
+    </linearGradient>
+    <linearGradient id="acc" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#35e0a1"/>
+      <stop offset="1" stop-color="#4fd2ff"/>
+    </linearGradient>
+  </defs>
+  <rect width="800" height="200" rx="18" fill="url(#bg)" stroke="#1e2b3f" stroke-width="2"/>
+  <!-- 相机镜头（光圈） -->
+  <circle cx="110" cy="100" r="52" fill="none" stroke="url(#acc)" stroke-width="5"/>
+  <circle cx="110" cy="100" r="34" fill="none" stroke="#7e8ea6" stroke-width="2" stroke-dasharray="6 5"/>
+  <circle cx="110" cy="100" r="16" fill="#35e0a1" opacity="0.9"/>
+  <circle cx="122" cy="86" r="5" fill="#0a0f18"/>
+  <!-- 语义事件三态点：告警/灰区/判明 -->
+  <circle cx="196" cy="70" r="7" fill="#ff5d5d"/>
+  <circle cx="196" cy="100" r="7" fill="#ffb454"/>
+  <circle cx="196" cy="130" r="7" fill="#4fd2ff"/>
+  <line x1="196" y1="62" x2="196" y2="70" stroke="#ffb454" stroke-width="0"/>
+  <!-- 事件流 -->
+  <path d="M 230 100 L 268 100" stroke="#35e0a1" stroke-width="3" stroke-dasharray="8 6"/>
+  <path d="M 268 100 L 282 100" stroke="#35e0a1" stroke-width="3"/>
+  <polygon points="282,94 294,100 282,106" fill="#35e0a1"/>
+  <!-- 文字 -->
+  <text x="316" y="86" font-size="46" font-weight="700" fill="#d7e3f4">semantic-camera</text>
+  <text x="318" y="130" font-size="22" fill="#7e8ea6">场所语义判别层 · 预算受控 · 全自动裁决</text>
+  <text x="318" y="162" font-size="15" fill="#4fd2ff">门控 → 检测 → 裁决 → 证据事件 → 习惯化</text>
+</svg>

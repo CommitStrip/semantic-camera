@@ -1,138 +1,188 @@
-# semantic-camera — 语义摄像头 · 场所模式端侧实时视频理解
+<div align="center">
+
+<img src="docs/logo.svg" width="640" alt="semantic-camera — 语义摄像头"/>
+
+[**English**](README.md) · 简体中文 · [平台设计](docs/semantic-camera-design.md) · [核心循环 v3](docs/core-loop-v3.md) · [运行时实体关系图](docs/architecture-er.html)
 
 [![CI](https://github.com/CommitStrip/semantic-camera/actions/workflows/ci.yml/badge.svg)](https://github.com/CommitStrip/semantic-camera/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![GitHub tag](https://img.shields.io/github/v/tag/CommitStrip/semantic-camera)](https://github.com/CommitStrip/semantic-camera/tags)
+[![Tests](https://img.shields.io/badge/tests-99%20passed-brightgreen)](https://github.com/CommitStrip/semantic-camera/actions)
 
-[English](README.md) | **简体中文**
+**预算受控的场所语义事件运行时 · 把摄像头变成可审计的语义事件源**
 
-**A budget-aware, mode-configurable edge vision event runtime**（预算受控、模式可配置的端侧视觉事件运行时）——**语义摄像头 = NVR 标准件之上的场所语义判别层**。把一路实时视频流（海康 RTSP / 手机相机 / 本地视频）变成端侧实时的语义理解与告警：帧差运动门控 → 触发式检测 → 恒速跟踪 + 多帧确认 → 全自动语义判别 → 按场所模式包决定告警与处置。判别按**场所模式包**组织——扩展新场所只需在 `web/mode-packs.js` 新增数据（+ 可选模型/判别头文件），**核心流水线零改动，且由 CI 双模式验收与源码洁净度测试强制**。平台化设计（多相机调度 / 时空规则引擎 / 开放集 / 隐私合规 / 持续学习治理 / 评测闸门）见 [docs/semantic-camera-design.md](docs/semantic-camera-design.md)，运行时实体关系图见 [docs/architecture-er.html](docs/architecture-er.html)（浏览器直接打开）。
+</div>
 
-本仓是库系主线：`vus` 为通用视频理解引擎，`rvs` 为机器人增量层，前身仓 `anti-drone-monitor`（反无人机单场景演示）已冻结并由此仓继承演进。
+---
 
-三条设计红线：**判别流水线全自动运行、无人工判定环节**（判别不等人；但"自动理解 ≠ 自动执行一切"——人工复核不阻塞实时管线，高影响外部效果是否需人工确认由处置策略决定）；**成本有硬上限**（预算制，不随时长线性增长）；**新增场所不改核心逻辑代码**（平台成立判据；模式选择 fail-closed，未知模式拒绝布防、绝不静默回退）。
+semantic-camera 把一路实时视频流（海康 RTSP / 手机相机 / 本地视频）变成**端侧实时的场所语义判别与告警**：帧差门控 → 触发式检测 → 跟踪确认 → 四态全自动裁决 → 事件分段 → LLM 命名 → 习惯化。推理全部在浏览器 wasm 完成（**视频不出场**），一切产出是**机器可审计的语义事件**，不是裸视频。本仓是库系主线：`vus` 为通用视频理解引擎，`rvs` 为机器人增量层，前身仓 `anti-drone-monitor`（反无人机单场景演示）已冻结并由此仓继承演进。
 
-**宣传口径**：当前算法是"可配置事件摄像头 + 场所判别头"——不宣称自动理解所有场景、零误报、人类级语义理解或"零代码接入"（准确说法：新增场所不改核心逻辑代码，仍需在注册表加数据并部署）；只报告实测数据，未测项标"待回填/设计态"。
+## ✨ 核心特性
 
-当前验证状态：初始化探针头离线精度 **98.15%**（162 张权威 Drone-vs-Bird 样本，证据 `web/jepa_probe_init.json`：acc=0.9815, n_train=162, dim=768，自前身仓实测继承）；**人员检测模型已在真实街景验证**：NanoDet-Plus-m-1.5x@416（Apache-2.0）对 CC 授权的涩谷十字路口视频抽帧检出 person 7~58 个/帧，Python ORT CPU 推理 23-24ms/帧（选型与实测详见 [docs/model-selection.md](docs/model-selection.md)）；WHEP 信令已用本地 MediaMTX v1.20.0 + H.264 测试流完成端到端验证；**99 例单元测试 + GitHub Actions CI 全绿**（含双模式端到端验收、核心源码洁净度、证据事件 schema 契约、模式选择 fail-closed、模型资产完整性闸门）。浏览器 wasm 端到端帧率/延迟实测**待回填**。
+- **四级速度栈**——T0 帧差门控（逐帧，毫秒级）→ T1 触发式检测（有运动 400ms / 无运动 5s 巡检）→ 跟踪确认（恒速预测 + 分级老化，悬停不丢）→ T1.5 边缘判别。贵的推理只为值得的时刻发生。
+- **四态全自动裁决**——`alert` / `escalate`（灰区**弃权不虚报**）/ `clear` / `suppress`；判别路径与检测器权威路径闸门分立（防漏报），**流水线无人工判定环节**。
+- **场所模式包**——检测模型 + 判别头 + 规则 + 布防表 + 预算全是**纯数据**（`web/mode-packs.js`），换场所零核心改动；`validatePack` fail-closed，坏配置拒绝布防；**未知模式绝不静默回退**。
+- **成像模态状态机**——海康 IR-CUT 彩色↔黑白帧级切换的多信号表决（2of3）+ 振荡防抖 + 分模态参数剖面 + 转换窗学习冻结；合成回放四指标达标。
+- **时空规则引擎**——多边形 zone（进区+滞留+占驻计数）与警戒线（越线方向过滤+冷却去重）：规则全是模式包数据，overlay 只读叠加。
+- **场景自识别**——不选模式即观察模式（仅记录不虚报）；首个确认事件触发慢脑识别场所，conf≥0.85 自动布防；**人工指定永不自动覆盖**。
+- **事件分段与 LLM 命名**——快系统把流切成事件时间段（忙碌场景上限强制切分），慢脑按预算（30 次/时）语义命名；桥断/预算耗尽自动降级模板名，事件流永远可读。
+- **习惯化学习**——重复事件模式（上下班画面）draft → model-verified → human-verified 逐级晋升；trusted 命中**直接自命名不调 LLM**，慢脑成本随时间摊销；5% 审计抽检 + admin 金标 + 偏离检测防"习惯性盲区"。
+- **可审计证据事件**——`sc.evidence/v1`：稳定事件 ID、双时间戳、配置指纹、模型 sha256、检测/判别置信分立、前因帧环 + 裁剪帧及内容哈希。
+- **确定性告警出口**——Outbox（at-least-once + event_id 幂等 + 死信保留）→ webhook（默认脱敏只发元数据）。
+- **可插拔检测头**——`HEAD_DECODERS` 注册表：`yolo8head` / `nanodethead`（GFL 分布回归）/ `mock`（确定性时间线）；人员模型 NanoDet-Plus（Apache-2.0，真实街景验证）。
+- **预算制成本上限**——检测触发式、仲裁 20 件/时、命名 30 次/时、行为判定独立分账——一切成本有硬上限，不随时长线性增长。
 
-## 核心能力
+## 🚀 快速开始
 
-| 能力 | 说明 |
-|------|------|
-| 实时检测 | 帧差运动门控(快) → 触发式检测(慢)：有运动 400ms 即检、无运动 5s 巡检兜底，运动面积门槛 0.003 抗传感器噪声 |
-| 目标跟踪 | IoU + 中心距离关联 + 恒速预测（大检测间隔不丢轨迹），多帧确认(≥2 次)降假阳性；已确认目标 12s 存活窗，悬停不丢 |
-| 全自动语义判别 | 四态裁决（判别/检测器权威双路径）：告警 / 待仲裁 / 判明非目标 / 静默——**无人工判定环节**；灰区入仲裁队列（预算硬上限），高置信双信号一致自动自训练探针 |
-| 场所模式包 | 模式 = 数据 + 校验器：`?mode=` 选择，新场所零代码接入；领域词只允许存在于 `web/mode-packs.js`（CI 洁净度测试把守）；`validatePack` fail-closed，坏配置拒绝布防 |
-| 证据事件 | `sc.evidence/v1` 版本化事件信封：稳定事件 ID、双时间戳（源/处理）、模式包配置指纹、策略版本、模型 sha256、检测置信与判别置信分立、告警附裁剪帧及其内容哈希——从"帧"到"可审计的证据事件" |
-| 时空规则引擎 | 多边形 zone（进区+滞留+占驻计数）与警戒线（越线方向过滤+冷却去重）：规则全是模式包数据，overlay 只读叠加展示 |
-| 场景自识别 | 首个确认事件触发慢脑识别场所（CLIP 零样本兜底 / ollama VLM 精判），conf≥0.85 自动布防；未识别=观察模式（仅记录不虚报）；人工指定永不自动覆盖 |
-| 可插拔检测头 | `HEAD_DECODERS` 注册表：`yolo8head`（无 objectness）/ `nanodethead`（GFL 分布回归）/ `mock`（确定性时间线）——解码头是 provider registry 的键，扩展不改核心 |
-| vus 桥仲裁（M2） | 灰区案件升级慢脑（CLIP 零样本 / ollama VLM，可插拔）：结论伪标签回灌探针、案件归档 JSONL；桥断即边缘自治，绝不虚报 |
-| 资产单源治理 | 模型/运行时单源 `assets/`（manifest 含 sha256/许可证/来源），staging 到本地 `web/`，CI 哈希闸门防静默漂移 |
-| 布防时间表 | 模式包可声明布防窗口（支持跨零点）；非布防时段告警降级为记录、仲裁不占预算 |
-| 丝滑变焦 | 捏合/滑块/按钮 + **目标跟随**自动居中，平滑插值 1×-8× |
-| 距离估算 | 针孔模型按类别尺寸粗估（无人机 0.35m / 鸟 0.20m）；数字变焦是中心裁剪，不影响读数 |
-| 数据可追溯 | IndexedDB 落盘（段/模式库/遥测）+ CSV/JSON 导出；检出→裁决→仲裁→习惯化全链路留痕 |
+```bash
+git clone https://github.com/CommitStrip/semantic-camera.git
+cd semantic-camera
+bash scripts/sync-web.sh                 # assets 模型/运行时 → web/ 本地 staging（clone 后一次）
 
-## 系统组成
-
-```
-semantic-camera/
-├── web/index.html        # 共享 HTML5 核心（现代浏览器直接打开；不含领域词）
-├── web/core.js           # 纯逻辑核心（校验/跟踪/门控/裁决/队列/解码头注册表/区域引擎/证据事件）
-├── web/mode-packs.js     # 场所模式包注册表（纯数据，领域词唯一居所）
-├── assets/models/        # 模型单源（manifest.json 含 sha256/许可证/来源）
-├── assets/runtime/       # ORT wasm 运行时单源
-├── gateway/              # MediaMTX 网关：海康 RTSP → WebRTC(WHEP)/HLS
-├── bridge/               # vus 慢脑仲裁桥（M2）：灰区案件 → CLIP/ollama 仲裁 → 回灌
-└── docs/                 # 平台设计文档 + 模型选型记录
+cd web && python3 -m http.server 8899
+# 浏览器打开 http://localhost:8899/index.html
 ```
 
-> `web/` 的大文件（模型/运行时）不入库，单源在 `assets/`——新机器 clone 后跑一次 `bash scripts/sync-web.sh` staging 到 `web/`；CI 校验资产 sha256 完整性。
+- **模式选择**：`?mode=airfield`（净空防黑飞）/ `?mode=restricted-area`（限制区域闯入，NanoDet 人员检测+夜间布防+区域规则）；**不选模式 = 场景自识别**（观察模式仅记录，连桥后自动识别布防）。
+- **输入源**：▶ 开始监控（手机相机）/ 📁 视频（本地回放）/ 🔌 海康（RTSP→WHEP 网关，Basic 或查询参数鉴权自动适配）。
+- **记录**：遥测面板实时累积，CSV/JSON 导出含检出→裁决→仲裁→命名全链路。
 
-## 场所模式包
+<details>
+<summary>🔌 慢脑仲裁桥（可选）：LLM 段命名与行为判定</summary>
 
-模式包 = 纯数据：检测模型（可插拔 onnx/mock）+ 可选判别头 + 告警规则 + 布防时间表 + 预算，装载时经 `validatePack` 全量校验（fail-closed：坏配置拒绝布防，不带病上线）。**平台成立判据：新增场所不改核心代码**——`restricted-area` 第二模式包已由 CI 双模式端到端测试验证抽象。首波场所目录：
+灰区案件升级本地慢脑（默认关闭）：
+
+```bash
+pip install -r bridge/requirements.txt
+cp bridge/config.example.json bridge/config.json   # 填 token 与仲裁器（clip 零样本 / ollama VLM）
+python bridge/server.py --config bridge/config.json
+# 页面"桥"一栏填 ws://<IP>:8390 + 令牌 → 连接
+```
+
+- **命名**：事件段 → LLM 语义命名（"员工上班刷卡进入"），占位名 r1 先上、LLM 覆写 r2（不可变修订）；
+- **行为判定**：admin 在模式包定义开放集危险行为（翻墙/偷拍/车祸……= 数据不是代码），敏感区命中即段中判定（P95 ≤15s）；
+- **预算**：命名 30 次/时 + 判定独立分账（并发≤2/冷却/队列≤8），桥断即边缘自治，绝不虚报；
+- 案件全量归档 JSONL（复训语料）。
+
+</details>
+
+## 🏗️ 工作原理
+
+```mermaid
+flowchart LR
+    SRC["海康 RTSP / 相机 / 文件"] --> IN["WHEP/HLS 接入"]
+    IN --> GATE["⚡ T0 帧差门控<br/>逐帧 · 毫秒级"]
+    GATE -->|活动| DET["🎯 T1 触发式检测<br/>HEAD_DECODERS 可插拔"]
+    DET --> TRK["📍 跟踪确认<br/>恒速预测 + 轨迹历史"]
+    TRK --> RULE["📐 时空规则<br/>zone 滞留/计数 · 越线方向"]
+    TRK --> VER["⚖️ 四态裁决<br/>alert/escalate/clear/suppress"]
+    VER --> EV["📦 证据事件<br/>sc.evidence/v1"]
+    EV --> OB["📤 Outbox<br/>at-least-once → webhook"]
+    VER -->|escalate 灰区| BR["🌉 vus 桥<br/>CLIP 零样本/ollama VLM"]
+    TRK --> SEG["✂️ 事件分段<br/>20s 静默/120s 上限"]
+    SEG -->|预算内| NAME["🧠 LLM 命名<br/>≤16 字中文名"]
+    SEG -->|模式命中| HAB["🔁 习惯化<br/>trusted 免 LLM 自命名"]
+    NAME --> HAB
+    MOD["🌗 成像模态状态机<br/>ICR 彩色↔黑白"] -.剖面/冻结.-> GATE
+```
+
+| 层 | 内容 | 节奏 | 用途 |
+|----|------|------|------|
+| T0 | 帧差门控 + 成像模态 | 逐帧 | "有没有事发生" + 画面模态 |
+| T1 | 触发式检测 + 跟踪 | 400ms/巡检 5s | 谁、在哪、什么轨迹 |
+| T1.5 | 边缘判别 + 规则 + 裁决 | 确认目标级 | 该不该报警 |
+| T2 | 慢脑命名与仲裁 | 事件段级（预算制） | 事件叫什么、灰区复核 |
+
+两条红线贯穿：**灰区宁可弃权不虚报，判别未出前检测器权威**；一切 LLM 调用走预算（仲裁/命名/判定三本分账）。
+
+## 🏙️ 场所模式包
 
 | 模式包 | 判别任务 | 价值（误报杀手） | 状态 |
 |---|---|---|---|
-| **airfield 净空防黑飞** | 鸟 / 机 | 鸟群与飘动物不告警，黑飞必报；灰区不虚报 | ✅ 完整落地 |
-| **restricted-area 限制区域闯入** | 人员（NanoDet-Plus@416，Apache-2.0；检测器权威，无判别头） | 夜间布防 + 区域规则（进区滞留 2s 升级）+ 弃权语义 | ✅ 真实模型 + zone 规则（真实街景抽帧实测 7~58 检出/帧） |
+| **airfield 净空防黑飞** | 鸟 / 机（JEPA 判别头） | 鸟群与飘动物不告警，黑飞必报 | ✅ 完整落地 |
+| **restricted-area 限制区域闯入** | 人员（NanoDet-Plus@416） | 夜间布防 + 区域滞留 2s 升级 + 越线 | ✅ 真实模型 + zone 规则（真实街景抽帧 7~58 检出/帧） |
 | **depot 油库烟火** | 烟 / 雾·晚霞 | 烟火误报是行业第一痛点 | M3 |
 | **site 工地合规** | 戴盔 / 未盔 | 人形检测无法区分 | M3 |
 | **campus 校园周界** | 人 / 影·物 | 夜间低照度误报抑制 | M3 |
 | **farm 养殖驱避** | 鸟 / 兽 / 人 | 分类决定驱避策略 | M5 |
 
-## JEPA 全自动判别 + 自动进化（已接入）
+新增场所 = 在 `web/mode-packs.js` 加一条数据（+ 可选模型/判别头文件），**核心零改动**——由 CI 双模式端到端验收与源码洁净度测试强制。
 
-在 YOLO 定位之上叠加 **JEPA 风格自监督判别**（`web/dinov2_vits14_feat.onnx`，85MB，DINOv2-ViT-S 特征提取器 + `web/jepa_probe_init.json` 线性探针头）：
+## 📊 性能基准
 
-- **四态全自动裁决**：探针输出 P(正类)，裁决器给出 `alert`（目标侧高置信 → 告警）/ `escalate`（目标侧置信不足 → **弃权待仲裁**，宁可不报不可虚报）/ `clear`（判明非目标 → 抑制告警）/ `suppress`（静默）；判别结果未出前检测器权威（防漏报）。
-- **自动进化（能力已实现，默认关闭）**：在冻结特征上，当 logreg 头与原型距离双信号一致且置信 ≥0.90 时可自动更新探针头（质心滑动平均 + 单步 SGD）。**默认 `enabled:false`**——双信号并非独立证据，在冻结评测集、版本化回滚、开放集拒识等治理栈完备（M5）前，不得默认在线修改判别头；届时按场所显式开启。学习状态按模式包隔离（`jepa_probe_v2:<modeId>`），场所间伪标签不互相污染。"重置学习"恢复初始权重（运维操作）。人工判定按钮已废除。
-- **灰区仲裁队列**：`escalate` 案件按预算硬上限（20 件/小时）+ 轨迹去重（15s TTL）排队；M2 接入 vus 慢脑 VLM 仲裁后，结论作为伪标签回灌探针（协议见设计文档 §8）。桥不可达时边缘全功能自治。
+以下均为实测数值，复现脚本在 `scripts/`。
 
-## 海康威视监控接入（已验证）
+### 人员模型——真实街景（NanoDet-Plus-m-1.5x@416，Apache-2.0）
 
-- **分工**：MediaMTX 拉海康 RTSP（`gateway/mediamtx.yml` 配置相机 IP/账号）→ WebRTC/WHEP(8889) 或 HLS(8888)；`whep-client.js` 实现标准 WHEP 信令（指数退避重连），失败自动回退 HLS。
-- **接入方式**：页面点"🔌 海康"填网关地址与流路径（如 `http://网关IP:8889` + `cam1`），连接后复用同一套检测+判别管线。
-- **海康 RTSP 地址**：主码流 `rtsp://用户:密码@IP:554/Streaming/Channels/101`，子码流 `.../102`；建议主码流（1080p H.264）检测，H.265 相机需转码（见 `gateway/README.md`）。
-- 已用本地 MediaMTX v1.20.0 + H.264 测试流完成 **WHEP 信令端到端验证**（OPTIONS→POST→PATCH→DELETE 全通过）。
+| 指标 | 结果 |
+|------|------|
+| 真实街景检出 | 涩谷十字路口视频（CC BY-SA 4.0）抽帧 **7~58 person/帧**（conf>0.4） |
+| 检测时延 | **23-24ms/帧**（Python ORT CPU，416×416） |
+| JS 解码等价性 | 与 numpy 参照逐 conf 一致（0.676） |
 
-## 快速体验（浏览器 / 手机）
+### 成像模态状态机——合成 ICR 回放（图像域统计合成，真实录像待补）
 
-```bash
-cd web && python3 -m http.server 8899
-# 手机同网段访问 http://<电脑IP>:8899/index.html
-# 或直接浏览器打开 web/index.html
-```
+| 指标 | 结果（目标） |
+|------|------|
+| 误触发（边界外 begin） | **0**（目标 0） |
+| 漏检 | **0**（振荡期按设计抑制 2 处单列） |
+| 检测时延 / 稳定时间 | **1.0s / 2.5s**（虚拟采样间隔 500ms） |
+| 转换窗假运动 | 软重置全覆盖（begin 伴随率 100%） |
 
-- 点击 **开始监控** 调用手机相机；或 **📁 视频** 载入本地视频回放；**🔌 海康** 接入真实监控流。
-- 点击 **记录** 打开遥测面板，运行中实时累积事件；**导出 CSV/JSON** 下载记录。
-- 变焦滑杆 / ＋－按钮 / 双指捏合直接操作；开启 **目标跟随** 变焦自动锁住已确认目标。
-- **场景自识别**：不选模式直接启动=观察模式（人员检测仅记录）；连上桥后首个确认事件自动识别场所并布防（conf≥0.85），"场景"下拉可随时人工改配。
+### 协议与链路
 
-## 开发：测试与 CI
-
-```bash
-node --test tests/core.test.mjs     # 99 例单测（node:test，零依赖）
-python scripts/verify_models.py    # 模型资产 sha256 完整性校验（fail-closed）
-bash scripts/sync-web.sh            # assets 单源 → web/ 本地 staging
-bash scripts/sync-web.sh --check    # 只校验一致性（CI 同款）
-```
-
-CI（node 20/22 矩阵）：JS 语法检查 → 单元测试 → 模型资产完整性校验。纯逻辑（配置/校验/IoU/跟踪器/门控/估距/四态裁决/仲裁队列/布防时间表/探针学习数学/mock 检测器/证据事件）全部抽在 `web/core.js`，零 DOM 依赖可直接单测。两个特色测试：**双模式端到端验收**（同一核心管线跑通 airfield 与 restricted-area 两个模式包，平台抽象的持续证明）与**核心源码洁净度**（core.js 与内联脚本不得出现场所领域词，防止"名字平台化、代码单场景化"回潮）。
-
-## 性能与验证状态
-
-| 项 | 状态 |
+| 项 | 结果 |
 |----|------|
-| WHEP 信令端到端 | ✅ 已验证（MediaMTX v1.20.0 + H.264 测试流，OPTIONS→POST→PATCH→DELETE 全通过） |
-| 探针头离线精度 | ✅ 98.15%（162 样本，`web/jepa_probe_init.json`，自前身仓实测继承） |
-| 单元测试 / CI | ✅ 99 例全绿（含双模式验收、洁净度、schema 契约、fail-closed、资产完整性、时空规则、Outbox、ICR 状态机、事件分段、命名管线、模式库闸门），node 20/22 矩阵 |
-| v3 循环层 | ✅ 成像模态状态机（合成 ICR 回放四指标达标）/事件分段/LLM 段命名（预算门控+降级兜底）/模式库习惯化——见 [docs/core-loop-v3.md](docs/core-loop-v3.md) |
-| 人员模型真实街景 | ✅ NanoDet-Plus@416 抽帧检出 7~58 person/帧，CPU 23-24ms/帧（[选型记录](docs/model-selection.md)）；浏览器 wasm 帧率 ⏳ 待回填 |
-| 真机帧率/延迟 | ⏳ 待回填——遥测已逐帧采集 `detMs/trackMs/motionRatio`，导出 CSV/JSON 即为实测数据 |
+| WHEP 信令端到端 | ✅ MediaMTX v1.20.0 + H.264（OPTIONS→POST→PATCH→DELETE 全通过）；真实家庭网关探测存活 |
+| 段命名/行为判定协议 | ✅ 双往返 E2E（clip 仲裁器诚实弃权）；ollama 命名解析链 mock 全通过（undecidable/JSON 提取/弃权） |
+| 探针头离线精度（airfield 判别头） | ✅ 98.15%（162 样本，自前身仓实测继承） |
 
-模型体积与策略：YOLOv8s fp32 43MB + DINOv2 85MB，wasm 端单次推理为秒级——因此检测是**触发式**（门控+冷却）而非逐帧，JEPA 只对确认目标判别且懒加载。
+<details>
+<summary>📖 诚实说明与待回填项</summary>
 
-**int8 量化实测结论（2026-09-06，`scripts/quantize_models.py`）**：现模型为 opset 12 的自定义导出，**量化后不可用**——QOperator 路径体积 42.7→10.9MB、推理 62→34ms（1.8×），但 NMS 后检出数 41→0（输出恒为零）。校验工具已内置任务级闸门（检出数不降 10% 且 IoU≥0.8 才允许切换）防止此类静默失效混入。帧率提升需要以现代 opset 重导出 yolov8n（预期体积/耗时再降一个量级），DINOv2 int8 同样受量化器算子兼容性限制保持 fp32（它只对确认目标运行，开销已可控）。
+- ICR 回放素材为**合成**（真实昼帧 + 图像域黑白/噪声变换）——非真实 IR-CUT 相机输出，真实录像到位后须复验；
+- 浏览器 wasm 端到端帧率/延迟**待回填**（遥测已逐帧采集，导出即实测）；
+- ollama 真机命名实测待本机部署 ollama + 视觉模型；
+- 真实危险行为判定质量依赖真实场所数据——持续项；
+- 审计不一致率（<5%）与 LLM 调用衰减曲线需部署期数据。
 
-## 平台路线图
+</details>
 
-里程碑 M1（判别自动化）→ M1.5（独立建仓+配置治理）→ M1.6（平台化收敛：核心去领域化 + 双模式验收 + 证据事件）→ **M1.7（溯源加固：模式选择 fail-closed + 证据溯源字段 + 自训练默认关闭，本轮）** → P1-①②（restricted-area 真实模型+区域规则 / 模型资产单源化）→ M2（vus 桥仲裁回灌，✅）→ M2.6 场景自识别（✅）→ M3-a/b（✅）→ M5-部分 Outbox（✅）→ **v3 循环层（M3-c 成像模态/M3-d 分段/M2.7 命名/M3-e 习惯化，本轮）** → M3（时空规则引擎+开放集+油库烟火包）→ M4（多相机调度+健康监控）→ M5（复训闭环+评测闸门+告警出口+许可决策——自训练开启的前置）→ M6（单盒多路网关）。细节与风险见 [docs/semantic-camera-design.md](docs/semantic-camera-design.md)。
+## 📁 仓库结构
 
-## 平台与硬件
+```
+web/                       浏览器核心（现代浏览器直接打开；不含领域词）
+  index.html               流水线编排 + UI（检测/裁决/分段/命名/桥/出口接线）
+  core.js                  纯逻辑核心（校验/跟踪/门控/裁决/队列/解码头注册表/
+                           区域与规则引擎/模式库/命名门控/修订链/证据事件/桥链路）
+  mode-packs.js            场所模式包注册表（纯数据，领域词唯一居所）
+  whep-client.js           WHEP 播放器（Basic/查询参数鉴权自适应 + 指数退避）
+assets/                    模型/运行时单源（manifest.json 含 sha256/许可证/来源）
+bridge/                    vus 慢脑仲裁桥（WS 服务 + CLIP 零样本/ollama 仲裁器
+                           + 场景识别/段命名/行为判定 + 案件归档 JSONL）
+gateway/                   MediaMTX 网关（海康 RTSP → WHEP/HLS）
+scripts/                   staging/资产校验/量化工具/ICR 合成回放/家庭网关验证
+docs/                      平台设计（v2.6）/ 核心循环（v3.5）/ 模型选型 / logo / ER 图
+tests/                     99 例 node:test（零依赖）
+```
 
-现代浏览器（桌面/Android/iOS）需支持 WASM 与 WebRTC；无 GPU 依赖，推理全部 wasm CPU。嵌入任意原生 WebView（Android/鸿蒙/iOS 壳）亦可行——核心零改动。
+## 🤖 Agent 消费
 
-## 致谢与版权
+一切产出面向机器消费：**证据事件**（`sc.evidence/v1`）与**命名段**（`sc.segment-label/v1`）经 Outbox/webhook 对外发布，稳定 ID + 不可变修订供 Agent 幂等归并；桥侧 MCP 式协作（查事件/调证据/建工单）为可选出口适配器。运行时实体关系见 [docs/architecture-er.html](docs/architecture-er.html)。
 
-- [MediaMTX](https://github.com/bluenviron/mediamtx)——RTSP → WebRTC/HLS 流媒体网关（MIT）。本仓库仅在 `gateway/` 提供配置与启动脚本。
+## 💻 硬件资源
+
+无 GPU 依赖，推理全部 wasm CPU。Python 侧选型实测：NanoDet 单帧 23-24ms（桌面 CPU）；wasm 端为秒级——因此检测是**触发式**（门控+冷却）而非逐帧。int8 量化实测结论（前身仓）：现 opset12 导出量化后检出归零，需现代 opset 重导出；校验工具内置任务级闸门防静默失效。
+
+## 🙏 致谢与版权
+
+- [NanoDet-Plus](https://github.com/RangiLyu/nanodet)（Apache-2.0）——人员检测模型（`person-detector.onnx` 为官方 COCO 预训导出，选型与淘汰证据见 [docs/model-selection.md](docs/model-selection.md)）。
 - [onnxruntime-web](https://github.com/microsoft/onnxruntime)——wasm 端推理引擎（MIT）。
+- [MediaMTX](https://github.com/bluenviron/mediamtx)——RTSP → WebRTC/HLS 流媒体网关（MIT）。本仓库仅在 `gateway/` 提供配置与启动脚本。
 - [hls.js](https://github.com/video-dev/hls.js)——HLS 回退播放（Apache-2.0）。
-- [NanoDet-Plus](https://github.com/RangiLyu/nanodet)（Apache-2.0）——人员检测模型（person-detector.onnx 为官方 COCO 预训导出，见 docs/model-selection.md）。
 - [DINOv2](https://github.com/facebookresearch/dinov2) ViT-S/14（Meta AI）——判别特征提取器；上游代码 Apache-2.0，官方权重为 CC-BY-NC 4.0（非商业）。本仓库的 `dinov2_vits14_feat.onnx` 为其特征塔导出，再分发与商用请自行核实上游条款。
 - [YOLOv8 / ultralytics](https://github.com/ultralytics/ultralytics)——检测模型架构（AGPL-3.0）。本仓库的 `yolov8s-drone.onnx` 为在其架构上微调导出的无人机检测权重，再分发与商用须遵守 AGPL-3.0 及上游条款。
 
 ## License
 
-MIT © 2026（适用于仓库代码；仓库内捆绑的模型权重 `*.onnx` 许可随上游，见上节）
+MIT © 2026（适用于仓库代码；仓库内捆绑的模型权重 `*.onnx` 许可随上游，见致谢节）
