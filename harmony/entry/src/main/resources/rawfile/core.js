@@ -804,6 +804,176 @@ class FrameRing {
   clear() { this.items.length = 0; }
 }
 
+// ---------- 事件分段（EventSegmenter，core-loop-v3 §3/Phase B） ----------
+// 把持续流切成"事件时间段"：起于活动（确认轨迹或规则命中），止于静默
+// （缺省 20s）或段上限（缺省 120s，忙碌场景防饿死命名管线）。
+// 段是全局时间窗（聚合窗内全部轨迹），跨 ICR 模态切换不关段（记录模态列表）。
+const SEGMENT_SCHEMA = 'sc.segment/v1';
+const SEGMENT_SILENCE_MS = 20000;
+const SEGMENT_MAX_MS = 120000;
+
+function todBucket(date) {
+  // 时段桶：晨/昼/暮/夜（本地时区）
+  const h = date.getHours();
+  if (h >= 5 && h < 11) return 'morning';
+  if (h >= 11 && h < 17) return 'day';
+  if (h >= 17 && h < 20) return 'evening';
+  return 'night';
+}
+function durBucket(ms) {
+  if (ms < 10000) return 's10';
+  if (ms < 60000) return 's60';
+  if (ms < 300000) return 's300';
+  return 's300+';
+}
+function countBucket(n) {
+  if (n <= 1) return 'c1';
+  if (n <= 3) return 'c2-3';
+  if (n <= 9) return 'c4-9';
+  return 'c10+';
+}
+// 路径形状（粗粒度 v1）：越线→cross；区内长滞留→dwell；多区域→transit；否则 pass
+function pathShapeOf(lines, zones, dwellMaxMs) {
+  if (lines.length) return 'cross';
+  if (zones.length && dwellMaxMs >= 10000) return 'dwell';
+  if (zones.length >= 2) return 'transit';
+  return 'pass';
+}
+// signature 结构分量（嵌入分量待 CLIP wasm 引擎接入后叠加，当前结构分量全权重）
+function buildSignature(o) {
+  // o: {classes, peakCount, zones, lines, modality, tod, durMs}
+  return {
+    cls: [...o.classes].sort(),
+    count: countBucket(o.peakCount),
+    zones: [...o.zones].sort(),
+    lines: [...o.lines].sort(),
+    shape: pathShapeOf(o.lines, o.zones, o.dwellMaxMs || 0),
+    modality: o.modality,
+    tod: o.tod,
+    dur: durBucket(o.durMs || 0),
+  };
+}
+// 加权 Jaccard 相似度（集合分量=|∩|/|∪|，空对空=1；标量分量=相等 1 否则 0）
+function segmentSimilarity(a, b, w) {
+  const W = Object.assign({ cls: 0.30, count: 0.10, zones: 0.20, lines: 0.10,
+                            modality: 0.10, tod: 0.10, dur: 0.10 }, w);
+  const jac = (x, y) => {
+    const A = new Set(x), B = new Set(y);
+    if (!A.size && !B.size) return 1;
+    let inter = 0;
+    for (const v of A) if (B.has(v)) inter++;
+    const uni = A.size + B.size - inter;
+    return uni ? inter / uni : 0;
+  };
+  const eq = (x, y) => (x === y ? 1 : 0);
+  return W.cls * jac(a.cls, b.cls)
+       + W.count * eq(a.count, b.count)
+       + W.zones * jac(a.zones, b.zones)
+       + W.lines * jac(a.lines, b.lines)
+       + W.modality * eq(a.modality, b.modality)
+       + W.tod * eq(a.tod, b.tod)
+       + W.dur * eq(a.dur, b.dur);
+}
+
+class EventSegmenter {
+  constructor(opts) {
+    opts = opts || {};
+    this.cameraId = opts.cameraId || 'cam';
+    this.venueId = opts.venueId || null;
+    this.silenceMs = opts.silenceMs || SEGMENT_SILENCE_MS;
+    this.maxMs = opts.maxMs || SEGMENT_MAX_MS;
+    this.modeHash = opts.modeHash || null;
+    this.envHash = opts.envHash || null;
+    this.seq = 1;
+    this.active = null;
+    this.records = [];        // 已关闭段（有界，供上层取用/入库）
+  }
+  setHashes(modeHash, envHash) { this.modeHash = modeHash; this.envHash = envHash; }
+  _open(now, modality) {
+    this.active = {
+      id: this.cameraId + ':' + now,
+      tStart: now, lastActivityAt: now, peakCount: 0,
+      classes: new Set(), zones: new Set(), lines: new Set(),
+      dwellMaxMs: 0, tracksSeen: 0,
+      modalities: [modality], modality: modality,
+      density: [],            // [{at, count}] 强制切分时选活动密度最低点
+      keyframes: [],          // {t, kind} 首采/峰值/末采时间提示（捕获在边缘层）
+    };
+  }
+  // 逐检测周期喂入。tracks: 确认轨迹快照（含 cls/zoneId/zoneDwellMs/bornAt）；
+  // ruleHits: [{ruleId, trackId, dir}]；返回本次关闭的 SegmentRecord 数组
+  feed(now, modality, tracks, ruleHits) {
+    tracks = tracks || []; ruleHits = ruleHits || [];
+    const activity = tracks.length > 0 || ruleHits.length > 0;
+    const closed = [];
+    if (!this.active) {
+      if (activity) this._open(now, modality);
+      else return closed;
+    }
+    const seg = this.active;
+    if (activity) seg.lastActivityAt = now;
+    // 聚合
+    if (tracks.length > seg.peakCount) { seg.peakCount = tracks.length; seg.keyframes.push({ t: now, kind: 'peak' }); }
+    for (const t of tracks) {
+      seg.classes.add(t.cls);
+      if (t.zoneId !== undefined) seg.zones.add(t.zoneId);
+      if (t.zoneDwellMs > seg.dwellMaxMs) seg.dwellMaxMs = t.zoneDwellMs;
+      seg.tracksSeen++;
+    }
+    for (const h of ruleHits) seg.lines.add(h.ruleId);
+    if (!seg.modalities.includes(modality)) seg.modalities.push(modality);   // 跨 ICR 不关段
+    seg.modality = seg.modalities[seg.modalities.length - 1];
+    seg.density.push({ at: now, count: tracks.length });
+    if (seg.density.length > 240) seg.density.shift();
+    // 止段：静默或上限
+    if (now - seg.lastActivityAt >= this.silenceMs) {
+      closed.push(this._close(now, 'silence'));
+    } else if (now - seg.tStart >= this.maxMs) {
+      // 强制切分：名义止点取末 20s 内活动密度最低采样（下段从该点起算，活动不丢）
+      const tail = seg.density.filter(d => d.at >= now - 20000);
+      let splitAt = now, minC = Infinity;
+      for (const d of tail) if (d.count < minC) { minC = d.count; splitAt = d.at; }
+      closed.push(this._close(splitAt, 'max-duration', { forcedSplit: true, suggestedSplitAt: splitAt }));
+      if (activity) this._open(splitAt, modality);   // 仍在活动：新段接续
+    }
+    return closed;
+  }
+  forceClose(now, reason) {
+    if (!this.active) return [];
+    return [this._close(now, reason || 'manual')];
+  }
+  _close(tEnd, reason, extra) {
+    const seg = this.active;
+    this.active = null;
+    const classes = [...seg.classes], zones = [...seg.zones], lines = [...seg.lines];
+    const durMs = tEnd - seg.tStart;
+    const signature = buildSignature({
+      classes, peakCount: seg.peakCount, zones, lines,
+      modality: seg.modalities[seg.modalities.length - 1],
+      tod: todBucket(new Date(tEnd)), durMs,
+    });
+    const rec = {
+      schema: SEGMENT_SCHEMA,
+      segment_id: this.cameraId + ':' + seg.tStart,
+      camera_id: this.cameraId,
+      venue_id: this.venueId,
+      t_start: new Date(seg.tStart).toISOString(),
+      t_end: new Date(tEnd).toISOString(),
+      summary: { classes, peakCount: seg.peakCount,
+                 zones, lines, dwellMaxMs: seg.dwellMaxMs,
+                 tracksSeen: seg.tracksSeen, pathShape: signature.shape },
+      signature, modalities: seg.modalities.slice(),
+      mode_hash: this.modeHash, env_hash: this.envHash,
+      keyframes: seg.keyframes.slice(-8),
+      reason, forcedSplit: !!(extra && extra.forcedSplit),
+      suggestedSplitAt: extra ? (extra.suggestedSplitAt || null) : null,
+    };
+    this.records.push(rec);
+    if (this.records.length > 16) this.records.shift();
+    return rec;
+  }
+}
+
 // ---------- 证据事件（机器可消费的版本化事件，从"帧"到"有证据的事件"） ----------
 const EVIDENCE_SCHEMA = 'sc.evidence/v1';
 const POLICY_VERSION = 'four-state/2';
@@ -1032,5 +1202,7 @@ if (typeof module!=='undefined' && module.exports) {
     pointInPolygon, ZoneEngine, applyZonePolicy, BridgeLink,
     SCENE_AUTO_ARM_CONF, applySceneGate, selectPackFromVerdict,
     segSide, segIntersect, RuleEngine, FrameRing, Outbox,
-    MODALITY_PROFILES, ICR_TRANSITION_WINDOW_MS, icrVote, ImagingModality };
+    MODALITY_PROFILES, ICR_TRANSITION_WINDOW_MS, icrVote, ImagingModality,
+    SEGMENT_SCHEMA, SEGMENT_SILENCE_MS, SEGMENT_MAX_MS,
+    todBucket, durBucket, countBucket, buildSignature, segmentSimilarity, EventSegmenter };
 }

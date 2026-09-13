@@ -283,6 +283,44 @@ class Telemetry {
 }
 const tele=new Telemetry();
 
+// ---------- 事件段存储（IndexedDB，§6.5：段摘要保留 30 天，逐出最旧） ----------
+const SegmentStore = {
+  db: null,
+  async open() {
+    if (this.db || !window.indexedDB) return;
+    try {
+      const req = indexedDB.open('semanticCameraSegs', 1);
+      req.onupgradeneeded = e => {
+        const d = e.target.result;
+        if (!d.objectStoreNames.contains('segments')) {
+          const st = d.createObjectStore('segments', { keyPath: 'segment_id' });
+          st.createIndex('t_end', 't_end');
+        }
+      };
+      this.db = await new Promise((res, rej) => { req.onsuccess = () => res(req.result); req.onerror = () => rej(req.error); });
+      await this.retention();
+    } catch (e) { /* 无 IndexedDB 时降级内存（遥测仍全量） */ }
+  },
+  async put(rec) {
+    if (!this.db) return;
+    try {
+      const tx = this.db.transaction('segments', 'readwrite');
+      tx.objectStore('segments').put(rec);
+    } catch (e) {}
+  },
+  async retention(days = 30) {
+    if (!this.db) return;
+    try {
+      const cutoff = new Date(Date.now() - days * 86400000).toISOString();
+      const tx = this.db.transaction('segments', 'readwrite');
+      const idx = tx.objectStore('segments').index('t_end');
+      const req = idx.openCursor(IDBKeyRange.upperBound(cutoff));
+      req.onsuccess = e => { const c = e.target.result; if (c) { c.delete(); c.continue(); } };
+    } catch (e) {}
+  },
+};
+SegmentStore.open();
+
 // 几何/跟踪/门控逻辑见 web/core.js
 
 // ---------- ONNX 检测器（模型/类别/阈值全部由模式包给出）----------
@@ -544,6 +582,8 @@ let ruleEngine=pack ? new RuleEngine(pack.rules) : null; // 时空规则引擎�
 
 // 成像模态状态机（ICR 感知）：彩色↔黑白帧级切换的多信号表决与剖面管理
 const modality = new ImagingModality({});
+// 事件分段器（Phase B）：活动起段 → 静默/上限止段 → sc.segment/v1 记录入 IndexedDB
+const segmenter = new EventSegmenter({ cameraId: 'cam-1', venueId: pack.id, modeHash: MODE_HASH });
 let lastGray = null, modalityStatsAt = 0;
 const statCv = document.createElement('canvas'); statCv.width = 48; statCv.height = 27;
 const statCtx = statCv.getContext('2d', {willReadFrequently: true});
@@ -922,6 +962,7 @@ function applyPack(np, source, conf, state){
   if(errs.length){ toast('目标模式包非法：'+errs[0]); return false; }
   pack=np;
   MODE_HASH=stableHash(pack);
+  if (typeof segmenter !== 'undefined') segmenter.setHashes(MODE_HASH, null);
   policy=new JepaPolicy(pack);
   arb=new ArbitrationQueue(pack.arb);
   zoneEngine=new ZoneEngine(pack.zones);
@@ -1232,6 +1273,17 @@ async function loop(){
           }
           t.lastConfirmAt=now;
         }
+      }
+      // 事件分段喂入（每检测周期）：确认轨迹+规则命中 → 关段即入 IndexedDB
+      const closedSegs = segmenter.feed(now, modality.state,
+        tracker.getConfirmed(),
+        [...ruleHits.values()].flat());
+      for (const rec of closedSegs) {
+        SegmentStore.put(rec);
+        tele._log({ty:'sys', msg:'事件段关闭 ' + rec.segment_id.split(':')[1] + 's+' +
+          Math.round((new Date(rec.t_end) - new Date(rec.t_start))/1000) + 's ' +
+          rec.summary.classes.join('/') + ' x' + rec.summary.peakCount +
+          ' (' + rec.reason + ')'});
       }
       const t5=performance.now();
       if(dets.length) tele.det(dets[0]);

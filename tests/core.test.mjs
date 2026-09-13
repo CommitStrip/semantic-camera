@@ -19,7 +19,9 @@ const { CFG, estimateDist, sizeForClass, iou, Tracker, MotionGate,
   pointInPolygon, ZoneEngine, applyZonePolicy, BridgeLink,
   SCENE_AUTO_ARM_CONF, applySceneGate, selectPackFromVerdict,
   segSide, segIntersect, RuleEngine, FrameRing, Outbox,
-  MODALITY_PROFILES, ICR_TRANSITION_WINDOW_MS, icrVote, ImagingModality } = require('../web/core.js');
+  MODALITY_PROFILES, ICR_TRANSITION_WINDOW_MS, icrVote, ImagingModality,
+  SEGMENT_SCHEMA, todBucket, durBucket, countBucket, buildSignature, segmentSimilarity,
+  EventSegmenter } = require('../web/core.js');
 const { MODE_PACKS, getModePack } = require('../web/mode-packs.js');
 const { createHash } = await import('node:crypto');
 
@@ -745,6 +747,93 @@ test('MotionGate.resetBackground：软重置抑制切换瞬间假触发', () => 
   g.resetBackground(switched);                                  // 软重置
   const after = g.detect(baseGray().map(v => Math.max(0, v - 60)), GW2, GH2);
   assert.deepEqual(after, [], '重置后同帧不再触发');
+});
+
+// ==================== 事件分段（EventSegmenter，v3 Phase B） ====================
+
+const trk = (cls, zoneId, zoneDwellMs = 0) => ({ cls, zoneId, zoneDwellMs, bornAt: 0 });
+
+test('EventSegmenter：空闲不开段；活动开段；静默 20s 止段出 record', () => {
+  const seg = new EventSegmenter({ cameraId: 'cam-1', venueId: 'restricted-area',
+    modeHash: 'fnv1a:aa', envHash: 'fnv1a:bb' });
+  assert.deepEqual(seg.feed(0, 'DAY-COLOR', [], []), [], '空闲不开段');
+  seg.feed(1000, 'DAY-COLOR', [trk('person', 'restricted-zone', 3000)], []);
+  assert.ok(seg.active, '有确认轨迹即开段');
+  const closed = seg.feed(1000 + 20000, 'DAY-COLOR', [], []);   // 静默 20s
+  assert.equal(closed.length, 1);
+  const rec = closed[0];
+  assert.equal(rec.schema, SEGMENT_SCHEMA);
+  assert.ok(rec.segment_id.startsWith('cam-1:'), '稳定段 ID');
+  assert.equal(rec.venue_id, 'restricted-area');
+  assert.deepEqual(rec.summary.classes, ['person']);
+  assert.equal(rec.summary.zones[0], 'restricted-zone');
+  assert.equal(rec.summary.dwellMaxMs, 3000);
+  assert.equal(rec.signature.modality, 'DAY-COLOR');
+  assert.equal(rec.mode_hash, 'fnv1a:aa');
+  assert.equal(rec.reason, 'silence');
+  assert.ok(seg.records.includes(rec));
+});
+
+test('EventSegmenter：忙碌场景 120s 强制切分（活动不断也有限段）', () => {
+  const seg = new EventSegmenter({ cameraId: 'cam', silenceMs: 20000, maxMs: 120000 });
+  const closed = [];
+  for (let t = 0; t <= 130000; t += 1000)
+    closed.push(...seg.feed(t, 'DAY-COLOR', [trk('person', 'z')], []));
+  assert.equal(closed.length, 1, '120s 上限触发第一段强制切分');
+  assert.equal(closed[0].forcedSplit, true);
+  assert.equal(closed[0].reason, 'max-duration');
+  assert.ok(closed[0].suggestedSplitAt >= 100000, '切点取末 20s 低密度采样');
+  assert.ok(seg.active, '活动仍在：新段接续');
+  for (let t = 131000; t <= 145000; t += 1000)
+    closed.push(...seg.feed(t, 'DAY-COLOR', [trk('person', 'z')], []));
+  closed.push(...seg.feed(145000 + 20000, 'DAY-COLOR', [], []));   // 活动停后静默 20s
+  assert.ok(closed.length >= 2, '接续段随后静默关闭');
+});
+
+test('EventSegmenter：跨 ICR 模态切换不关段（modalities 列表记录）', () => {
+  const seg = new EventSegmenter({ cameraId: 'cam' });
+  seg.feed(0, 'DAY-COLOR', [trk('person', 'z')], []);
+  seg.feed(5000, 'NIGHT-BW', [trk('person', 'z')], []);   // 模态切换
+  const closed = seg.feed(5000 + 20000, 'NIGHT-BW', [], []);
+  assert.equal(closed.length, 1);
+  assert.deepEqual(closed[0].modalities, ['DAY-COLOR', 'NIGHT-BW'], '跨 ICR 段连续');
+  assert.equal(closed[0].signature.modality, 'NIGHT-BW', '签名取末模态');
+});
+
+test('EventSegmenter：规则命中（无轨迹）也开段，lines 进签名', () => {
+  const seg = new EventSegmenter({ cameraId: 'cam' });
+  seg.feed(0, 'DAY-COLOR', [], [{ ruleId: 'gate-line', trackId: 3, dir: 'AB' }]);
+  const closed = seg.feed(0 + 20000, 'DAY-COLOR', [], []);
+  assert.equal(closed.length, 1);
+  assert.deepEqual(closed[0].summary.lines, ['gate-line']);
+  assert.equal(closed[0].signature.shape, 'cross', '越线段路径形状=cross');
+});
+
+test('segmentSimilarity：相同=1、不相交=0、0.82 阈值区分能力', () => {
+  const sig = o => buildSignature(Object.assign({ classes: [], peakCount: 1, zones: [],
+    lines: [], modality: 'DAY-COLOR', tod: 'day', durMs: 5000 }, o));
+  const a = sig({ classes: ['person'], zones: ['z1'], lines: [] });
+  assert.equal(segmentSimilarity(a, sig({ classes: ['person'], zones: ['z1'], lines: [] })), 1);
+  assert.equal(segmentSimilarity(a, sig({ classes: ['animal'], zones: ['z9'], lines: ['L'],
+    modality: 'NIGHT-BW', tod: 'night', durMs: 200000, peakCount: 5 })).toFixed(2), '0.00',
+    '全分量错开=0（shape 不参与相似度权重）');
+  // 同类事件小幅波动（数量档/时长档不变，区域同）→ 高于阈值
+  const b = sig({ classes: ['person'], zones: ['z1'], lines: [] });
+  assert.ok(segmentSimilarity(a, b) >= 0.82);
+  // 数量档+区域齐变 → 低于阈值
+  const c = sig({ classes: ['person'], zones: ['z9'], count: 'c4-9' });
+  assert.ok(segmentSimilarity(a, sig({ classes: ['person'], zones: ['z9'], peakCount: 5 })) < 0.82);
+});
+
+test('时段/时长/数量桶：边界语义', () => {
+  assert.equal(todBucket(new Date(2026, 8, 10, 6, 0)), 'morning');
+  assert.equal(todBucket(new Date(2026, 8, 10, 12, 0)), 'day');
+  assert.equal(todBucket(new Date(2026, 8, 10, 18, 0)), 'evening');
+  assert.equal(todBucket(new Date(2026, 8, 10, 23, 0)), 'night');
+  assert.equal(durBucket(9000), 's10');
+  assert.equal(durBucket(59000), 's60');
+  assert.equal(countBucket(4), 'c4-9');
+  assert.equal(countBucket(11), 'c10+');
 });
 
 // ==================== 检测头解码器（注册表契约） ====================
