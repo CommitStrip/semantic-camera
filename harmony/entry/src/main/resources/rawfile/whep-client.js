@@ -147,6 +147,21 @@
 
     #sendOffer(offer) {
       if (this.closed) throw new Error('closed');
+      return this.#postSdp(offer).then((res) => {
+        if (res.status === 404) throw new Error('stream not found: ' + this.conf.url);
+        if (res.status === 401 && !this.conf.authQuery && this.conf.user) {
+          // Basic 被拒：自动切换查询参数鉴权重试一次（家庭/自建网关风格）
+          this.conf.authQuery = true;
+          this.#err('Basic 鉴权被拒，自动切换查询参数鉴权');
+          return this.#postSdp(offer);
+        }
+        if (res.status >= 400) return res.text().then((t) => { throw new Error('bad status ' + res.status + ' ' + t.slice(0, 120)); });
+        this.sessionUrl = new URL(res.headers.get('location'), this.#url()).toString();
+        return res.text();
+      });
+    }
+
+    #postSdp(offer) {
       return fetch(this.#url(), {
         method: 'POST',
         headers: Object.assign({}, this.#auth(), { 'Content-Type': 'application/sdp' }),
