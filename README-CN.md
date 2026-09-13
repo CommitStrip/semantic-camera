@@ -27,29 +27,27 @@
 | 场景自识别 | 首个确认事件触发慢脑识别场所（CLIP 零样本兜底 / ollama VLM 精判），conf≥0.85 自动布防；未识别=观察模式（仅记录不虚报）；人工指定永不自动覆盖 |
 | 可插拔检测头 | `HEAD_DECODERS` 注册表：`yolo8head`（无 objectness）/ `nanodethead`（GFL 分布回归）/ `mock`（确定性时间线）——解码头是 provider registry 的键，扩展不改核心 |
 | vus 桥仲裁（M2） | 灰区案件升级慢脑（CLIP 零样本 / ollama VLM，可插拔）：结论伪标签回灌探针、案件归档 JSONL；桥断即边缘自治，绝不虚报 |
-| 资产单源治理 | 模型/运行时单源 `assets/`（manifest 含 sha256/许可证/来源），构建期 staging 到三副本，CI 哈希闸门防静默漂移 |
+| 资产单源治理 | 模型/运行时单源 `assets/`（manifest 含 sha256/许可证/来源），staging 到本地 `web/`，CI 哈希闸门防静默漂移 |
 | 布防时间表 | 模式包可声明布防窗口（支持跨零点）；非布防时段告警降级为记录、仲裁不占预算 |
 | 丝滑变焦 | 捏合/滑块/按钮 + **目标跟随**自动居中，平滑插值 1×-8× |
 | 距离估算 | 针孔模型按类别尺寸粗估（无人机 0.35m / 鸟 0.20m）；数字变焦是中心裁剪，不影响读数 |
-| 数据可追溯 | IndexedDB 落盘 + CSV/JSON 导出 + 原生桥接落盘（Android JSONL / 鸿蒙 CSV）；检出→裁决→仲裁→自训练全链路留痕 |
+| 数据可追溯 | IndexedDB 落盘（段/模式库/遥测）+ CSV/JSON 导出；检出→裁决→仲裁→习惯化全链路留痕 |
 
 ## 系统组成
 
 ```
 semantic-camera/
-├── web/index.html        # 共享 HTML5 核心（两端 WebView 复用；不含领域词）
+├── web/index.html        # 共享 HTML5 核心（现代浏览器直接打开；不含领域词）
 ├── web/core.js           # 纯逻辑核心（校验/跟踪/门控/裁决/队列/解码头注册表/区域引擎/证据事件）
 ├── web/mode-packs.js     # 场所模式包注册表（纯数据，领域词唯一居所）
 ├── assets/models/        # 模型单源（manifest.json 含 sha256/许可证/来源）
 ├── assets/runtime/       # ORT wasm 运行时单源
 ├── gateway/              # MediaMTX 网关：海康 RTSP → WebRTC(WHEP)/HLS
 ├── bridge/               # vus 慢脑仲裁桥（M2）：灰区案件 → CLIP/ollama 仲裁 → 回灌
-├── android/              # Android 工程（Kotlin WebView 封装 + 遥测落盘）
-├── harmony/              # HarmonyOS(NEXT) 工程（ArkWeb 封装 + 遥测落盘）
 └── docs/                 # 平台设计文档 + 模型选型记录
 ```
 
-> 修改 `web/` 下共享文件后，运行 `bash scripts/sync-web.sh` 同步 android/harmony 打包副本；CI 用 `--check` 强制校验三副本一致性。
+> `web/` 的大文件（模型/运行时）不入库，单源在 `assets/`——新机器 clone 后跑一次 `bash scripts/sync-web.sh` staging 到 `web/`；CI 校验资产 sha256 完整性。
 
 ## 场所模式包
 
@@ -75,7 +73,7 @@ semantic-camera/
 ## 海康威视监控接入（已验证）
 
 - **分工**：MediaMTX 拉海康 RTSP（`gateway/mediamtx.yml` 配置相机 IP/账号）→ WebRTC/WHEP(8889) 或 HLS(8888)；`whep-client.js` 实现标准 WHEP 信令（指数退避重连），失败自动回退 HLS。
-- **接入方式**：App 点"🔌 海康"填网关地址与流路径（如 `http://网关IP:8889` + `cam1`），连接后复用同一套检测+判别管线。
+- **接入方式**：页面点"🔌 海康"填网关地址与流路径（如 `http://网关IP:8889` + `cam1`），连接后复用同一套检测+判别管线。
 - **海康 RTSP 地址**：主码流 `rtsp://用户:密码@IP:554/Streaming/Channels/101`，子码流 `.../102`；建议主码流（1080p H.264）检测，H.265 相机需转码（见 `gateway/README.md`）。
 - 已用本地 MediaMTX v1.20.0 + H.264 测试流完成 **WHEP 信令端到端验证**（OPTIONS→POST→PATCH→DELETE 全通过）。
 
@@ -92,28 +90,16 @@ cd web && python3 -m http.server 8899
 - 变焦滑杆 / ＋－按钮 / 双指捏合直接操作；开启 **目标跟随** 变焦自动锁住已确认目标。
 - **场景自识别**：不选模式直接启动=观察模式（人员检测仅记录）；连上桥后首个确认事件自动识别场所并布防（conf≥0.85），"场景"下拉可随时人工改配。
 
-## 双端原生壳
-
-### Android 端
-
-见 `android/README.md`。核心用 WebView 加载共享 `index.html`，`JsBridge` 把遥测以 JSONL 写入应用私有目录便于追溯；相机经 `WebChromeClient.onPermissionRequest` 显式授予。
-
-### 鸿蒙端
-
-见 `harmony/README.md`。核心用 ArkWeb 组件加载，`javaScriptProxy` 把遥测写入沙箱 CSV；相机经 `onPermissionRequest` 授权 + `EntryAbility` 运行时请求 `ohos.permission.CAMERA`。
-
-> 说明：本工程为**可运行的真实推理核心 + 双端原生壳**。`web/` 核心可独立运行于任意手机浏览器验证全部功能；两端原生壳需在 Android Studio / DevEco Studio 中构建安装（仓库不附带构建产物）。
-
-## 开发：测试、CI 与多端副本同步
+## 开发：测试与 CI
 
 ```bash
 node --test tests/core.test.mjs     # 99 例单测（node:test，零依赖）
 python scripts/verify_models.py    # 模型资产 sha256 完整性校验（fail-closed）
-bash scripts/sync-web.sh            # web/ → android assets + harmony rawfile
+bash scripts/sync-web.sh            # assets 单源 → web/ 本地 staging
 bash scripts/sync-web.sh --check    # 只校验一致性（CI 同款）
 ```
 
-CI（node 20/22 矩阵）：JS 语法检查 → 单元测试 → 三副本一致性校验。纯逻辑（配置/校验/IoU/跟踪器/门控/估距/四态裁决/仲裁队列/布防时间表/探针学习数学/mock 检测器/证据事件）全部抽在 `web/core.js`，零 DOM 依赖可直接单测。两个特色测试：**双模式端到端验收**（同一核心管线跑通 airfield 与 restricted-area 两个模式包，平台抽象的持续证明）与**核心源码洁净度**（core.js 与内联脚本不得出现场所领域词，防止"名字平台化、代码单场景化"回潮）。
+CI（node 20/22 矩阵）：JS 语法检查 → 单元测试 → 模型资产完整性校验。纯逻辑（配置/校验/IoU/跟踪器/门控/估距/四态裁决/仲裁队列/布防时间表/探针学习数学/mock 检测器/证据事件）全部抽在 `web/core.js`，零 DOM 依赖可直接单测。两个特色测试：**双模式端到端验收**（同一核心管线跑通 airfield 与 restricted-area 两个模式包，平台抽象的持续证明）与**核心源码洁净度**（core.js 与内联脚本不得出现场所领域词，防止"名字平台化、代码单场景化"回潮）。
 
 ## 性能与验证状态
 
@@ -136,7 +122,7 @@ CI（node 20/22 矩阵）：JS 语法检查 → 单元测试 → 三副本一致
 
 ## 平台与硬件
 
-浏览器需支持 WASM 与 WebRTC（Android 8+ WebView / 现代桌面浏览器均可）；鸿蒙端需 HarmonyOS NEXT + ArkWeb。无 GPU 依赖，推理全部 wasm CPU。
+现代浏览器（桌面/Android/iOS）需支持 WASM 与 WebRTC；无 GPU 依赖，推理全部 wasm CPU。嵌入任意原生 WebView（Android/鸿蒙/iOS 壳）亦可行——核心零改动。
 
 ## 致谢与版权
 

@@ -20,5 +20,5 @@ jobs:
           node --check web/whep-client.js
       - name: Unit tests
         run: node --test tests/core.test.mjs
-      - name: Packaged copies consistency
-        run: bash scripts/sync-web.sh --check
+      - name: Asset integrity (sha256 manifest)
+        run: python scripts/verify_models.py

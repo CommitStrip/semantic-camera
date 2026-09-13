@@ -199,7 +199,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:20px;heigh
 "use strict";
 /* ============================================================
    语义摄像头 · 场所模式核心（首包：净空防黑飞）
-   共享于 Android WebView 与鸿蒙 ArkWeb。
+   现代浏览器直接打开（桌面/手机）；也可嵌入任意原生 WebView。
    功能：实时检测管线(帧差门控→检测→跟踪→多帧确认→目标跟随)
         + JEPA 四态全自动判别(裁决/灰区仲裁/自训练，无人工环节)
         + 丝滑数字变焦(捏合/滑块/目标跟随)
@@ -224,7 +224,7 @@ class Telemetry {
     this._log({ty:'sys',msg:'监控开始'}); }
   stop(){ this.recording=false; this._log({ty:'sys',msg:'监控结束'}); this._saveSession(); }
   _log(ev){ ev.t=performance.now()-this.t0; this.events.push(ev); this._render(ev);
-    // 原生桥接：Android WebView / 鸿蒙 ArkWeb 通过 window.nativeBridge 接收落盘
+    // 原生桥接（可选）：页面嵌入任意原生 WebView 时经 window.nativeBridge 接收遥测落盘
     try{ if(window.nativeBridge && window.nativeBridge.pushTelemetry)
       window.nativeBridge.pushTelemetry(JSON.stringify(ev)); }catch(e){}};
   // 周期性性能采样(每帧)
@@ -347,7 +347,7 @@ class OnnxDetector{
           if(!this.ort) throw new Error('onnxruntime-web 未加载');
           const wasmDir='.';
           this.ort.env.wasm.wasmPaths=wasmDir+'/';
-          // 多线程 wasm 需要 SharedArrayBuffer（跨域隔离）；WebView file:// 下不可用，自动回退 1 线程
+          // 多线程 wasm 需要 SharedArrayBuffer（跨域隔离）；file:// 等非隔离上下文自动回退 1 线程
           this.ort.env.wasm.numThreads =
             (typeof SharedArrayBuffer!=='undefined')
               ? Math.min(4, navigator.hardwareConcurrency||1) : 1;

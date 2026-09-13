@@ -29,7 +29,7 @@ Current validation status: probe-head offline accuracy **98.15%** (162 authorita
 | vus bridge arbitration (M2) | Gray-zone cases escalate to a pluggable slow brain (CLIP zero-shot / ollama VLM): verdicts feed back as pseudo-labels, cases archived to JSONL; bridge down = edge stays fully autonomous, never fabricates |
 | Zone rules | Polygon zones (normalized coords): entering + dwelling past `dwellMs` escalates to an alert (`zone-intrusion`), outside-zone targets downgrade to records; read-only overlay |
 | Detector head registry | `HEAD_DECODERS`: `yolo8head` (no objectness) / `nanodethead` (GFL distribution regression) / `mock` (deterministic timeline) — the head name is a provider-registry key, extending adds no core changes |
-| Asset single-sourcing | Models/runtime live once under `assets/` (manifest with sha256/license/source), staged to the three copies at build time, CI hash gate against silent drift |
+| Asset single-sourcing | Models/runtime live once under `assets/` (manifest with sha256/license/source), staged into local `web/`, CI hash gate against silent drift |
 | Smooth zoom | Pinch / slider / buttons + **target-following** auto-centering, smooth interpolation 1×-8× |
 | Distance estimation | Pinhole model with per-class size (drone 0.35 m / bird 0.20 m); digital zoom is a center crop and does not affect the reading |
 | Data traceability | IndexedDB persistence + CSV/JSON export + native bridge (Android JSONL / Harmony CSV); full chain detection→verdict→arbitration→self-training is logged |
@@ -43,12 +43,10 @@ semantic-camera/
 ├── web/mode-packs.js     # venue mode-pack registry (pure data; the only home of domain terms)
 ├── gateway/              # MediaMTX gateway: Hikvision RTSP → WebRTC(WHEP)/HLS
 ├── bridge/               # vus slow-brain arbitration bridge (M2): gray-zone cases → CLIP/ollama verdicts → probe feedback
-├── android/              # Android app (Kotlin WebView shell + telemetry)
-├── harmony/              # HarmonyOS(NEXT) app (ArkWeb shell + telemetry)
 └── docs/                 # platform design (architecture/roadmap/risks)
 ```
 
-> After editing shared files under `web/`, run `bash scripts/sync-web.sh` to sync the android/harmony packaged copies; CI enforces consistency with `--check`.
+> Large files under `web/` (models/runtime) are not committed — their single source lives in `assets/`. Run `bash scripts/sync-web.sh` once after cloning to stage them into `web/`; CI verifies asset sha256 integrity.
 
 ## Venue mode packs
 
@@ -74,7 +72,7 @@ On top of YOLO localization, a **JEPA-style self-supervised discriminator** (`we
 ## Hikvision RTSP intake (verified)
 
 - **Division of labor**: MediaMTX pulls the Hikvision RTSP stream (camera IP/credentials in `gateway/mediamtx.yml`) → WebRTC/WHEP (8889) or HLS (8888); `whep-client.js` implements standard WHEP signaling (exponential-backoff reconnect) and falls back to HLS on failure.
-- **How to connect**: tap "🔌 海康" in the app, enter the gateway address and stream path (e.g. `http://gatewayIP:8889` + `cam1`) — the same detection + discrimination pipeline runs on top.
+- **How to connect**: open the page, tap "🔌 海康", enter the gateway address and stream path (e.g. `http://gatewayIP:8889` + `cam1`) — the same detection + discrimination pipeline runs on top.
 - **Hikvision RTSP URLs**: main stream `rtsp://user:pass@IP:554/Streaming/Channels/101`, sub-stream `.../102`; the main stream (1080p H.264) is recommended for detection; H.265 cameras need transcoding (see `gateway/README.md`).
 - Verified end-to-end with local MediaMTX v1.20.0 + an H.264 test stream (**full WHEP signaling**: OPTIONS→POST→PATCH→DELETE all pass).
 
@@ -91,28 +89,16 @@ cd web && python3 -m http.server 8899
 - Zoom via slider / ＋− buttons / two-finger pinch; enable **target-following** to auto-center on confirmed targets.
 - **Scene auto-recognition**: start without picking a mode = observation mode (person detection, records only); with the bridge connected, the first confirmed trigger auto-identifies the venue and arms (conf≥0.85); switch anytime via the "场景" dropdown.
 
-## Native shells
-
-### Android
-
-See `android/README.md`. The core runs in a WebView loading the shared `index.html`; a `JsBridge` writes telemetry as JSONL into app-private storage; the camera is granted explicitly via `WebChromeClient.onPermissionRequest`.
-
-### HarmonyOS
-
-See `harmony/README.md`. The core runs in an ArkWeb component; `javaScriptProxy` writes telemetry to sandboxed CSV; the camera is granted via `onPermissionRequest` plus a runtime `ohos.permission.CAMERA` request in `EntryAbility`.
-
-> Note: this project is a **runnable real-inference core + two native shells**. The `web/` core runs standalone in any phone browser and exercises every feature; the native shells must be built in Android Studio / DevEco Studio (no build artifacts are shipped in the repo).
-
-## Development: tests, CI and multi-copy sync
+## Development: tests and CI
 
 ```bash
 node --test tests/core.test.mjs     # 99 unit tests (node:test, zero deps)
 python scripts/verify_models.py    # model asset sha256 integrity (fail-closed)
-bash scripts/sync-web.sh            # web/ → android assets + harmony rawfile
+bash scripts/sync-web.sh            # stage assets → web/ local
 bash scripts/sync-web.sh --check    # consistency check only (same as CI)
 ```
 
-CI (node 20/22 matrix): JS syntax checks → unit tests → three-copy consistency. All pure logic (config/validation/IoU/tracker/gate/ranging/four-state policy/arbitration queue/arming schedule/probe-learning math/mock detector/evidence events) lives in `web/core.js` with zero DOM dependencies, directly unit-testable. Two signature tests: the **two-mode end-to-end acceptance** (the same core pipeline drives both the airfield and restricted-area packs — the standing proof of the platform abstraction) and the **source-cleanliness meta-test** (core.js and the inline script must not contain venue domain terms — preventing "platform in name, single scene in code" regression).
+CI (node 20/22 matrix): JS syntax checks → unit tests → model asset integrity. All pure logic (config/validation/IoU/tracker/gate/ranging/four-state policy/arbitration queue/arming schedule/probe-learning math/mock detector/evidence events) lives in `web/core.js` with zero DOM dependencies, directly unit-testable. Two signature tests: the **two-mode end-to-end acceptance** (the same core pipeline drives both the airfield and restricted-area packs — the standing proof of the platform abstraction) and the **source-cleanliness meta-test** (core.js and the inline script must not contain venue domain terms — preventing "platform in name, single scene in code" regression).
 
 ## Performance & validation status
 
@@ -134,7 +120,7 @@ Milestones M1 (discrimination automation) → M1.5 (standalone repo + config gov
 
 ## Platforms & hardware
 
-Browsers need WASM and WebRTC (Android 8+ WebView / modern desktop browsers); the HarmonyOS shell needs HarmonyOS NEXT + ArkWeb. No GPU dependency — all inference is wasm CPU.
+Modern browsers (desktop/Android/iOS) need WASM and WebRTC; no GPU dependency — all inference is wasm CPU. Embedding the page in any native WebView (Android/HarmonyOS/iOS shell) also works — zero core changes.
 
 ## Acknowledgments
 
