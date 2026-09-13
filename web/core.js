@@ -154,6 +154,78 @@ const MODALITY_PROFILES = {
 };
 const ICR_TRANSITION_WINDOW_MS = 1500;   // 切换前后标记窗（学习冻结/告警降级）
 
+// ---------- 环境模型（EnvironmentModel，core-loop-v3 §2 Phase A） ----------
+// 首启采样 → 慢脑起草 → admin 修正 → 定稿（env_hash 溯源到每条证据事件）。
+// 行为定义 = admin 主笔的**开放集数据**（不是端侧分类器）——慢脑按定义判，不改代码。
+const ENV_SCHEMA = 'sc.env/v1';
+
+// 构建环境模型（admin 可编辑的部署产物）
+function buildEnvironmentModel(o) {
+  // o: {venue, inventory?, zones?, behaviors?, illumination?, status?}
+  return {
+    schema: ENV_SCHEMA,
+    status: o.status || 'draft',           // draft → night-1 → full-0（渐进精化）
+    venue: o.venue || '',                  // 场所定位（自由文本）
+    inventory: o.inventory || [],          // 常规要素清单
+    illumination: o.illumination || null,  // 照明基线（模态剖面标定后填入）
+    zones: o.zones || [],                  // 敏感区域
+    behaviors: o.behaviors || [],          // 危险行为定义（开放集）
+  };
+}
+// env_hash：进入每条证据事件——"当时的环境定义"可溯源
+function envHashOf(env) { return stableHash(env); }
+
+// 环境模型校验（fail-closed）
+function validateEnvironment(env) {
+  if (!env || typeof env !== 'object') return ['环境模型缺失'];
+  const errs = [];
+  if (env.schema && env.schema !== ENV_SCHEMA) errs.push('schema 不匹配');
+  if (!['draft', 'night-1', 'full-0'].includes(env.status) && env.status !== undefined)
+    errs.push('status 必须为 draft/night-1/full-0');
+  if (env.behaviors !== undefined) {
+    if (!Array.isArray(env.behaviors) || env.behaviors.length > 32)
+      errs.push('behaviors 上限 32 条/场所');
+    else {
+      for (const b of env.behaviors) {
+        if (!b || typeof b.id !== 'string' || !b.id) { errs.push('behavior 缺少 id'); break; }
+        if (typeof b.name !== 'string' || !b.name) { errs.push('behavior ' + b.id + ' 缺少 name'); break; }
+        if (typeof b.description !== 'string' && typeof b.observable !== 'string')
+          errs.push('behavior ' + b.id + ' 至少要有 description 或 observable');
+        if (b.evaluation && !['mid-segment', 'segment-end-only'].includes(b.evaluation))
+          errs.push('behavior ' + b.id + ' evaluation 非法');
+        if (b.proposalTriggers !== undefined && !Array.isArray(b.proposalTriggers))
+          errs.push('behavior ' + b.id + ' proposalTriggers 必须为数组');
+      }
+    }
+  }
+  return errs;
+}
+
+// ---------- 行为判定预算门控（core-loop-v3 §4：独立于命名预算的分账） ----------
+class BehaviorCheckGate {
+  constructor(opts) {
+    opts = opts || {};
+    this.maxInFlight = opts.maxInFlight || 2;     // 并发 ≤2
+    this.cooldownMs = opts.cooldownMs || 15000;   // 单行为冷却 15s
+    this.maxQueue = opts.maxQueue || 8;           // 队列上限
+    this.items = new Map();                       // behaviorId → lastCheckAt
+    this.inFlight = 0;
+  }
+  request(behaviorId, now) {
+    const last = this.items.get(behaviorId);
+    if (last !== undefined && now - last < this.cooldownMs) return 'cooldown';
+    if (this.inFlight >= this.maxInFlight) return 'busy';
+    if (this.items.size > 64) {                   // 有界：清最旧
+      const oldest = [...this.items.entries()].sort((a, b) => a[1] - b[1])[0][0];
+      this.items.delete(oldest);
+    }
+    this.items.set(behaviorId, now);
+    this.inFlight++;
+    return 'accepted';
+  }
+  done() { this.inFlight = Math.max(0, this.inFlight - 1); }
+}
+
 function icrVote(prev, cur, th) {
   // 2of3 表决：返回 'night' | 'day' | null（prev/cur: {sat, noise, luma}）
   if (!prev || !cur) return null;
@@ -373,6 +445,15 @@ function validatePack(pack) {
       (z.dwellMs === undefined || (typeof z.dwellMs === 'number' && z.dwellMs >= 0)) &&
       (z.countGte === undefined || (Number.isInteger(z.countGte) && z.countGte >= 1)));
     if (!ok) errs.push('zones 必须为 {id, polygon[[x,y]≥3点(0..1)], classes?, dwellMs?, countGte?} 数组');
+  }
+  if (pack.behaviors !== undefined) {
+    const ok = Array.isArray(pack.behaviors) && pack.behaviors.length <= 32 && pack.behaviors.every(b =>
+      b && typeof b.id === 'string' && b.id &&
+      typeof b.name === 'string' && b.name &&
+      (typeof b.description === 'string' || typeof b.observable === 'string') &&
+      (b.evaluation === undefined || ['mid-segment', 'segment-end-only'].includes(b.evaluation)) &&
+      (b.cooldownMs === undefined || (typeof b.cooldownMs === 'number' && b.cooldownMs >= 0)));
+    if (!ok) errs.push('behaviors 必须为 {id, name, description|observable, evaluation?, cooldownMs?} 数组（≤32 条）');
   }
   if (pack.rules !== undefined) {
     const lines = pack.rules && pack.rules.lines;
@@ -1470,5 +1551,6 @@ if (typeof module!=='undefined' && module.exports) {
     todBucket, durBucket, countBucket, buildSignature, segmentSimilarity, EventSegmenter,
     SEGMENT_LABEL_SCHEMA, NamingGate, templateName, buildSegmentLabel, LabelChain,
     PATTERN_VERIFY_N, PATTERN_AUDIT_RATE, PatternLibrary,
-    aHash, hamming, estimateSegmentTokens, KeyframeSelector };
+    aHash, hamming, estimateSegmentTokens, KeyframeSelector,
+    ENV_SCHEMA, buildEnvironmentModel, envHashOf, validateEnvironment, BehaviorCheckGate };
 }

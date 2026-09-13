@@ -23,7 +23,8 @@ const { CFG, estimateDist, sizeForClass, iou, Tracker, MotionGate,
   SEGMENT_SCHEMA, todBucket, durBucket, countBucket, buildSignature, segmentSimilarity,
   EventSegmenter, SEGMENT_LABEL_SCHEMA, NamingGate, templateName, buildSegmentLabel,
   LabelChain, PATTERN_VERIFY_N, PATTERN_AUDIT_RATE, PatternLibrary,
-  aHash, hamming, estimateSegmentTokens, KeyframeSelector } = require('../web/core.js');
+  aHash, hamming, estimateSegmentTokens, KeyframeSelector,
+  ENV_SCHEMA, buildEnvironmentModel, envHashOf, validateEnvironment, BehaviorCheckGate } = require('../web/core.js');
 const { MODE_PACKS, getModePack } = require('../web/mode-packs.js');
 const { createHash } = await import('node:crypto');
 
@@ -1051,6 +1052,63 @@ test('EventSegmenter：运动活动开段（none 模式的活动信号）', () =
 test('estimateSegmentTokens：粗估口径（发前知道上下文成本）', () => {
   assert.equal(estimateSegmentTokens(0, 0), 0);
   assert.equal(estimateSegmentTokens(3, 100), 800);     // 3×250 + 100/2
+});
+
+// ==================== 环境模型（EnvironmentModel，Phase A） ====================
+
+test('buildEnvironmentModel：完整字段 + draft 缺省', () => {
+  const env = buildEnvironmentModel({ venue: '厂区北门', behaviors: [
+    { id: 'fence-climb', name: '翻墙', description: '攀爬围栏', observable: '人体在围栏上方' },
+  ]});
+  assert.equal(env.schema, ENV_SCHEMA);
+  assert.equal(env.status, 'draft');
+  assert.equal(env.venue, '厂区北门');
+  assert.equal(env.behaviors.length, 1);
+  assert.deepEqual(env.inventory, []);
+  assert.equal(envHashOf(env).startsWith('fnv1a:'), true);
+});
+
+test('validateEnvironment：合法通过 + behaviors 逐条校验', () => {
+  const good = buildEnvironmentModel({ venue: 'test', behaviors: [
+    { id: 'a', name: '翻墙', description: 'desc', observable: 'obs',
+      proposalTriggers: ['zone-hit'], evaluation: 'mid-segment', cooldownMs: 15000 },
+    { id: 'b', name: '偷拍', description: 'desc' },  // 最少字段
+  ]});
+  assert.deepEqual(validateEnvironment(good), []);
+  // evaluation 非法
+  const bad1 = buildEnvironmentModel({ behaviors: [
+    { id: 'x', name: 'x', description: 'd', evaluation: 'live' }]});
+  assert.ok(validateEnvironment(bad1).some(e => e.includes('evaluation')), 'evaluation 非法报错');
+  // 缺 description+observable
+  const bad2 = buildEnvironmentModel({ behaviors: [
+    { id: 'y', name: 'y' }]});
+  assert.ok(validateEnvironment(bad2).some(e => e.includes('observable') || e.includes('description')));
+  // 超上限
+  const many = buildEnvironmentModel({ behaviors:
+    Array.from({length: 33}, (_, i) => ({ id: 'b' + i, name: 'b', description: 'd' }))});
+  assert.ok(validateEnvironment(many).some(e => e.includes('32')), '超 32 条上限');
+});
+
+test('BehaviorCheckGate：冷却 / 并发上限 / 队列有界', () => {
+  const gate = new BehaviorCheckGate({ maxInFlight: 1, cooldownMs: 1000 });
+  assert.equal(gate.request('b1', 0), 'accepted', '首判接受');
+  gate.done();
+  assert.equal(gate.request('b1', 500), 'cooldown', '冷却期内拒绝');
+  assert.equal(gate.request('b1', 1001), 'accepted', '冷却过期再接受');
+  gate.done();
+  gate.inFlight = 2;   // 模拟并发满
+  assert.equal(gate.request('b2', 2000), 'busy', '并发上限拒绝');
+  gate.inFlight = 0;
+  assert.equal(gate.request('b2', 2000), 'accepted');
+  gate.done();
+});
+
+test('环境模型：场所模式包 behaviors 数据全量通过 validateEnvironment', () => {
+  for (const p of Object.values(MODE_PACKS)) {
+    if (!p.behaviors) continue;
+    const env = buildEnvironmentModel({ venue: p.name, behaviors: p.behaviors });
+    assert.deepEqual(validateEnvironment(env), [], p.id + ' 的 behaviors 应通过环境校验');
+  }
 });
 
 // ==================== 检测头解码器（注册表契约） ====================
