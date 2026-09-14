@@ -18,6 +18,10 @@ jobs:
         run: |
           node --check web/core.js
           node --check web/whep-client.js
+      - name: Inline script guard (syntax + top-level TDZ)
+        run: |
+          python scripts/check_inline_js.py --self-test
+          python scripts/check_inline_js.py
       - name: Unit tests
         run: node --test tests/core.test.mjs
       - name: Asset integrity (sha256 manifest)
