@@ -5,11 +5,8 @@
   "archiveDir": "bridge/archive",
   "archiveCrops": true,
   "arbiter": {
-    "type": "clip",
-    "clipModel": "D:/Program/Zcode/视觉未来/video-understanding-skill/models/clip-visual-vitb32.onnx",
-    "prompts": {
-      "bird": "a photo of a bird flying in the sky",
-      "drone": "a photo of a drone quadcopter flying in the sky"
-    }
+    "type": "ollama",
+    "model": "qwen3-vl:2b",
+    "host": "http://127.0.0.1:11434"
   }
 }

@@ -180,7 +180,7 @@ class OllamaArbiter(BaseArbiter):
                   f'{labels}? Reply with exactly one word.')
         body = json.dumps({'model': self.model, 'prompt': prompt,
                            'images': [req['cropJpeg']], 'stream': False,
-                           'options': {'temperature': 0}})
+                           'options': {'temperature': 0, 'num_predict': 2048, 'num_ctx': 16384}})
         resp = await asyncio.to_thread(
             post_json_http, self.host + '/api/generate', body, 60, self.allowed_hosts)
         text = (resp.get('response') or '').strip().lower()
@@ -210,7 +210,7 @@ class OllamaArbiter(BaseArbiter):
                   f'Reply with exactly one venue id from the list.')
         body = json.dumps({'model': self.model, 'prompt': prompt,
                            'images': images, 'stream': False,
-                           'options': {'temperature': 0}})
+                           'options': {'temperature': 0, 'num_predict': 2048, 'num_ctx': 16384}})
         resp = await asyncio.to_thread(
             post_json_http, self.host + '/api/generate', body, 90, self.allowed_hosts)
         text = (resp.get('response') or '').strip().lower()
@@ -250,10 +250,17 @@ class OllamaArbiter(BaseArbiter):
             '{"name": "不超过16个汉字的事件名", "conf": 0.0到1.0, '
             '"matchedBehaviors": ["行为id"], "undecidable": false, '
             '"rationale": "不超过30字的理由"}。'
-            '画面证据不足判断行为时 undecidable 置 true 且 matchedBehaviors 为空。')
+            'name 是事件段的普通事件名（如"人员经过""车辆驶过"）：即使未命中'
+            '任何危险行为也必须给出；仅当画面模糊/无有效内容时才 undecidable 置 '
+            'true 且 name 为 null、matchedBehaviors 为空。'
+            '请严格只输出一个 JSON 对象: '
+            '{"name": "不超过16个汉字的事件名", "conf": 0.0到1.0, '
+            '"matchedBehaviors": ["行为id"], "undecidable": false, '
+            '"rationale": "不超过30字的理由"}。')
         body = json.dumps({'model': self.model, 'prompt': prompt,
                            'images': images, 'stream': False,
-                           'options': {'temperature': 0}})
+                           'keep_alive': '30m',
+                           'options': {'temperature': 0, 'num_predict': 2048, 'num_ctx': 16384}})
         resp = await asyncio.to_thread(
             post_json_http, self.host + '/api/generate', body, 90, self.allowed_hosts)
         text = (resp.get('response') or '').strip()
@@ -268,8 +275,10 @@ class OllamaArbiter(BaseArbiter):
         mb = [b for b in (obj.get('matchedBehaviors') or [])
               if isinstance(b, str)] if isinstance(obj.get('matchedBehaviors'), list) else []
         conf = obj.get('conf')
+        conf_v = round(float(conf), 3) if isinstance(conf, (int, float)) else None
         return {'name': name,
-                'conf': round(float(conf), 3) if isinstance(conf, (int, float)) else 0.7,
+                # 模型有时把 conf 输出成占位 0.0——非弃权时与缺失同径，回退模板缺省
+                'conf': conf_v if (conf_v and conf_v > 0) else 0.7,
                 'matchedBehaviors': mb,
                 'rationale': str(obj.get('rationale') or '')[:60]}
 
@@ -287,7 +296,7 @@ class OllamaArbiter(BaseArbiter):
             '{"verdict": "match"|"no"|"undecidable", "conf": 0.0到1.0}。证据不足用 undecidable。')
         body = json.dumps({'model': self.model, 'prompt': prompt,
                            'images': frames[:1], 'stream': False,
-                           'options': {'temperature': 0}})
+                           'options': {'temperature': 0, 'num_predict': 2048, 'num_ctx': 16384}})
         resp = await asyncio.to_thread(
             post_json_http, self.host + '/api/generate', body, 60, self.allowed_hosts)
         obj = self._extract_json((resp.get('response') or '').strip())
