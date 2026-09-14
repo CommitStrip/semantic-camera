@@ -5,9 +5,9 @@
 set -u
 cd "$(dirname "$0")/.."
 
-HOST="${HOST:-8.148.178.49}"
+HOST="${HOST:?设置 HOST 环境变量（网关地址）}"
 WHEP="http://$HOST:8889/cam/whep"
-AUTH="user=cam&pass=38CcxCg18QFxry2Nqu4Q"
+AUTH="user=${GATEWAY_USER:-cam}&pass=${GATEWAY_PASS:?设置 GATEWAY_PASS 环境变量（网关密码，禁止写回仓库）}"
 OUT="scripts/out"
 mkdir -p "$OUT"
 
@@ -54,6 +54,9 @@ SIZE = 416
 results = []
 for path in sorted(glob.glob("scripts/out/live_frame_*.jpg")):
     img = cv2.imread(path)
+    if img is None:
+        print(f"  {path}: 读帧失败，跳过")
+        continue
     h0, w0 = img.shape[:2]
     r = min(SIZE / w0, SIZE / h0)
     nw, nh = round(w0 * r), round(h0 * r)

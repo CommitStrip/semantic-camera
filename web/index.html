@@ -583,7 +583,6 @@ let ruleEngine=pack ? new RuleEngine(pack.rules) : null; // 时空规则引擎�
 const modality = new ImagingModality({});
 // 事件分段器（Phase B）：活动起段 → 静默/上限止段 → sc.segment/v1 记录入 IndexedDB
 const patternLib = new PatternLibrary({});
-PatternStore.open(patternLib);   // 异步载入已存模式库
 const segmenter = new EventSegmenter({ cameraId: 'cam-1', venueId: pack.id, modeHash: MODE_HASH });
 // 模式库持久化（IndexedDB patterns：永久保留，上限逐出在核心层）
 const PatternStore = {
@@ -613,6 +612,9 @@ const PatternStore = {
     } catch (e) {}
   },
 };
+// Store 打开调用必须位于声明之后（同一顶层 script 块的 const 有 TDZ，提前调用=页面加载即崩）
+SegmentStore.open();
+PatternStore.open(patternLib);   // 异步载入已存模式库
 // 命名管线（M2.7）：预算门控（30/时+同签名去重）→ 桥 LLM 命名（可覆写）→ 降级模板名兜底
 const namingGate = new NamingGate({ budgetPerHour: 30 });
 const labelChain = new LabelChain();
@@ -920,7 +922,8 @@ function sendSegmentName(rec, sigKey, patternId) {
     .then(v => {
       if (v.name) {
         if (patternId) {
-          const consistent = patternLib.latest(patternId) && patternLib.latest(patternId).name === v.name;
+          const before = patternLib.patterns.get(patternId);
+          const consistent = !!before && before.name === v.name;
           patternLib.recordLlmName(patternId, v.name, consistent);
           const pat = patternLib.patterns.get(patternId);
           if (pat) PatternStore.put(pat);
