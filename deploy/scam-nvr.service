@@ -1,0 +1,15 @@
+[Unit]
+Description=语义摄像头 NVR 语义值守
+After=network.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/opt/scam
+ExecStart=/opt/scam/.venv/bin/python -m scam.nvr
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
