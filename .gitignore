@@ -6,3 +6,4 @@ storage/
 *.onnx
 events.jsonl
 .mimosa/
+.mimosa/
