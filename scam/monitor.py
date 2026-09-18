@@ -76,16 +76,28 @@ class Monitor:
                     need_s = r.get("dwell_s", 30 if r.get("template") == "loiter" else 5)
                     condition_met = now - dwell * 1000.0 + need_s * 1000.0
                     alarms.append(self._alarm(t, r, dwell, now,
-                                              min(condition_met, now)))
+                                              min(condition_met, now),
+                                              frame_bgr))
                     break
         for a in alarms:
             for sink in self.sinks:
                 sink(a)
         return alarms
 
-    def _alarm(self, t, rule, dwell, now, condition_met):
+    def _alarm(self, t, rule, dwell, now, condition_met, frame_bgr=None):
         self.seq += 1
         self.violations += 1
+        thumb_b64 = None
+        if frame_bgr is not None:
+            import cv2
+            h, w = frame_bgr.shape[:2]
+            tw = 320
+            th = max(1, round(tw * h / w))
+            thumb = cv2.resize(frame_bgr, (tw, th))
+            ok, buf = cv2.imencode(".jpg", thumb, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            if ok:
+                import base64
+                thumb_b64 = base64.b64encode(buf.tobytes()).decode()
         return {
             "event_id": f"{self.camera_id}:alert:{t['id']}:{int(now)}",
             "camera": self.camera_id,
@@ -98,5 +110,6 @@ class Monitor:
             "detail": (f"{rule.get('cls', '目标')}进入重点管理区域，"
                        f"滞留 {dwell:.0f} 秒触发规则"),
             "rationale": f"模板 {rule.get('template', 'enter-dwell')} 命中",
+            "thumbnail": thumb_b64,
             "latency_ms": max(0, int(now - condition_met)),
         }
