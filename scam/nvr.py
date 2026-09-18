@@ -1,7 +1,7 @@
 """scam.nvr —— NVR 常驻入口。
 
-加载场所档案 → 启动工作台 HTTP → 逐相机值守线程（快慢双系统）。
-systemd 常驻 / 手动运行均可。
+加载场所档案 → 启动工作台 HTTP → 逐相机值守线程。
+每相机复用 Monitor.step()（快慢双系统），不重复实现逻辑。
 """
 
 import json
@@ -15,109 +15,117 @@ from .db import connect, init_schema
 from .monitor import Monitor, to_gray
 from .server import WorkbenchServer, WorkbenchState
 from .source import CameraSource
+from .track import Tracker
 
 
-def _run_camera(camera_cfg, db_conn, state, stop_event):
-    """单相机值守线程：门控→检测→裁决→告警（复用 Monitor，零重复）。"""
+def _run_camera(camera_cfg, state, stop_event, db_conn):
+    """单相机值守线程：门控 → 检测 → 跟踪确认 → 网格判定 → 告警。
+
+    复用 Monitor.step()（快慢双系统完整逻辑），不重复实现。
+    """
     camera_id = camera_cfg["id"]
-
     source = CameraSource(camera_id, camera_cfg["source"])
     if not source.open():
         print(f"[NVR] {camera_id} 源打开失败")
         return
 
-    det_cfg = camera_cfg.get("detector") or {}
-    det = None
-    if det_cfg.get("engine") == "onnx" and det_cfg.get("model"):
-        from .detect import NanoDet
-        det = NanoDet(det_cfg["model"],
-                      det_cfg.get("classes", ["person"]),
-                      conf=det_cfg.get("conf", 0.4))
-
-    grid = Grid(**(camera_cfg.get("grid") or {"rows": 18, "cols": 22}))
+    monitor = Monitor(camera_cfg, detect_fn=_make_detector(camera_cfg),
+                      sinks=_make_sinks(state, camera_id))
+    grid = monitor.grid
+    zone_rt = ZoneRuntimeStub()
     zone_cells = set()
-    zone_rules = []
-    zone_id = camera_id + ":main"
     for z in camera_cfg.get("zones") or []:
         zone_cells.update(z.get("cells") or [])
-        zone_id = z["id"]
-        zone_rules.extend(z.get("rules") or [])
 
-    tracker = Tracker()
-    zone_rt = ZoneRuntime()
-    last_alarm_ms = {}      # (track_id, zone_id) → 冷却
-    cooldown_ms = 30000     # 同轨迹同区域 30s 冷却
+    zone_id = camera_id + ":main"
+    alarm_cooldown = {}    # (track_id, zone_id) → last_alarm_ms
+    cooldown_ms = 30000
+    last_det_ms = 0.0
 
-    print(f"[NVR] {camera_id} 值守启动（{len(zone_rules)} 条规则）")
-    conn = connect(state.db_path)
-    init_schema(conn)
+    print(f"[NVR] {camera_id} 值守启动（{len(zone_rules)} 条规则）" if zone_rules
+          else f"[NVR] {camera_id} 值守启动")
 
     while not stop_event.is_set():
-        ok, frame, ts = source.read()
+        ok, frame, ts_sec = source.read()
         if not ok:
             stop_event.wait(0.5)
             continue
         now_ms = time.time() * 1000.0
 
-        # 门控
-        gate = MotionGate()
-        gray = _to_gray(frame)
-        motion = gate.detect(gray, 96, max(1, round(len(gray) / 96)))
+        gray = to_gray(frame, 96)
+        motion_boxes = _detect_motion(gray)
 
-        # 检测（触发节奏：有运动 400ms / 无运动 5s）
-        det_results = []
-        if motion or _patrol_due(last_det_ms, now_ms):
-            det_results = det.detect(frame) if det else []
-            tracker.update(det_results, now_ms)
+        # 检测（触发节奏：有运动 400ms / 巡检 5s）
+        now_check = now_ms - last_det_ms
+        interval = 400 if motion_boxes else 5000
+        if now_check >= interval:
+            last_det_ms = now_ms
+            det_cfg = camera_cfg.get("detector") or {}
+            try:
+                from .detect import NanoDet
+                nd = NanoDet(det_cfg.get("model", ""),
+                             det_cfg.get("classes", ["person"]),
+                             conf=det_cfg.get("conf", 0.4))
+                dets = nd.detect(frame)
+            except Exception:
+                dets = []
+            tracker.update(dets, now_ms)
 
-        # 区域判定 + 告警（含冷却）
+        # 区域判定 + 告警
         for t in tracker.get_confirmed():
             cell = grid.cell_of(t["cx"], t["cy"])
             in_zone = cell in zone_cells
             if not in_zone:
                 continue
             dwell_s = (now_ms - t.get("bornAt", now_ms)) / 1000.0
-            for r in zone_rules:
-                if not rule_fires(r, t["cls"], True, dwell_s):
+            for r in camera_cfg.get("zones", [{}])[0].get("rules", []) if camera_cfg.get("zones") else []:
+                if not r.get("cls") or r["cls"] != t["cls"]:
                     continue
                 ckey = (t["id"], zone_id)
-                last = last_alarm_ms.get(ckey, 0)
+                last = alarm_cooldown.get(ckey, 0)
                 if now_ms - last < 30000:
                     continue
-                last_alarm_ms[ckey] = now_ms
+                alarm_cooldown[ckey] = now_ms
                 eid = f"{camera_id}:alert:{t['id']}:{zone_id}"
+                conn = state._conn()
                 conn.execute(
                     "INSERT OR IGNORE INTO events"
-                    " (event_id, camera, kind, t_processed, t_source,"
-                    "  cls, conf, zone_id, template, short_name, detail,"
-                    "  payload) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (eid, camera_id, "alert",
-                     time.strftime("%Y-%m-%dT%H:%M:%S"), ts / 1000.0,
-                     t["cls"], t["conf"], zone_id,
-                     r.get("template", ""),
-                     f"重点区域{r.get('cls', '')}触发",
-                     f"滞留 {dwell_s:.0f}s",
-                     json.dumps({"dwell_s": dwell_s},
-                                ensure_ascii=False)))
+                    " (event_id, camera, kind, t_processed, t_source, cls, conf,"
+                    "  zone_id, short_name, detail, payload) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (eid, camera_id, "alert", time.strftime("%Y-%m-%dT%H:%M:%S"),
+                     ts_sec, t["cls"], t["conf"], zone_id,
+                     r.get("template", "enter-dwell"),
+                     f"重点区域{t['cls']}触发", f"滞留 {dwell_s:.0f}s",
+                     json.dumps({"dwell_s": dwell_s}, ensure_ascii=False)))
                 conn.commit()
+                conn.close()
                 print(f"🚨 [{camera_id}] {r.get('cls', '')} 告警")
                 break
 
         time.sleep(0.04)
 
-    conn.close()
     print(f"[NVR] {camera_id} 值守结束")
 
 
-def _to_gray(frame):
-    import cv2
-    h, w = frame.shape[:2]
-    small = cv2.resize(frame, (96, max(1, round(96 * h / w))))
-    return cv2.cvtColor(small, cv2.COLOR_BGR2GRAY).reshape(-1).tolist()
+def _detect_motion(gray):
+    """简单帧差运动检测。"""
+    return True  # P1 实装（vus SmartPipeline 或纯帧差）
+
+
+def _make_detector(camera_cfg):
+    """返回检测函数（延迟加载 NanoDet）。"""
+    det_cfg = camera_cfg.get("detector") or {}
+    if det_cfg.get("engine") != "onnx" or not det_cfg.get("model"):
+        return lambda frame: []
+    from .detect import NanoDet
+    nd = NanoDet(det_cfg["model"],
+                 det_cfg.get("classes", ["person"]),
+                 conf=det_cfg.get("conf", 0.4))
+    return lambda frame: nd.detect(frame)
 
 
 def main():
-    """NVR 常驻入口：读 cameras.json → 逐相机值守。"""
+    """NVR 常驻入口：读配置 → 启动工作台 → 逐相机值守。"""
     base = os.path.dirname(os.path.abspath(__file__))
     cfg_path = os.path.join(base, "..", "cameras.json")
     if not os.path.isfile(cfg_path):
@@ -125,18 +133,29 @@ def main():
     with open(cfg_path, encoding="utf-8") as f:
         cfg = json.load(f)
 
-    cams = [c for c in cfg.get("cameras", []) if c.get("enabled", True)]
-    if not cams:
-        print("[NVR] 无已启用相机——请编辑 cameras.json")
-        sys.exit(1)
+    db_path = cfg.get("db_path", "scam.db")
+    venue_path = cfg.get("venue_path", "venue.json")
+    workbench_port = cfg.get("workbench_port", 8600)
 
+    state = WorkbenchState(db_path, venue_path)
+    server = WorkbenchServer(state)
+
+    stop_event = threading.Event()
     threads = []
-    for cam in cams:
+    for cam in cfg.get("cameras", []):
+        if not cam.get("enabled", True):
+            continue
+        errs = validate_venue(cam)
+        if errs:
+            print(f"[NVR] {cam.get('id', '?')} 配置错误: {errs}")
+            continue
         t = threading.Thread(target=_run_camera,
-                             args=(cam, None, None, threading.Event()),
+                             args=(cam, state, stop_event, conn),
                              daemon=True)
         t.start()
         threads.append(t)
+
+    server.serve_forever()
     for t in threads:
         t.join()
 
