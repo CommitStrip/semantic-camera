@@ -1,13 +1,17 @@
 """server.py —— 工作台 HTTP 服务：API + 审查时间线 + 告警出口。
 
 内嵌 HTML 零文件 I/O 零路径构造；SSE 实时推送；SQLite 参数绑定。
-环境档案存 SQLite meta 表（key = env:{camera_id}），不走文件路径。
+camera_id 白名单校验（alphanumeric + dash + underscore）——防路径注入。
+所有状态（区域/环境档案/事件/模式）均存 SQLite，server 零文件写入。
 """
 
 import json
+import re
 import sqlite3
 import threading
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+
+CAMERA_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
 
 _INDEX_HTML = (
     '<!DOCTYPE html><html><head><meta charset="utf-8"><title>语义摄像头</title>'
@@ -40,9 +44,10 @@ _INDEX_HTML = (
 
 
 class WorkbenchState:
-    def __init__(self, db_path, venue_path):
+    """工作台共享状态：全部存 SQLite（events/patterns/meta/zones），零文件 I/O。"""
+
+    def __init__(self, db_path):
         self.db_path = db_path
-        self.venue_path = venue_path
         self.monitors = {}
         self._lock = threading.Lock()
 
@@ -52,34 +57,29 @@ class WorkbenchState:
         return conn
 
     def cameras(self):
-        try:
-            with open(self.venue_path, encoding="utf-8") as f:
-                return json.load(f).get("cameras", [])
-        except Exception:
-            return []
+        """从 SQLite zones 表读取相机列表（去重）。"""
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT DISTINCT camera FROM zones").fetchall()
+        conn.close()
+        return [{"id": r[0]} for r in rows]
 
     def zones(self, camera_id):
-        for c in self.cameras():
-            if c["id"] == camera_id:
-                return c.get("zones", [])
-        return []
-
-    def save_environment(self, camera_id, env):
-        """环境档案存 SQLite meta 表（key = env:{camera_id}），零文件 I/O。"""
-        conn = self._conn()
-        conn.execute(
-            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
-            (f"env:{camera_id}", json.dumps(env, ensure_ascii=False)))
-        conn.commit()
-        conn.close()
-
-    def load_environment(self, camera_id):
+        """从 SQLite zones 表读取指定相机的区域配置。"""
         conn = self._conn()
         row = conn.execute(
-            "SELECT value FROM meta WHERE key = ?", (f"env:{camera_id}",)
-        ).fetchone()
+            "SELECT data FROM zones WHERE camera = ?", (camera_id,)).fetchone()
         conn.close()
-        return json.loads(row["value"]) if row else None
+        return json.loads(row["data"]) if row else []
+
+    def save_zones(self, camera_id, zones):
+        """保存区域配置到 SQLite zones 表（JSON 序列化存储）。"""
+        conn = self._conn()
+        conn.execute(
+            "INSERT OR REPLACE INTO zones (camera, data) VALUES (?,?)",
+            (camera_id, json.dumps(zones, ensure_ascii=False)))
+        conn.commit()
+        conn.close()
 
 
 class WorkbenchHandler(BaseHTTPRequestHandler):
@@ -161,6 +161,8 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
 
 
 class WorkbenchServer(ThreadingHTTPServer):
+    """工作台 HTTP 服务（ThreadingHTTPServer，随 NVR 常驻）。"""
+
     def __init__(self, state, host="0.0.0.0", port=8600):
         self.state = state
         super().__init__((host, port), WorkbenchHandler)

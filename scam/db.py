@@ -61,6 +61,11 @@ CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT
 );
+
+CREATE TABLE IF NOT EXISTS zones (
+  camera TEXT PRIMARY KEY,
+  data   TEXT NOT NULL                -- JSON 序列化的区域配置
+);
 """
 
 
