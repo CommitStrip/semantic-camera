@@ -52,6 +52,22 @@ else
     echo "[4/5] cameras.json 已存在（跳过）"
 fi
 
+# 4.5 检测模型存在性（缺失时该相机只跑门控——大声告警，绝不静默零检测）
+MODEL="$(python3 - << 'EOPY'
+import json
+try:
+    cfg = json.load(open("cameras.json", encoding="utf-8"))
+    print(cfg["cameras"][0].get("detector", {}).get("model", ""))
+except Exception:
+    print("")
+EOPY
+)"
+if [ -n "$MODEL" ] && [ ! -f "$MODEL" ]; then
+    echo "警告: 检测模型缺失: $MODEL"
+    echo "  请放置 NanoDet-Plus ONNX 模型到该路径（README 有导出说明）；"
+    echo "  模型缺失时相机会值守但不会产生检测告警。"
+fi
+
 # 5. systemd 服务
 if [ -d /etc/systemd/system ]; then
     cat > /tmp/scam-nvr.service << EOSVC
@@ -81,5 +97,5 @@ fi
 echo ""
 echo "=== 部署完成 ==="
 echo "启动: sudo systemctl enable --now scam-nvr"
-echo "工作台: http://$(hostname -I | awk '{print $1}'):8600"
+echo "工作台: http://127.0.0.1:8600（NVR 本机；远程用 ssh -L 8600:127.0.0.1:8600 隧道）"
 echo "日志: journalctl -u scam-nvr -f"

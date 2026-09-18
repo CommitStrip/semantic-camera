@@ -10,7 +10,7 @@ A budget-aware semantic video event runtime for Linux NVR
 
 [![CI](https://github.com/CommitStrip/semantic-camera/actions/workflows/ci.yml/badge.svg)](https://github.com/CommitStrip/semantic-camera/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-35%20passed-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-45%20passed-brightgreen)](tests/)
 
 [**简体中文**](README-CN.md) · [**English**](README.md)
 
@@ -48,7 +48,8 @@ python -m scam.discover
 
 # 4. 启动值守 + 工作台
 python -m scam.nvr
-# 浏览器打开 http://<NVR-IP>:8600
+# 浏览器打开 http://127.0.0.1:8600（工作台默认只监听本机，
+# 不带鉴权不暴露局域网；远程访问：ssh -L 8600:127.0.0.1:8600 <NVR> 后开同一地址）
 ```
 
 ### NVR 部署（systemd）
@@ -62,7 +63,7 @@ sudo systemctl enable --now scam-nvr
 
 ```
 RTSP 摄像头
-   │ FrameSource（vus）
+   │ FrameSource（vus，缺 vus 自动回退 cv2）
    ▼
 ┌─────────────────── 快系统（逐帧，零模型） ───────────────────┐
 │ T0 帧差门控(1.6ms) → T1 NanoDet(运动触发 400ms/巡检 5s)      │
@@ -84,7 +85,7 @@ SQLite 全程可审计
 | 告警延迟（结构条件触发） | **≤1s** | NanoDet ONNX CPU，管理格内运动 |
 | 帧差门控单帧 | 1.6ms | 降采样灰度 96×54 |
 | 检测延迟（NanoDet CPU） | 23-24ms | 416×416 输入 |
-| pytest | 35 passed | 含配置校验/网格/门控/跟踪/裁决/嵌入/模式库/命名 |
+| pytest | 45 passed | 含配置校验/网格/门控/跟踪/裁决/嵌入/模式库/命名/工作台 |
 
 ## 📁 项目结构
 
@@ -96,30 +97,30 @@ scam/                    核心包（纯 Python）
   track.py               跟踪确认
   zones.py               网格圈选
   verdict.py             四态裁决
+  db.py                  SQLite 持久层（事件/分段/模式/区域）
   segments.py            事件分段 + 签名
   patterns.py            PatternLibrary 习惯化
   naming.py              命名双车道
   embed.py               V-JEPA 段嵌入
   models.py              模型双通道
   monitor.py             快系统值守循环
-  source.py              相机源
+  source.py              相机源（vus / cv2 回退）
   server.py              工作台 HTTP
   nvr.py                 NVR 常驻入口
   discover.py            局域网自动发现
   sinks.py               告警出口
 deploy/                  NVR 部署（install.sh + systemd）
-scripts/                 工具（验收/发现/导出）
+scripts/                 工具（验收/发现）
 tests/                   pytest 测试
-docs/                    设计文档
+docs/                    对标与路线文档
 ```
 
-## 📖 设计文档
+## 📖 对标文档
 
 | 文档 | 内容 |
 |---|---|
-| [核心循环 v3](docs/core-loop-v3.md) | 环境详析 → 值守 → 分段 → 命名 → 习惯化 |
-| [系统设计 v2.7](docs/semantic-camera-design.md) | 机制层全貌（门控/检测/裁决/分段/出口） |
-| [模型选型](docs/vlm-selection.md) | V-JEPA / NanoDet 实测数据与淘汰记录 |
+| [Frigate 差距分析](docs/frigate-gap-analysis.md) | 与目标开源 NVR 的逐项差距 |
+| [对齐路线图](docs/frigate-parity-roadmap.md) | 冲刺计划与验收口径 |
 
 ## 🙏 致谢
 

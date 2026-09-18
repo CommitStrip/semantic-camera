@@ -68,6 +68,20 @@ def _anchors(input_size, strides):
     return val
 
 
+NMS_IOU = 0.45
+
+
+def _nms_iou(a, b):
+    """归一化 [x,y,w,h] 两框 IoU（NanoDet GFL 免 NMS 设计下的少量重复保险）。"""
+    x1 = max(a[0], b[0])
+    y1 = max(a[1], b[1])
+    x2 = min(a[0] + a[2], b[0] + b[2])
+    y2 = min(a[1] + a[3], b[1] + b[3])
+    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    union = a[2] * a[3] + b[2] * b[3] - inter
+    return inter / union if union > 0 else 0.0
+
+
 class NanoDet:
     """NanoDet-Plus ONNX 检测器（onnxruntime 懒加载；NVR 本机推理）。"""
 
@@ -127,4 +141,14 @@ class NanoDet:
                             else str(d["mcls"]),
                             "conf": round(d["conf"], 4),
                             "bbox": [x1, y1, x2 - x1, y2 - y1]})
-        return results
+        # 置信度贪心 NMS + 中心点（跟踪器与网格判定都吃归一化 cx/cy）
+        results.sort(key=lambda d: -d["conf"])
+        kept = []
+        for d in results:
+            if any(_nms_iou(d["bbox"], k["bbox"]) >= NMS_IOU for k in kept):
+                continue
+            b = d["bbox"]
+            d["cx"] = b[0] + b[2] / 2.0
+            d["cy"] = b[1] + b[3] / 2.0
+            kept.append(d)
+        return kept

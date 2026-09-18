@@ -1,8 +1,9 @@
 """server.py —— 工作台 HTTP 服务：API + 审查时间线 + 告警出口。
 
-内嵌 HTML 零文件 I/O 零路径构造；SSE 实时推送；SQLite 参数绑定。
+内嵌 HTML 零文件 I/O 零路径构造；前端 3 秒轮询刷新。
 camera_id 白名单校验（alphanumeric + dash + underscore）——防路径注入。
-所有状态（区域/环境档案/事件/模式）均存 SQLite，server 零文件写入。
+默认只绑 127.0.0.1（远程访问交 SSH 隧道/反向代理）；
+所有状态（区域/事件/模式）均存 SQLite，server 零文件写入。
 """
 
 import json
@@ -73,7 +74,14 @@ class WorkbenchState:
         return json.loads(row["data"]) if row else []
 
     def save_zones(self, camera_id, zones):
-        """保存区域配置到 SQLite zones 表（JSON 序列化存储）。"""
+        """保存区域配置到 SQLite zones 表（JSON 序列化存储）。
+
+        camera_id 必须过白名单（防注入/防脏键）；不合法抛 ValueError。
+        """
+        if not CAMERA_ID_RE.match(camera_id or ""):
+            raise ValueError(f"非法 camera_id: {camera_id!r}")
+        if not isinstance(zones, list):
+            raise ValueError("zones 必须为数组")
         conn = self._conn()
         conn.execute(
             "INSERT OR REPLACE INTO zones (camera, data) VALUES (?,?)",
@@ -143,27 +151,51 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             self._json({"error": "invalid json"}, 400)
             return
         if path == "/api/zones/save":
-            self.server.state.save_zones(
-                body.get("camera", ""), body.get("zones", []))
+            try:
+                self.server.state.save_zones(
+                    body.get("camera", ""), body.get("zones", []))
+            except ValueError as e:
+                self._json({"error": str(e)}, 400)
+                return
             self._json({"ok": True})
             return
         if path == "/api/events/feedback":
             eid = body.get("event_id", "")
             feedback = body.get("feedback", "")
             conn = self.server.state._conn()
+            # 合并进原 payload（证据不可丢）；事件不存在如实报 404 语义
+            row = conn.execute(
+                "SELECT payload FROM events WHERE event_id = ?",
+                (eid,)).fetchone()
+            if row is None:
+                conn.close()
+                self._json({"error": "event not found"}, 404)
+                return
+            try:
+                payload = json.loads(row["payload"]) if row["payload"] else {}
+            except (TypeError, ValueError):
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {"original": payload}
+            payload["feedback"] = feedback
             conn.execute(
                 "UPDATE events SET payload = ? WHERE event_id = ?",
-                (json.dumps({"feedback": feedback}), eid))
+                (json.dumps(payload, ensure_ascii=False), eid))
             conn.commit()
+            conn.close()
             self._json({"ok": True})
             return
         self.send_error(404)
 
 
 class WorkbenchServer(ThreadingHTTPServer):
-    """工作台 HTTP 服务（ThreadingHTTPServer，随 NVR 常驻）。"""
+    """工作台 HTTP 服务（ThreadingHTTPServer，随 NVR 常驻）。
 
-    def __init__(self, state, host="0.0.0.0", port=8600):
+    默认只绑 127.0.0.1：告警流与配置不含鉴权，不暴露局域网；
+    远程访问走 SSH 隧道（ssh -L 8600:127.0.0.1:8600 nvr）或加鉴权的反代。
+    """
+
+    def __init__(self, state, host="127.0.0.1", port=8600):
         self.state = state
         super().__init__((host, port), WorkbenchHandler)
         self.daemon_threads = True

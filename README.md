@@ -31,14 +31,15 @@ python -m scam.discover
 
 # Start monitoring + workbench
 python -m scam.nvr
-# Open http://<NVR-IP>:8600
+# Open http://127.0.0.1:8600 (workbench binds localhost only — no auth,
+# never exposed to the LAN; remote access: ssh -L 8600:127.0.0.1:8600 <NVR>)
 ```
 
 ## Architecture
 
 ```
 RTSP Camera
-   │ FrameSource (vus)
+   │ FrameSource (vus, auto-fallback to cv2)
    ▼
 ┌────────── Fast System (per-frame, zero model) ─────────────────┐
 │ T0 Frame gating(1.6ms) → T1 NanoDet(motion 400ms/patrol 5s)   │
@@ -60,7 +61,7 @@ SQLite fully auditable
 | Alarm latency (structural) | **≤1s** | NanoDet ONNX CPU, motion in managed cells |
 | Frame gating per frame | 1.6ms | Downsampled grayscale 96×54 |
 | Detection (NanoDet CPU) | 23-24ms | 416×416 input |
-| pytest | 35 passed | Config/zones/gate/track/verdict/embed/patterns/naming |
+| pytest | 45 passed | Config/zones/gate/track/verdict/embed/patterns/naming/workbench |
 
 ## License
 

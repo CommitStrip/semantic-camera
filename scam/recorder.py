@@ -23,13 +23,18 @@ class SegmentRecorder:
         self.proc = None
 
     def start(self):
-        """启动 ffmpeg 分段录像子进程。"""
+        """启动 ffmpeg 分段录像子进程。找不到 ffmpeg 时抛 RuntimeError（不静默）。"""
+        from .platform import find_ffmpeg
+        ffmpeg = find_ffmpeg()
+        if not ffmpeg:
+            raise RuntimeError(
+                "未找到 ffmpeg——请安装并加入 PATH（录像功能不可用）")
         os.makedirs(self.storage_root, exist_ok=True)
         out_pattern = os.path.join(
             self.storage_root,
             "%Y-%m-%d", f"seg_%Y%m%d-%H%M%S.mp4")
         self.proc = subprocess.Popen(
-            ["ffmpeg",
+            [ffmpeg,
              "-loglevel", "error",
              "-i", self.rtsp_url,
              "-c", "copy",                    # 流拷贝零 CPU
@@ -79,8 +84,9 @@ class RetentionPolicy:
                 files = sorted(glob.glob(os.path.join(self.root, "**", "*.mp4")),
                                key=os.path.getmtime)
                 for fp in files:
+                    size = os.path.getsize(fp)   # 先取大小再删（删除后 getsize 会 FileNotFoundError）
                     os.remove(fp)
-                    total -= os.path.getsize(fp)
+                    total -= size
                     removed += 1
                     if total <= cap_bytes:
                         break

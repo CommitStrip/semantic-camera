@@ -105,8 +105,9 @@ class LocalOllama:
                 "messages": [{"role": "system", "content": context or ""},
                              {"role": "user", "content": prompt,
                               "images": frames_b64}],
-                "options": {"temperature": 0, "num_predict": 2048,
-                            "num_ctx": 16384}}
+                "options": {"temperature": 0,
+                            "num_predict": self.num_predict,
+                            "num_ctx": self.num_ctx}}
         try:
             resp = _post_json(self.base + "/v1/chat/completions", body, self.timeout)
             content = resp["choices"][0]["message"]["content"]
@@ -116,36 +117,38 @@ class LocalOllama:
 
 
 class CloudOpenAICompat:
-    """云端 OpenAI 兼容 VLM（帧/内容会出 NVR——启用需管理员显式确认）。"""
+    """云端 OpenAI 兼容 VLM（帧/内容会出 NVR——启用需管理员显式确认）。
+
+    强制 https + 解析后 IP 全公网（DNS 也解析校验，防 DNS 重绑定绕过）；
+    请求带 Authorization 头；图片走 OpenAI 标准 content parts（data URL）。
+    """
 
     name = "cloud"
 
-    def __init__(self, base, model, key_env="SCAM_CLOUD_KEY",
-                 num_ctx=16384, num_predict=2048, timeout=60):
+    def __init__(self, base, model, key_env="SCAM_CLOUD_KEY", timeout=60):
         u = urlsplit(base)
         if u.scheme != "https":
             raise ValueError("云端通道必须 https")
-        host = u.hostname or ""
-        if not host:
-            raise ValueError("缺少主机名")
-        if _ip_is_local(host):
-            raise ValueError("云端通道拒绝私有/保留地址")
+        # 解析 DNS 后逐 IP 阻断私网/环回/链路本地（不只查字面 IP）
+        self.host, _ = validate_base(base, allow_local=False, allow_public=True)
         self.base = base.rstrip("/")
         self.model = model
         self.key = os.environ.get(key_env, "")
         self.timeout = timeout
-        self.num_ctx = num_ctx
-        self.num_predict = num_predict
 
     def understand(self, prompt, frames_b64, context=None):
-        body = {"model": self.model, "stream": False,
+        content = [{"type": "text", "text": prompt}]
+        for b64 in frames_b64:
+            content.append({"type": "image_url",
+                            "image_url": {"url": "data:image/jpeg;base64,"
+                                                + b64}})
+        body = {"model": self.model, "stream": False, "temperature": 0,
                 "messages": [{"role": "system", "content": context or ""},
-                             {"role": "user", "content": prompt,
-                              "images": frames_b64}],
-                "options": {"temperature": 0, "num_predict": 2048,
-                            "num_ctx": self.num_ctx}}
+                             {"role": "user", "content": content}]}
+        headers = {"Authorization": f"Bearer {self.key}"} if self.key else None
         try:
-            resp = _post_json(self.base + "/v1/chat/completions", body, self.timeout)
+            resp = _post_json(self.base + "/v1/chat/completions", body,
+                              self.timeout, headers)
             content = resp["choices"][0]["message"]["content"]
         except Exception:
             return None
@@ -168,9 +171,7 @@ def build_provider(cfg):
             return CloudOpenAICompat(cfg.get("base", ""),
                                      cfg.get("model", ""),
                                      cfg.get("key_env", "SCAM_CLOUD_KEY"),
-                                     cfg.get("num_ctx", 16384),
-                                     cfg.get("num_predict", 2048),
                                      cfg.get("timeout", 60))
-    except (ValueError, KeyError):
+    except (ValueError, KeyError, socket.gaierror):
         return None
     return None

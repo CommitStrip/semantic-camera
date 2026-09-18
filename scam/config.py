@@ -26,6 +26,9 @@ def validate_venue(v):
 
     seen_ids = set()
     for cam in cams:
+        if not isinstance(cam, dict):
+            errs.append("相机条目必须为对象")
+            continue
         cid = cam.get("id")
         if not cid or not isinstance(cid, str):
             errs.append("相机缺少非空 id")
@@ -51,18 +54,30 @@ def validate_venue(v):
             if not isinstance(classes, list) or not classes or \
                     not all(isinstance(c, str) for c in classes):
                 errs.append(f"{cid}: classes 必须为非空字符串数组")
-        conf = cam.get("conf")
+        # 校验 detector.conf——与运行时 _make_detector 读的字段一致（此前错查 cam.conf）
+        conf = det.get("conf")
         if conf is not None and not (isinstance(conf, (int, float)) and 0 < conf <= 1):
-            errs.append(f"{cid}: conf 必须在 (0,1]")
+            errs.append(f"{cid}: detector.conf 必须在 (0,1]")
 
-        grid = cam.get("grid") or {}
-        rows, cols = grid.get("rows", 18), grid.get("cols", 22)
+        grid = cam.get("grid")
+        if grid is not None and not isinstance(grid, dict):
+            errs.append(f"{cid}: grid 必须为对象")
+            grid = {}
+        rows = grid.get("rows", 18) if isinstance(grid, dict) else 18
+        cols = grid.get("cols", 22) if isinstance(grid, dict) else 22
         if not (isinstance(rows, int) and rows >= 4 and isinstance(cols, int) and cols >= 4):
             errs.append(f"{cid}: grid 行列必须为 ≥4 的整数")
 
         ncells = rows * cols
         zone_ids = set()
-        for z in cam.get("zones") or []:
+        zones = cam.get("zones")
+        if zones is not None and not isinstance(zones, list):
+            errs.append(f"{cid}: zones 必须为数组")
+            zones = []
+        for z in zones or []:
+            if not isinstance(z, dict):
+                errs.append(f"{cid}: 区域必须为对象")
+                continue
             zid = z.get("id")
             if not zid or zid in zone_ids:
                 errs.append(f"{cid}: 区域 id 缺失或重复: {zid}")
@@ -72,7 +87,14 @@ def validate_venue(v):
             if not isinstance(cells, list) or not cells or \
                     not all(isinstance(c, int) and 0 <= c < ncells for c in cells):
                 errs.append(f"{cid}: 区域 {zid} 的格子索引非法")
-            for r in z.get("rules") or []:
+            rules = z.get("rules")
+            if rules is not None and not isinstance(rules, list):
+                errs.append(f"{cid}: 区域 {zid} 的 rules 必须为数组")
+                rules = []
+            for r in rules or []:
+                if not isinstance(r, dict):
+                    errs.append(f"{cid}: 规则必须为对象")
+                    continue
                 if not isinstance(r.get("cls"), str):
                     errs.append(f"{cid}: 规则缺少 cls")
                 ds = r.get("dwell_s", 0)
@@ -81,8 +103,14 @@ def validate_venue(v):
                 if r.get("severity") not in (None,) + SEVERITIES:
                     errs.append(f"{cid}: severity 非法")
 
-        for w in cam.get("schedule") or []:
-            if not (TIME_RE.match(w.get("from", "")) and TIME_RE.match(w.get("to", ""))):
+        schedule = cam.get("schedule")
+        if schedule is not None and not isinstance(schedule, list):
+            errs.append(f"{cid}: schedule 必须为数组")
+            schedule = []
+        for w in schedule or []:
+            if not isinstance(w, dict) or not (
+                    TIME_RE.match(w.get("from", ""))
+                    and TIME_RE.match(w.get("to", ""))):
                 errs.append(f"{cid}: schedule 必须为 HH:MM 格式")
                 break
 

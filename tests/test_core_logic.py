@@ -1,5 +1,6 @@
 """zones/gate/track/verdict 纯逻辑测试（移植自 JS 套件的已验证断言）。"""
 
+from scam.config import validate_venue
 from scam.gate import MotionGate
 from scam.track import Tracker
 from scam.verdict import ZoneRuntime, rule_fires
@@ -120,3 +121,29 @@ def test_zone_runtime_dwell_accumulates_and_clears():
     assert zr.update(7, "z1", True, 2000) == 2.0
     zr.update(7, "z1", False, 3000)
     assert zr.update(7, "z1", True, 9000) == 0.0, "离开后重新计时"
+
+
+def test_tracker_derives_center_from_bbox():
+    """检测源不带 cx/cy 时从框推导（生产 NanoDet 曾漏中心点→入口即崩）。"""
+    tr = Tracker()
+    tr.update([{"cls": "person", "conf": 0.9,
+                "bbox": [0.4, 0.4, 0.1, 0.2]}], 0)
+    t = tr.tracks[1]
+    assert abs(t["cx"] - 0.45) < 1e-9
+    assert abs(t["cy"] - 0.5) < 1e-9
+
+
+def test_validate_venue_type_hardening():
+    """校验器类型不设防会崩溃而非报错（grid/zones/相机条目传错类型）。"""
+    bad = {"cameras": [
+        {"id": "a", "source": "x", "detector": {"engine": "none"},
+         "grid": "not-a-dict", "zones": "not-a-list"},
+        "not-a-dict-camera",
+        {"id": "b", "source": "x", "detector": {"engine": "none"},
+         "schedule": "not-a-list"},
+    ]}
+    errs = validate_venue(bad)
+    assert any("grid" in e for e in errs)
+    assert any("zones 必须为数组" in e for e in errs)
+    assert any("相机条目必须为对象" in e for e in errs)
+    assert any("schedule 必须为数组" in e for e in errs)

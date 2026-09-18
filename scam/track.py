@@ -36,6 +36,11 @@ class Tracker:
         """dets: [{cls, conf, bbox:[x,y,w,h] 归一化, cx, cy}]；返回本轮活跃轨迹。"""
         active = set()
         for d in dets:
+            if "cx" not in d or "cy" not in d:
+                b = d["bbox"]   # 检测源未给中心点时从框推导
+                d["cx"] = b[0] + b[2] / 2.0
+                d["cy"] = b[1] + b[3] / 2.0
+        for d in dets:
             best, best_score, best_dist = None, 1e9, 1e9
             for tid, t in self.tracks.items():
                 if tid in active:

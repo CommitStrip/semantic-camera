@@ -1,9 +1,13 @@
-"""monitor.py —— 单相机快慢双系统值守循环（T0 门控 → T1 检测 → 裁决 → 告警）。
+"""monitor.py —— 单相机快系统值守循环（T0 门控 → T1 检测 → 裁决 → 告警）。
 
 报警路径零慢层：本循环全程不碰 JEPA/VLM。
-按区域独立判定（SC-005 修复）；边沿触发锁存（SC-006 修复：不逐帧重复告警）。
+按区域独立判定与滞留计时；边沿触发锁存（同一驻留事件只报一次，
+离区自动复位）；轨迹消亡即清理滞留表与锁存（防长期值守慢泄漏）。
 """
 
+import time
+
+from .gate import MotionGate
 from .track import Tracker
 from .verdict import ZoneRuntime, rule_fires
 from .zones import Grid
@@ -43,17 +47,20 @@ class Monitor:
                 "cells": set(z.get("cells") or []),
                 "rules": z.get("rules") or [],
             })
-        self.gate = __import__("scam.gate", fromlist=["MotionGate"]).MotionGate()
+        self.gate = MotionGate()
         self.tracker = Tracker()
         self.zone_rt = ZoneRuntime()
         self.last_det = None
         self.seq = seq
         self.violations = 0
-        self._alarm_fired = set()   # (track_id, zone_id, rule_cls) 边沿锁存
+        self._alarm_fired = set()   # (track_id, zone_id, cls, template) 边沿锁存
+        self._occurrence = {}       # 同键第几次驻留事件（event_id 稳定键）
+        self._prev_live = set()     # 上一帧活跃轨迹 id（消亡检测）
 
     def step(self, frame_bgr, gray, now):
         """推进一帧；返回本步产生的告警列表。"""
-        gw, gh = self.GRAY_W, max(1, round(len(gray) / self.GRAY_W))
+        gw = self.GRAY_W
+        gh = max(1, round(len(gray) / gw))
         self.gate.detect(gray, gw, gh)
         interval = (self.MOTION_DET_INTERVAL if self.gate.last_ratio > 0
                     else self.PATROL_INTERVAL)
@@ -64,33 +71,50 @@ class Monitor:
             self.tracker.update(dets, now)
 
         alarms = []
+        live_ids = set()
         for t in self.tracker.tracks.values():
             if not t.get("confirmed"):
                 continue
-            cell = self.grid.cell_of(t["cx"], t["cy"])
+            live_ids.add(t["id"])
+            cx = t.get("cx", t["bbox"][0] + t["bbox"][2] / 2.0)
+            cy = t.get("cy", t["bbox"][1] + t["bbox"][3] / 2.0)
+            cell = self.grid.cell_of(cx, cy)
             for zone in self.zones:
-                if cell not in zone["cells"]:
-                    continue
-                dwell = self.zone_rt.update(t["id"], zone["id"], True, now)
-                for r in zone["rules"]:
-                    skey = (t["id"], zone["id"], r.get("cls", ""),
-                            r.get("template", "enter-dwell"))
-                    if skey in self._alarm_fired:
-                        continue
-                    if rule_fires(r, t["cls"], True, dwell):
-                        self._alarm_fired.add(skey)
-                        alarms.append(self._alarm(t, r, dwell, now,
-                                                  zone["id"], frame_bgr))
-                        break
-            if not any(cell in z["cells"] for z in self.zones):
-                for key in [k for k in self._alarm_fired if k[0] == t["id"]]:
-                    del self._alarm_fired[key]
-                self.zone_rt.update(t["id"], "z1", False, now)
+                zid = zone["id"]
+                if cell in zone["cells"]:
+                    dwell = self.zone_rt.update(t["id"], zid, True, now)
+                    for r in zone["rules"]:
+                        skey = self._skey(t, zid, r)
+                        if skey in self._alarm_fired:
+                            continue
+                        if rule_fires(r, t["cls"], True, dwell):
+                            self._alarm_fired.add(skey)
+                            alarms.append(self._alarm(t, r, dwell, now,
+                                                      zid, frame_bgr))
+                            break
+                else:
+                    # 离区：滞留表复位 + 锁存复位（再次进入视为新事件）
+                    self.zone_rt.leave(t["id"], zid)
+                    self._alarm_fired = {
+                        k for k in self._alarm_fired
+                        if not (k[0] == t["id"] and k[1] == zid)}
+
+        # 轨迹消亡：滞留表与锁存全量清理（track id 单调递增，不清理会慢泄漏）
+        for tid in self._prev_live - live_ids:
+            for zone in self.zones:
+                self.zone_rt.leave(tid, zone["id"])
+            self._alarm_fired = {k for k in self._alarm_fired if k[0] != tid}
+        self._prev_live = live_ids
 
         for a in alarms:
             for sink in self.sinks:
                 sink(a)
         return alarms
+
+    @staticmethod
+    def _skey(t, zone_id, rule):
+        return (t["id"], zone_id, rule.get("cls", ""),
+                rule.get("template", "enter-dwell"))
 
     def _alarm(self, t, rule, dwell, now, zone_id, frame_bgr=None):
         self.seq += 1
@@ -106,18 +130,26 @@ class Monitor:
             ok, buf = cv2.imencode(".jpg", thumb, [cv2.IMWRITE_JPEG_QUALITY, 70])
             if ok:
                 thumb_b64 = base64.b64encode(buf.tobytes()).decode()
+        skey = self._skey(t, zone_id, rule)
+        occ = self._occurrence.get(skey, 0) + 1
+        self._occurrence[skey] = occ
+        template = rule.get("template", "enter-dwell")
+        wall_ms = time.time() * 1000.0
         return {
-            "event_id": f"{self.camera_id}:alert:{t['id']}:{zone_id}:{int(now)}",
+            # 稳定键：不含毫秒时间戳——同一次驻留事件幂等（INSERT OR IGNORE 生效）；
+            # 驻留序号区分离区再入的新事件
+            "event_id": f"{self.camera_id}:alert:{t['id']}:{zone_id}:"
+                        f"{template}:{occ}",
             "camera": self.camera_id,
             "zone": zone_id,
-            "rule": rule.get("template", "enter-dwell"),
+            "rule": template,
             "cls": t["cls"],
             "conf": t["conf"],
             "t_source": now / 1000.0,
             "short_name": f"重点区域{rule.get('cls', '目标')}触发",
             "detail": (f"{rule.get('cls', '目标')}进入重点管理区域，"
                        f"滞留 {dwell:.0f} 秒触发规则"),
-            "rationale": f"模板 {rule.get('template', 'enter-dwell')} 命中",
+            "rationale": f"模板 {template} 命中",
             "thumbnail": thumb_b64,
-            "latency_ms": 0,
+            "latency_ms": round(max(0.0, wall_ms - now)),
         }

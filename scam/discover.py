@@ -9,9 +9,12 @@ L3 品牌 RTSP URL 模式穷举 + ffprobe 验证
 
 import argparse
 import ipaddress
+import re
 import socket
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import quote
 
 BRAND_PATTERNS = [
     "rtsp://{user}:{pass}@{ip}:554/Streaming/Channels/{ch}",       # Hikvision
@@ -19,6 +22,13 @@ BRAND_PATTERNS = [
     "rtsp://{user}:{pass}@{ip}:554/live/ch00_{sub}",               # 通用
     "rtsp://{user}:{pass}@{ip}:554/",                              # 兜底
 ]
+
+_MASK_RE = re.compile(r"(//[^:/@]+:)([^@]+)(@)")
+
+
+def mask_url(url):
+    """输出/日志用：密码段打码（凭证不入进程输出）。"""
+    return _MASK_RE.sub(r"\1***\3", url) if url else url
 
 ONVIF_PROBE = (
     '<?xml version="1.0" encoding="UTF-8"?>'
@@ -86,12 +96,17 @@ def subnet_hosts(range_str):
     return [str(h) for h in net.hosts()][:254]
 
 
-def scan_rtsp_ports(hosts, ports=(554, 8000), timeout=1):
-    """对主机列表探 RTSP 端口，返回开放的 (ip, port) 集合。"""
+def scan_rtsp_ports(hosts, ports=(554, 8000), timeout=1, workers=32):
+    """对主机列表并发探 RTSP 端口，返回开放的 (ip, port) 集合。
+
+    /24 全段串行最坏 ~8.5 分钟，线程池并发后压到秒级。
+    """
     open_ports = set()
-    for ip in hosts:
-        for port in ports:
-            if probe_port(ip, port, timeout):
+    targets = [(ip, port) for ip in hosts for port in ports]
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for (ip, port), ok in zip(targets, ex.map(
+                lambda t: probe_port(t[0], t[1], timeout), targets)):
+            if ok:
                 open_ports.add((ip, port))
     return open_ports
 
@@ -138,8 +153,9 @@ def discover(range_str=None, user="", password="", timeout=3):
         rtsp_ok = ip in rtsp_hosts
         url = None
         if user and password and rtsp_ok:
+            uq, pq = quote(user, safe=""), quote(password, safe="")
             for pat in BRAND_PATTERNS:
-                u = pat.format(user=user, password=password, ip=ip,
+                u = pat.format(user=uq, password=pq, ip=ip,
                                ch="101", sub="0")
                 if verify_rtsp(u):
                     url = u
@@ -150,6 +166,8 @@ def discover(range_str=None, user="", password="", timeout=3):
 
 
 if __name__ == "__main__":
+    from .platform import fix_console_encoding
+    fix_console_encoding()
     import argparse
     ap = argparse.ArgumentParser(description="局域网摄像头发现")
     ap.add_argument("--range", default=None, help="网段 CIDR（缺省自动检测）")
@@ -159,7 +177,7 @@ if __name__ == "__main__":
     args = ap.parse_args()
     results = discover(args.range, args.user, args.password, args.timeout)
     for r in results:
-        status = "✅ RTSP 可用" if r["rtsp_ok"] else "⚠️ 端口通但取流未验证"
-        print(f"  {r['ip']}  {status}  url={r.get('url') or '未验证'}")
+        status = "RTSP 可用" if r["rtsp_ok"] else "端口通（未验证取流）"
+        print(f"  {r['ip']}  {status}  url={mask_url(r.get('url')) or '未验证'}")
     if not results:
         print("未发现摄像头（检查网段/ONVIF 开启状态）")

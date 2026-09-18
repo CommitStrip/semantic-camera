@@ -2,7 +2,6 @@
 
 import json
 import os
-import sqlite3
 import time
 
 
@@ -31,11 +30,11 @@ class JsonlSink:
 
 
 class SqliteSink:
-    """写入 SQLite events 表（参数绑定，event_id 幂等）。"""
+    """写入 SQLite events 表（参数绑定，event_id 幂等；WAL 多线程共库）。"""
 
     def __init__(self, db_path):
-        self.conn = sqlite3.connect(db_path)
-        from .db import init_schema
+        from .db import connect, init_schema
+        self.conn = connect(db_path)
         init_schema(self.conn)
 
     def __call__(self, alarm):

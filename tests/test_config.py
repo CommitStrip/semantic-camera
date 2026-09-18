@@ -40,7 +40,7 @@ def test_empty_cameras_fails():
     (lambda v: v["cameras"][0]["detector"].__setitem__("engine", "magic"), "engine"),
     (lambda v: v["cameras"][0]["detector"].__setitem__("model", ""), "model"),
     (lambda v: v["cameras"][0]["detector"].__setitem__("classes", []), "classes"),
-    (lambda v: v["cameras"][0].__setitem__("conf", 1.2), "conf"),
+    (lambda v: v["cameras"][0]["detector"].__setitem__("conf", 1.2), "conf"),
     (lambda v: v["cameras"][0].__setitem__("grid", {"rows": 2, "cols": 22}), "grid"),
     (lambda v: v["cameras"][0]["zones"][0].__setitem__("cells", [999999]), "格子"),
     (lambda v: v["cameras"][0]["zones"][0]["rules"][0].__setitem__("dwell_s", -1), "dwell_s"),
