@@ -96,25 +96,33 @@ class NanoDet:
         top, left = (size - nh) // 2, (size - nw) // 2
         canvas[top:top + nh, left:left + nw] = cv2.resize(frame_bgr, (nw, nh))
         x = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-        return x.transpose(2, 0, 1)[np.newaxis]
+        return x.transpose(2, 0, 1)[np.newaxis], r, left, top
 
     def detect(self, frame_bgr):
-        """frame_bgr: cv2 帧；返回归一化 [{cls, conf, bbox:[x,y,w,h]}]。"""
+        """frame_bgr: cv2 帧；返回归一化 [{cls, conf, bbox:[x,y,w,h]}]。
+
+        _prep 做 letterbox（缩放+居中填充），此处逆变换还原原图坐标。
+        """
         import cv2
-        x = self._prep(frame_bgr)
+        x, ratio, pad_left, pad_top = self._prep(frame_bgr)
         out = self.sess.run(None, {"data": x})[0][0]
         num_anchors = out.shape[0]
         opts = {"conf": self.conf, "keep_indices": list(self.keep_indices),
                 "input_size": self.input_size, "strides": list(self.strides),
                 "reg_bins": self.reg_bins}
         dets = decode_nanodet(out.reshape(-1), num_anchors, self.num_classes, opts)
-        h, w = frame_bgr.shape[:2]
         results = []
         for d in dets:
             if d["conf"] < self.conf:
                 continue
-            x1, y1 = max(0.0, d["x1"] / w), max(0.0, d["y1"] / h)
-            x2, y2 = min(1.0, d["x2"] / w), min(1.0, d["y2"] / h)
+            # 逆 letterbox：减去 padding、除以缩放比 → 原图坐标
+            x1 = (d["x1"] - pad_left) / ratio
+            y1 = (d["y1"] - pad_top) / ratio
+            x2 = (d["x2"] - pad_left) / ratio
+            y2 = (d["y2"] - pad_top) / ratio
+            h, w = frame_bgr.shape[:2]
+            x1, y1 = max(0.0, x1 / w), max(0.0, y1 / h)
+            x2, y2 = min(1.0, x2 / w), min(1.0, y2 / h)
             results.append({"cls": self.classes[d["mcls"]] if d["mcls"] < len(self.classes)
                             else str(d["mcls"]),
                             "conf": round(d["conf"], 4),

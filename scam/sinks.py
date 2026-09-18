@@ -7,12 +7,15 @@ import time
 
 
 class BannerSink:
-    """控制台横幅（值守可见，即 print）。"""
+    """控制台横幅（值守可见，即 print；编码安全——Windows GBK 不崩）。"""
 
     def __call__(self, alarm):
         ts = time.strftime("%H:%M:%S")
-        print(f"\n🚨 [{ts}] {alarm['camera']} {alarm['short_name']} "
-              f"({alarm['zone']}, {alarm['rule']}) 延迟 {alarm['latency_ms']}ms\n")
+        try:
+            print(f"\n[ALARM] [{ts}] {alarm['camera']} {alarm['short_name']} "
+                  f"({alarm['zone']}) latency={alarm.get('latency_ms', '?')}ms")
+        except UnicodeEncodeError:
+            print(f"[ALARM] [{ts}] {alarm['camera']} alarm")
 
 
 class JsonlSink:
