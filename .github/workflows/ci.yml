@@ -19,3 +19,64 @@ jobs:
         run: pip install numpy opencv-python-headless pillow pytest
       - name: Run tests
         run: python -m pytest tests/ -v
+
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install numpy opencv-python-headless onnxruntime pillow pytest
+      - name: Run tests
+        run: python -m pytest tests/ -v
+      - name: Platform layer smoke (UTF-8 输出 + 数据目录)
+        shell: bash
+        run: |
+          python -c "
+          from scam.platform import fix_console_encoding, safe_print, app_data_dir, default_data_root
+          fix_console_encoding()
+          safe_print('中文/emoji 输出 OK')
+          assert default_data_root(), 'data root empty'
+          print('platform OK')
+          "
+      - name: NVR entry smoke (无相机配置也能起值守不早退)
+        shell: bash
+        run: |
+          cat > smoke-cameras.json <<'EOF'
+          {
+            "version": "0.3",
+            "cameras": [{"id": "ci-cam", "enabled": true, "source": "rtsp://127.0.0.1:9/x",
+              "detector": {"engine": "onnx", "model": "models/person-detector.onnx",
+                           "classes": ["person"], "conf": 0.4},
+              "zones": [{"id": "z1", "name": "z", "cells": [0, 1],
+                         "rules": [{"cls": "person", "events": ["enter"], "severity": "high"}]}]}]
+          }
+          EOF
+          python -c "
+          import subprocess, sys, time
+          p = subprocess.Popen([sys.executable, '-u', '-m', 'scam.nvr',
+                                '--config', 'smoke-cameras.json',
+                                '--db', 'smoke.db', '--no-workbench'],
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+          time.sleep(6)
+          assert p.poll() is None, 'nvr exited early with code %s' % p.returncode
+          p.terminate(); p.wait(timeout=15)
+          print('nvr smoke OK')
+          "
+      - name: Deploy script syntax (PowerShell 5.1 + 7 双解析)
+        shell: pwsh
+        run: |
+          $parseScript = Join-Path $env:RUNNER_TEMP 'parse-check.ps1'
+          @'
+          param($f)
+          $tokens = $null; $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile($f, [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Host $_.Message }; exit 1 }
+          Write-Host "parse OK: $f"
+          '@ | Set-Content -Path $parseScript
+          & powershell -NoProfile -ExecutionPolicy Bypass -File $parseScript "$PWD/deploy/install-win11.ps1"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File $parseScript "$PWD/deploy/install-win11.ps1"
+          if ($LASTEXITCODE -ne 0) { exit 1 }

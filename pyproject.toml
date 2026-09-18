@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "scam"
 version = "0.1.0"
-description = "语义摄像头 v2 —— Linux NVR 上的场所语义值守层（唯一上游：VUS）"
+description = "语义摄像头 v2 —— Linux NVR / Windows 11 上的场所语义值守层（唯一上游：VUS）"
 requires-python = ">=3.10"
 dependencies = [
     "numpy",
@@ -13,7 +13,7 @@ dependencies = [
 
 [project.optional-dependencies]
 detect = ["onnxruntime"]
-vision = ["opencv-python"]
+vision = ["opencv-python-headless", "pillow"]
 discover = ["wsdiscovery"]
 dev = ["pytest"]
 
