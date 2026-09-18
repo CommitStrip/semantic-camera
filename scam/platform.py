@@ -59,3 +59,11 @@ def app_data_dir(app_name="semantic-camera"):
         base = os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))
         return os.path.join(base, app_name)
     return os.path.join(os.path.expanduser("~"), ".local", "share", app_name)
+
+
+def default_data_root():
+    """数据根目录默认值：Windows 用 %LOCALAPPDATA%（仓库目录可能不可写）；
+    Linux 保持相对 cwd（systemd WorkingDirectory 控制落点，行为不变）。"""
+    if is_windows():
+        return app_data_dir()
+    return "."
