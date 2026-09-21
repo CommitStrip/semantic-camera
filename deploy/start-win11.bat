@@ -17,12 +17,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-if not exist "cameras.json" (
-    echo [错误] 缺少 cameras.json——请先运行 deploy\install-win11.ps1 生成模板
-    pause
-    exit /b 1
-)
-
-echo [启动] 语义摄像头 NVR 值守... 工作台地址以启动日志为准
-"%PY%" -m scam.nvr
+echo [启动] 语义摄像头 Win11 值守工作站...
+echo [提示] 首次启动会打开本机摄像头接入向导；配置保存在 %%LOCALAPPDATA%%\semantic-camera
+"%PY%" -m scam.win11
 pause

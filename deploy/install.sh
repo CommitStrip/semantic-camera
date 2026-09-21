@@ -18,7 +18,8 @@ fi
 source .venv/bin/activate
 pip install --quiet --upgrade pip
 pip install --quiet numpy opencv-python-headless onnxruntime pillow
-echo "[2/5] 依赖安装 ✓"
+pip install --quiet -e .
+echo "[2/5] 依赖安装（含项目本身） ✓"
 
 # 3. vus 接入（可选——无 vus 时快系统仍可运行）
 VUS_DIR="${VUS_DIR:-}"
@@ -68,30 +69,18 @@ if [ -n "$MODEL" ] && [ ! -f "$MODEL" ]; then
     echo "  模型缺失时相机会值守但不会产生检测告警。"
 fi
 
-# 5. systemd 服务
+# 5. systemd 服务（单一真值：unit 内容由 scam.linux_unit 渲染，此处不内嵌第二份逻辑）
 if [ -d /etc/systemd/system ]; then
-    cat > /tmp/scam-nvr.service << EOSVC
-[Unit]
-Description=语义摄像头 NVR 值守
-After=network.target
-
-[Service]
-Type=simple
-User=$USER
-WorkingDirectory=$(pwd)
-ExecStart=$(pwd)/.venv/bin/python -m scam.nvr
-Restart=always
-RestartSec=5
-Environment=PYTHONUNBUFFERED=1
-
-[Install]
-WantedBy=multi-user.target
-EOSVC
-    sudo cp /tmp/scam-nvr.service /etc/systemd/system/
+    # 无 sudo dry-run：直接跑下面第一行看渲染结果
+    python3 -m scam.linux_unit render \
+        --user "${SERVICE_USER:-$USER}" \
+        --workdir "$(pwd)" > /tmp/scam-nvr.service
+    echo "[5/5] unit 渲染完成（sudo 前可 cat /tmp/scam-nvr.service 复核）"
+    sudo cp /tmp/scam-nvr.service /etc/systemd/system/scam-nvr.service
     sudo systemctl daemon-reload
-    echo "[5/5] systemd 服务已注册（sudo systemctl enable --now scam-nvr 启动）"
+    echo "      systemd 服务已注册（sudo systemctl enable --now scam-nvr 启动）"
 else
-    echo "[5/5] 非 systemd 系统——请手动启动: python -m scam.nvr"
+    echo "[5/5] 非 systemd 系统——请手动启动: python -m scam.linux_nvr"
 fi
 
 echo ""

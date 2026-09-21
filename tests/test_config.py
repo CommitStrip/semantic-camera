@@ -65,3 +65,29 @@ def test_zone_without_cells_fails():
     v = valid_venue()
     v["cameras"][0]["zones"][0]["cells"] = []
     assert validate_venue(v), "空格子区域必须报错"
+
+
+@pytest.mark.parametrize("key,value", [
+    ("record_enabled", "yes"),
+    ("record_retention_days", -1),
+    ("record_retention_days", True),
+    ("record_cap_gb", 0),
+    ("record_cap_gb", False),
+    ("record_segment_seconds", 9),
+])
+def test_invalid_recording_settings_fail_closed(key, value):
+    venue = valid_venue()
+    venue["cameras"][0][key] = value
+    errors = validate_venue(venue)
+    assert any(key in error for error in errors)
+
+
+def test_valid_recording_settings_pass():
+    venue = valid_venue()
+    venue["cameras"][0].update({
+        "record_enabled": True,
+        "record_retention_days": 7,
+        "record_cap_gb": 25.5,
+        "record_segment_seconds": 600,
+    })
+    assert validate_venue(venue) == []

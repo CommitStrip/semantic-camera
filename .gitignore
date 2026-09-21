@@ -10,3 +10,21 @@ events.jsonl
 实施计划.md
 nul
 完善计划.md
+
+# Local-only project context notebooks (never publish to GitHub)
+AGENTS.md
+PROJECT_CONTEXT.md
+LINUX-CONTEXT.md
+WIN11-CONTEXT.md
+ZCODE-CONTEXT.md
+ZCODE-COORDINATION.md
+ZCODE-LINUX-CONTEXT.md
+ZCODE-WIN11-CONTEXT.md
+docs/context/
+tests/test_context_ledger.py
+tests/test_linux_context_ledger.py
+
+# 内部审查与工具本地目录（不入公开仓）
+审查*.md
+.codex/
+.pytest-*/

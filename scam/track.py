@@ -50,11 +50,19 @@ class Tracker:
                 dt = (now - t["last"]) / 1000.0
                 px = t["cx"] + t.get("vx", 0.0) * dt
                 py = t["cy"] + t.get("vy", 0.0) * dt
-                dist = ((px - d["cx"]) ** 2 + (py - d["cy"]) ** 2) ** 0.5
+                predicted_dist = (
+                    (px - d["cx"]) ** 2 + (py - d["cy"]) ** 2) ** 0.5
+                current_dist = (
+                    (t["cx"] - d["cx"]) ** 2 +
+                    (t["cy"] - d["cy"]) ** 2) ** 0.5
+                # 恒速预测在停顿或反向时会过冲；只要检测仍靠近上次真实位置，
+                # 就不能仅因预测点偏离而强制换身份。两条距离都超门限才新建。
+                dist = min(predicted_dist, current_dist)
                 if dist >= self.match_max_dist:
                     continue          # 中心距硬闸门
-                shift_x = px - t["cx"]
-                shift_y = py - t["cy"]
+                use_prediction = predicted_dist <= current_dist
+                shift_x = px - t["cx"] if use_prediction else 0.0
+                shift_y = py - t["cy"] if use_prediction else 0.0
                 pred = [t["bbox"][0] + shift_x, t["bbox"][1] + shift_y,
                         t["bbox"][2], t["bbox"][3]]
                 score = dist - _iou(pred, d["bbox"]) * 200

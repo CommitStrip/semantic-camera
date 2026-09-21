@@ -1,4 +1,7 @@
-# 语义摄像头 NVR 部署指南
+# 语义摄像头 Linux NVR 版部署指南
+
+本文件只描述 Linux NVR 版。Win11 值守工作站使用
+`deploy/install-win11.ps1` 和 `deploy/start-win11.bat`，两版不再共用启动入口。
 
 ## 前置条件
 
@@ -25,11 +28,24 @@ bash deploy/install.sh
 
 ## install.sh 做的事
 
-1. 创建 venv 并安装依赖（numpy/opencv-python/onnxruntime/pillow）
-2. 安装 vus（本地路径或 pip）
-3. 生成 cameras.json / venue.json 模板
-4. 注册 systemd 服务（scam-nvr.service）
-5. 输出工作台地址 http://<NVR-IP>:8600
+1. 创建 venv 并安装依赖（numpy/opencv-python/onnxruntime/pillow）+ 项目本身（`pip install -e .`）
+2. 安装 vus（可选，本地路径或 pip；缺席时快系统用 cv2 回退源照常值守）
+3. 生成 cameras.json 模板（唯一手工维护点）
+4. 检测模型存在性检查（缺失时大声提示：该相机只跑门控，不产生检测告警）
+5. systemd 服务注册——unit 内容由 `python3 -m scam.linux_unit render` 渲染
+   （单一真值源，含显式运行用户/绝对路径/Restart=always/RestartSec=5/
+   PYTHONUNBUFFERED=1/network-online 等待），本目录不放静态副本
+6. 输出工作台地址 http://<NVR-IP>:8600（默认仅回环，远程走 SSH 隧道）
+
+### 无 sudo 预览 unit（dry-run）
+
+```bash
+python3 -m scam.linux_unit render --user "$USER" --workdir "$(pwd)"
+```
+
+自定义服务运行用户：`SERVICE_USER=camsvc bash deploy/install.sh`。
+CI 对同一渲染结果执行 `bash -n` 与 `systemd-analyze verify`（tests/test_linux_unit.py
+断言必需键位；服务级行为冒烟见 tests/test_linux_service_smoke.py，仅 Linux 运行）。
 
 ## 首次使用流程
 

@@ -17,6 +17,11 @@ vision = ["opencv-python-headless", "pillow"]
 discover = ["wsdiscovery"]
 dev = ["pytest"]
 
+[project.scripts]
+scam-linux-nvr = "scam.linux_nvr:main"
+scam-win11 = "scam.win11:main"
+scam-win11-preflight = "scam.win11_acceptance:main"
+
 [tool.setuptools.packages.find]
 include = ["scam*"]
 

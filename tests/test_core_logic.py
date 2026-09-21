@@ -98,6 +98,20 @@ def test_tracker_cls_guard_and_distance_gate():
     assert len(tr.tracks) > before, "中心距超阈判新目标"
 
 
+def test_tracker_reversal_falls_back_to_last_observed_position():
+    """恒速预测过冲时，靠近上次真实位置的反向目标仍保持同一身份。"""
+    tr = Tracker()
+    tr.update([det(0.46, 0.46, 0.08, 0.20)], 0)
+    tr.update([det(0.26, 0.25, 0.08, 0.20)], 5000)
+    original_id = next(iter(tr.tracks))
+
+    detections = [det(0.46, 0.46, 0.08, 0.20)]
+    tr.update(detections, 10000)
+
+    assert detections[0]["trackId"] == original_id
+    assert len(tr.tracks) == 1
+
+
 # ==================== 报警判定（模板比对） ====================
 
 def test_rule_enter_dwell():

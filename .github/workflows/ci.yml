@@ -15,10 +15,25 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - name: Install dependencies
-        run: pip install numpy opencv-python-headless pillow pytest
-      - name: Run tests
+      - name: Install project itself (不把源码目录当可导入路径)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[detect,vision]" pytest
+      - name: Deploy script syntax (bash -n)
+        run: bash -n deploy/install.sh
+      - name: systemd unit 单一真值渲染 + systemd-analyze verify
+        run: |
+          python -m scam.linux_unit render \
+            --user "$USER" --workdir "$PWD" --python "$(command -v python3)" \
+            > /tmp/scam-nvr.service
+          cat /tmp/scam-nvr.service
+          systemd-analyze verify /tmp/scam-nvr.service
+      - name: Run tests (含 Linux 服务级 smoke)
         run: python -m pytest tests/ -v
+      - name: Linux NVR edition contract
+        run: |
+          python -m scam.linux_nvr --help
+          python -c "from scam.editions import LINUX_NVR; assert LINUX_NVR.key == 'linux-nvr'"
 
   test-windows:
     runs-on: windows-latest
@@ -27,9 +42,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install dependencies
-        run: pip install numpy opencv-python-headless onnxruntime pillow pytest
-      - name: Run tests
+      - name: Install project itself
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[detect,vision]" pytest
+      - name: Run tests (服务级 smoke 在 Windows 自动跳过)
         run: python -m pytest tests/ -v
       - name: Platform layer smoke (UTF-8 输出 + 数据目录)
         shell: bash
@@ -41,7 +58,7 @@ jobs:
           assert default_data_root(), 'data root empty'
           print('platform OK')
           "
-      - name: NVR entry smoke (无相机配置也能起值守不早退)
+      - name: Win11 entry smoke (无相机配置也能起值守不早退)
         shell: bash
         run: |
           cat > smoke-cameras.json <<'EOF'
@@ -56,14 +73,14 @@ jobs:
           EOF
           python -c "
           import subprocess, sys, time
-          p = subprocess.Popen([sys.executable, '-u', '-m', 'scam.nvr',
+          p = subprocess.Popen([sys.executable, '-u', '-m', 'scam.win11',
                                 '--config', 'smoke-cameras.json',
                                 '--db', 'smoke.db', '--no-workbench'],
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
           time.sleep(6)
           assert p.poll() is None, 'nvr exited early with code %s' % p.returncode
           p.terminate(); p.wait(timeout=15)
-          print('nvr smoke OK')
+          print('win11 smoke OK')
           "
       - name: Deploy script syntax (PowerShell 5.1 + 7 双解析)
         shell: pwsh

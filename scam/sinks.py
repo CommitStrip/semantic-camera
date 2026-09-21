@@ -30,12 +30,19 @@ class JsonlSink:
 
 
 class SqliteSink:
-    """写入 SQLite events 表（参数绑定，event_id 幂等；WAL 多线程共库）。"""
+    """SQLite 真值出口。
+
+    ``events`` 保留兼容告警流；对象、审查段和管理员语义事件分别写入三层
+    真值表。Monitor 通过可选方法调用生命周期能力，其他出口无需实现。
+    """
 
     def __init__(self, db_path):
         from .db import connect, init_schema
+        from .evidence import EvidenceStore
         self.conn = connect(db_path)
         init_schema(self.conn)
+        self.evidence = EvidenceStore(
+            os.path.join(os.path.dirname(os.path.abspath(db_path)), "evidence"))
 
     def __call__(self, alarm):
         self.conn.execute(
@@ -51,6 +58,80 @@ class SqliteSink:
              json.dumps(alarm, ensure_ascii=False)),
         )
         self.conn.commit()
+
+        # 只有管理员规则已命中的 alarm 才能成为 semantic_event；检测活动本身
+        # 只进入 tracked_objects/review_segments，不能在这里偷换成告警。
+        best_frame_path = None
+        if alarm.get("object_id"):
+            best_frame_path = self.evidence.link_object_frame_to_event(
+                self.conn, object_id=alarm["object_id"],
+                event_id=alarm["event_id"], camera=alarm["camera"])
+        from .db import open_semantic_event
+        open_semantic_event(
+            self.conn,
+            semantic_event_id=alarm["event_id"],
+            camera=alarm["camera"],
+            review_id=alarm.get("review_id"),
+            object_id=alarm.get("object_id"),
+            t_start=alarm.get("t_source", 0.0),
+            template=alarm.get("rule", "enter-dwell"),
+            zone_id=alarm.get("zone"),
+            severity=alarm.get("severity", "medium"),
+            cls=alarm.get("cls"),
+            conf=alarm.get("conf"),
+            short_name=alarm.get("short_name"),
+            detail=alarm.get("detail"),
+            rationale=alarm.get("rationale"),
+            evidence_state=("image_only" if best_frame_path
+                            else "metadata_only"),
+            best_frame_path=best_frame_path,
+            payload=alarm,
+        )
+
+    def observe_object(self, *, object_id, camera, t_start, t_last, cls,
+                       conf, zones, review_id, payload=None, frame_bgr=None,
+                       bbox=None):
+        from .db import open_tracked_object, update_tracked_object
+        open_tracked_object(
+            self.conn, object_id=object_id, camera=camera, t_start=t_start,
+            cls=cls, conf=conf, zones=zones, review_id=review_id,
+            payload=payload)
+        update_tracked_object(
+            self.conn, object_id, t_last=t_last, conf=conf, zones=zones,
+            review_id=review_id, payload=payload)
+        if frame_bgr is not None:
+            self.evidence.save_best_frame(
+                self.conn, object_id=object_id, camera=camera,
+                frame_bgr=frame_bgr, t_source=t_last, conf=conf, bbox=bbox)
+
+    def close_object(self, object_id, *, t_end, reason):
+        from .db import close_tracked_object
+        close_tracked_object(self.conn, object_id, t_end=t_end, reason=reason)
+
+    def open_review(self, *, review_id, camera, t_start, object_ids,
+                    payload=None):
+        from .db import open_review_segment
+        open_review_segment(
+            self.conn, review_id=review_id, camera=camera, t_start=t_start,
+            severity="detection", object_ids=object_ids, payload=payload)
+
+    def update_review(self, review_id, *, t_last, severity, object_ids,
+                      semantic_event_ids, payload=None):
+        from .db import update_review_segment
+        update_review_segment(
+            self.conn, review_id, t_last=t_last, severity=severity,
+            object_ids=object_ids, semantic_event_ids=semantic_event_ids,
+            payload=payload)
+
+    def close_review(self, review_id, *, t_end, reason):
+        from .db import close_review_segment
+        close_review_segment(self.conn, review_id, t_end=t_end, reason=reason)
+
+    def close_semantic_events(self, event_ids, *, t_end, reason):
+        from .db import close_semantic_event
+        for event_id in event_ids:
+            close_semantic_event(
+                self.conn, event_id, t_end=t_end, reason=reason)
 
 
 def build_sinks(paths):

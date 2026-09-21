@@ -1,15 +1,15 @@
-[Unit]
-Description=语义摄像头 NVR 语义值守
-After=network.target
-
-[Service]
-Type=simple
-User=%i
-WorkingDirectory=/opt/scam
-ExecStart=/opt/scam/.venv/bin/python -m scam.nvr
-Restart=always
-RestartSec=5
-Environment=PYTHONUNBUFFERED=1
-
-[Install]
-WantedBy=multi-user.target
+# 本文件已废弃为占位说明——systemd unit 的单一真值源是 scam.linux_unit 渲染器。
+#
+# 历史上这里放了一份静态 unit 模板（且 User=%i 为模板占位符，按非模板服务启动
+# 时用户为空），install.sh 又内嵌了第二份内容，形成双真值。现已统一：
+#
+#     python3 -m scam.linux_unit render \
+#         --user "${SERVICE_USER:-$USER}" --workdir "$(pwd)" > /tmp/scam-nvr.service
+#
+# unit 必含键位（受 tests/test_linux_unit.py 断言、CI systemd-analyze verify 复核）：
+#   User=<显式用户>（禁止 %i）/ WorkingDirectory=<绝对路径>
+#   ExecStart=<绝对 python> -m scam.linux_nvr
+#   Restart=always / RestartSec=5 / Environment=PYTHONUNBUFFERED=1
+#   Wants=network-online.target + After=network-online.target
+#
+# 任何 unit 字段改动只改 scam/linux_unit.py，不要在本目录重新引入静态副本。

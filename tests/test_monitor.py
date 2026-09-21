@@ -4,7 +4,8 @@ import numpy as np
 import pytest
 
 from scam.monitor import Monitor, to_gray
-from scam.sinks import JsonlSink
+from scam.db import connect
+from scam.sinks import JsonlSink, SqliteSink
 from scam.zones import Grid
 
 W, H = 640, 360
@@ -163,3 +164,101 @@ def test_multi_zone_isolation_and_dwell_reset():
     b_at = alarms[1]["t_source"] * 1000.0
     assert b_at >= 5500, (f"B 区滞留必须从进区重新计时"
                           f"（继承 A 区滞留会 4s 即报，实际 {b_at:.0f}ms）")
+
+
+def test_zone_update_applies_at_frame_boundary_and_closes_old_event():
+    class Sink(list):
+        def __init__(self):
+            super().__init__()
+            self.closed = []
+
+        def __call__(self, alarm):
+            self.append(alarm)
+
+        def close_semantic_events(self, event_ids, **fields):
+            self.closed.append((list(event_ids), fields))
+
+    det = FixedDet()
+    det.cx, det.cy = 0.50, 0.56
+    sink = Sink()
+    cfg = {"id": "front-door", "grid": {"rows": 18, "cols": 22},
+           "zones": [{"id": "old", "cells": [231],
+                      "rules": [{"cls": "person",
+                                 "template": "immediate"}]}]}
+    monitor = Monitor(cfg, detect_fn=det, sinks=[sink], run_id="zones")
+    monitor.MOTION_DET_INTERVAL = 1
+    monitor.PATROL_INTERVAL = 1
+    for now in range(0, 1000, 100):
+        f = frame_at(det.cx, det.cy, now)
+        monitor.step(f, to_gray(f, monitor.GRAY_W), now)
+        if sink:
+            break
+    assert sink and monitor.zones[0]["id"] == "old"
+
+    revision = monitor.request_zone_update([
+        {"id": "new", "cells": [0],
+         "rules": [{"cls": "person", "template": "immediate"}]}
+    ])
+    assert revision == 1
+    assert monitor.zones[0]["id"] == "old", "HTTP线程不得中途改写当前帧配置"
+    now += 100
+    f = frame_at(det.cx, det.cy, now)
+    monitor.step(f, to_gray(f, monitor.GRAY_W), now)
+    assert monitor.zones[0]["id"] == "new"
+    assert monitor.zone_revision == 1
+    assert sink.closed[0][1]["reason"] == "zone-reconfigured"
+    assert monitor.stats()["zone_update_pending"] is False
+
+
+def test_monitor_sqlite_lifecycle_creates_and_closes_three_truth_layers(
+        tmp_path, monkeypatch):
+    """默认快路径真实接线：检测对象→审查段→管理员语义事件→闭合。"""
+    import scam.track as track_module
+
+    monkeypatch.setattr(track_module, "CONFIRMED_MAX_AGE", 50)
+    db_path = str(tmp_path / "truth.db")
+    sink = SqliteSink(db_path)
+    detections_left = 2
+
+    def detect_twice(_frame):
+        nonlocal detections_left
+        if detections_left <= 0:
+            return []
+        detections_left -= 1
+        return [{"cls": "person", "conf": 0.9,
+                 "bbox": [0.45, 0.45, 0.10, 0.22],
+                 "cx": 0.50, "cy": 0.56}]
+
+    cfg = {"id": "front-door", "grid": {"rows": 18, "cols": 22},
+           "zones": [{"id": "z1", "cells": [231],
+                      "rules": [{"cls": "person",
+                                 "template": "immediate"}]}]}
+    monitor = Monitor(
+        cfg, detect_fn=detect_twice, sinks=[sink], run_id="test-run")
+    monitor.MOTION_DET_INTERVAL = 1
+    monitor.PATROL_INTERVAL = 1
+    monitor.REVIEW_IDLE_CUTOFF = 0.05
+
+    for now in (0, 100, 200, 300):
+        f = frame(now, present=now < 200)
+        monitor.step(f, to_gray(f, monitor.GRAY_W), now)
+
+    conn = connect(db_path)
+    obj = conn.execute("SELECT * FROM tracked_objects").fetchone()
+    review = conn.execute("SELECT * FROM review_segments").fetchone()
+    event = conn.execute("SELECT * FROM semantic_events").fetchone()
+    assets = conn.execute(
+        "SELECT owner_type,path,state FROM evidence_assets").fetchall()
+    conn.close()
+
+    assert obj["object_id"] == "front-door:test-run:track:1"
+    assert obj["t_end"] is not None and obj["end_reason"] == "track-lost"
+    assert review["severity"] == "alert"
+    assert review["t_end"] is not None and review["end_reason"] == "idle-timeout"
+    assert event["review_id"] == review["review_id"]
+    assert event["object_id"] == obj["object_id"]
+    assert event["state"] == "closed" and event["end_reason"] == "track-lost"
+    assert event["evidence_state"] == "image_only"
+    assert event["best_frame_path"] == obj["best_frame_path"]
+    assert {row["owner_type"] for row in assets} == {
+        "tracked_object", "semantic_event"}

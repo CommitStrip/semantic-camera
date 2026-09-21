@@ -59,6 +59,33 @@ def validate_venue(v):
         if conf is not None and not (isinstance(conf, (int, float)) and 0 < conf <= 1):
             errs.append(f"{cid}: detector.conf 必须在 (0,1]")
 
+        # 源角色（Z2）：source 为兼容真值（缺省同 URL 双角色），可按角色覆盖；
+        # 录像默认关闭——配置缺省绝不开启 24/7 录像。
+        kind = cam.get("source_kind")
+        if kind is not None and kind not in ("rtsp", "file", "camera"):
+            errs.append(f"{cid}: source_kind 必须为 rtsp|file|camera")
+        for role_key in ("detect_source", "record_source"):
+            val = cam.get(role_key)
+            if val is not None and (not isinstance(val, str) or not val):
+                errs.append(f"{cid}: {role_key} 必须为非空字符串")
+        record_enabled = cam.get("record_enabled")
+        if record_enabled is not None and not isinstance(record_enabled, bool):
+            errs.append(f"{cid}: record_enabled 必须为布尔（缺省 False，不默认录像）")
+        for key, default_min, allow_zero in (
+                ("record_retention_days", 0, True),
+                ("record_cap_gb", 0, False),
+                ("record_segment_seconds", 10, False)):
+            value = cam.get(key)
+            if value is None:
+                continue
+            valid_number = isinstance(value, (int, float)) and \
+                not isinstance(value, bool)
+            valid_range = value >= default_min if allow_zero \
+                else value > default_min
+            if not (valid_number and valid_range):
+                relation = "≥0" if allow_zero else f">{default_min}"
+                errs.append(f"{cid}: {key} 必须为 {relation} 的数值")
+
         grid = cam.get("grid")
         if grid is not None and not isinstance(grid, dict):
             errs.append(f"{cid}: grid 必须为对象")

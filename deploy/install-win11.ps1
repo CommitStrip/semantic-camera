@@ -63,44 +63,24 @@ Invoke-Native $venvPython -m pip install numpy opencv-python-headless onnxruntim
 
 # [4/6] 导入自检——缺任何依赖都在这里失败，绝不带病声明成功
 Write-Host '[4/6] 导入自检 …'
-Invoke-Native $venvPython -c "import numpy, cv2, onnxruntime, PIL; import scam.monitor, scam.server, scam.source; print('imports OK')"
+Invoke-Native $venvPython -c "import numpy, cv2, onnxruntime, PIL; import scam.monitor, scam.server, scam.source, scam.win11_setup; print('imports OK')"
 
-# [5/6] cameras.json 模板（已存在则跳过，绝不覆盖用户配置）
-$cfgPath = Join-Path $repoRoot 'cameras.json'
+# [5/6] 每用户数据目录。摄像头配置不再写仓库，也不要求安装目录可写；
+# 首次双击启动时由仅回环浏览器向导原子创建 cameras.json，已有配置绝不覆盖。
+$dataRoot = Join-Path $env:LOCALAPPDATA 'semantic-camera'
+New-Item -ItemType Directory -Force -Path $dataRoot | Out-Null
+$cfgPath = Join-Path $dataRoot 'cameras.json'
 if (Test-Path $cfgPath) {
-    Write-Host '[5/6] cameras.json 已存在（跳过）'
+    Write-Host "[5/6] 已有用户配置（保留）: $cfgPath"
 } else {
-    $template = @{
-        version = '0.3'
-        venue   = 'my-venue'
-        cameras = @(
-            @{
-                id       = 'front-door'
-                enabled  = $true
-                source   = 'rtsp://admin:PASSWORD@192.168.1.64:554/Streaming/Channels/102'
-                detector = @{
-                    engine  = 'onnx'
-                    model   = 'models/person-detector.onnx'
-                    classes = @('person')
-                    conf    = 0.4
-                }
-                grid     = @{ rows = 18; cols = 22 }
-                zones    = @()
-                schedule = @(@{ from = '00:00'; to = '23:59' })
-            }
-        )
-    }
-    $json = ($template | ConvertTo-Json -Depth 6)
-    # UTF-8 无 BOM（Python json 兼容；读侧 nvr 已用 utf-8-sig 双保险）
-    [System.IO.File]::WriteAllText($cfgPath, $json, (New-Object System.Text.UTF8Encoding($false)))
-    Write-Host '[5/6] cameras.json 模板已生成——请修改 RTSP 地址与密码'
+    Write-Host '[5/6] 用户数据目录已就绪——首次启动将打开本机摄像头接入向导'
 }
 
 # 检测模型放置点（缺模型时 nvr 明确提示"只跑门控"，不静默零检测）
 $modelsDir = Join-Path $repoRoot 'models'
 New-Item -ItemType Directory -Force -Path $modelsDir | Out-Null
 if (-not (Test-Path (Join-Path $modelsDir 'person-detector.onnx'))) {
-    Write-Host '      [提示] models/person-detector.onnx 不存在——放置 NanoDet 人物检测模型后重启生效；期间相机只跑帧差门控（无检测告警）'
+    Write-Host '      [提示] 尚无人物检测模型——首次向导会要求提供ONNX路径，或明确选择“仅预览不告警”'
 }
 
 # [6/6] 生成 start-nvr.bat（固定 venv 解释器 + 依赖导入检查 + 依赖缺失给出明确指引）
@@ -118,8 +98,9 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-echo [启动] 语义摄像头 NVR 值守... 工作台地址以启动日志为准
-`"%PY%`" -m scam.nvr
+echo [启动] 语义摄像头 Win11 值守工作站...
+echo [提示] 首次启动会打开本机摄像头接入向导；配置保存在 %%LOCALAPPDATA%%\semantic-camera
+`"%PY%`" -m scam.win11
 pause
 "@
 [System.IO.File]::WriteAllText($batPath, $bat, (New-Object System.Text.UTF8Encoding($false)))
@@ -127,6 +108,8 @@ Write-Host '[6/6] start-nvr.bat 已生成'
 
 Write-Host ''
 Write-Host '部署完成。' -ForegroundColor Green
-Write-Host '  启动值守: 双击 start-nvr.bat（或 .venv\Scripts\python -m scam.nvr）'
+Write-Host '  启动值守: 双击 start-nvr.bat（或 .venv\Scripts\python -m scam.win11）'
+Write-Host '  首次启动: 浏览器会打开仅本机可见的摄像头接入向导，保存后自动进入值守'
 Write-Host '  工作台:   值守启动成功后日志会打印 http://127.0.0.1:8600（默认仅本机访问）'
-Write-Host '  数据目录: 值守数据库默认在 %LOCALAPPDATA%\semantic-camera\storage\'
+Write-Host '  配置目录: %LOCALAPPDATA%\semantic-camera\cameras.json'
+Write-Host '  数据目录: %LOCALAPPDATA%\semantic-camera\storage\'
