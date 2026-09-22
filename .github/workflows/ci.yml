@@ -34,6 +34,13 @@ jobs:
         run: |
           python -m scam.linux_nvr --help
           python -c "from scam.editions import LINUX_NVR; assert LINUX_NVR.key == 'linux-nvr'"
+      - name: Release packaging gate (敏感面双闸 + 可复现打包自检)
+        run: |
+          python scripts/package_release.py --dry-run > /tmp/pack-list.txt
+          wc -l /tmp/pack-list.txt
+          python scripts/package_release.py --output /tmp/scam-ci.tar.gz
+          python scripts/package_release.py --check /tmp/scam-ci.tar.gz
+          python scripts/fetch_models.py --list
 
   test-windows:
     runs-on: windows-latest
@@ -48,6 +55,12 @@ jobs:
           pip install -e ".[detect,vision]" pytest
       - name: Run tests (服务级 smoke 在 Windows 自动跳过)
         run: python -m pytest tests/ -v
+      - name: Release packaging dry-run (敏感面闸跨平台)
+        shell: bash
+        run: |
+          python scripts/package_release.py --dry-run | tail -1
+          python scripts/package_release.py --output "$RUNNER_TEMP/scam-ci.tar.gz"
+          python scripts/package_release.py --check "$RUNNER_TEMP/scam-ci.tar.gz"
       - name: Platform layer smoke (UTF-8 输出 + 数据目录)
         shell: bash
         run: |

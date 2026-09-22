@@ -13,6 +13,8 @@ import re
 import sqlite3
 import threading
 import time
+import uuid
+from datetime import datetime, timezone
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import quote, unquote
 
@@ -58,6 +60,15 @@ gap:8px;align-items:center;border:1px solid var(--line);border-radius:10px;paddi
 .zone-item.active{border-color:var(--accent);background:#15362f}.pill{border-radius:999px;padding:2px 8px;
 background:#223047;color:var(--muted);font-size:12px}.message{min-height:22px;margin-top:10px;color:var(--muted)}
 .message.ok{color:var(--accent)}.message.error{color:var(--danger)}
+.camera-line{margin-top:4px;font-size:13px}.camera-line.online{color:var(--accent)}
+.camera-line.degraded{color:var(--warn)}.camera-line.stopped{color:var(--muted)}
+.guard-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
+.guard-card{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#0b0e14}
+.guard-card img{width:100%;aspect-ratio:16/9;object-fit:cover;display:block;background:#000}
+.guard-head{display:flex;align-items:center;gap:6px;padding:6px 8px;font-size:13px}
+.guard-dot{width:8px;height:8px;border-radius:50%;background:var(--muted);flex:none}
+.guard-dot.online{background:var(--accent)}.guard-dot.degraded{background:var(--warn)}
+.guard-badge{margin-left:auto;background:var(--warn);color:#111;border-radius:9px;padding:1px 7px;font-size:12px}
 .environment-gate{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;
 padding:24px;background:#07101acc;backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)}
 .environment-gate[hidden]{display:none}.environment-panel{width:min(620px,100%);padding:28px;
@@ -69,8 +80,12 @@ border-bottom:1px solid var(--line);text-align:left}a{color:#77d9ff}
 </style></head><body>
 <header><div><div class="eyebrow">Windows 11 local-first</div><h1>语义摄像头 · 工作台</h1>
 <div class="subtle">先由管理员定义区域和规则，再进入值守。模型建议不会自动成为告警。</div></div>
-<div id="health" class="status">本机工作台</div></header>
+<div class="status"><div id="health">本机工作台</div>
+<div id="camera-status">正在读取相机状态…</div></div></header>
 <main class="layout"><section>
+<div class="card" id="guard-grid-card"><div class="toolbar"><div><h2>值守网格</h2>
+<div class="subtle">每相机一张卡：状态 · 最新画面（3s 刷新）· 最近告警计数。</div></div></div>
+<div id="guard-grid" class="guard-grid" aria-label="多相机值守网格">正在读取相机…</div></div>
 <div class="card" id="zone-editor"><div class="toolbar"><div><h2>区域与规则</h2>
 <div class="subtle">点击或拖动网格刷选；绿色格子仅在点击“保存并应用”后生效。</div></div>
 <label>相机<select id="camera-select" aria-label="选择相机"></select></label></div>
@@ -114,7 +129,8 @@ summary:document.getElementById('grid-summary'),runtime:document.getElementById(
 list:document.getElementById('zone-list'),message:document.getElementById('zone-message'),
 gate:document.getElementById('environment-gate'),envMessage:document.getElementById('environment-message'),
 envResult:document.getElementById('environment-result'),envSummary:document.getElementById('environment-summary'),
-envSuggestions:document.getElementById('environment-suggestions'),analyze:document.getElementById('analyze-environment')};
+envSuggestions:document.getElementById('environment-suggestions'),analyze:document.getElementById('analyze-environment'),
+cameraStatus:document.getElementById('camera-status')};
 let zoneConfig=null,zones=[],active=-1,selected=new Set(),painting=false,paintValue=true,frameTimer=null;
 function message(text,kind=''){ui.message.textContent=text;ui.message.className='message '+kind}
 function activeZone(){return active>=0?zones[active]:null}
@@ -188,19 +204,162 @@ message('正在保存…');const response=await fetch('/api/zones/save',{method:
 const result=await response.json();if(!response.ok){message(result.error||'保存失败','error');return}zones=result.zones;active=zones.findIndex(item=>item.id===zone.id);renderZones();fillForm(activeZone());
 ui.runtime.textContent=result.runtime==='queued'?'配置等待下一帧生效':'保存后需重启应用';
 message(result.runtime==='queued'?'已保存，等待下一视频帧原子应用。':'已保存，重启值守后应用。','ok')};
+const knownStates=['connecting','online','degraded','stopped'];
+let guardEvents={};
+async function refreshHealth(){try{const response=await fetch('/api/health');const data=await response.json();
+const cameras=(data.runtime&&data.runtime.cameras)||[];ui.cameraStatus.replaceChildren();
+const grid=document.getElementById('guard-grid');if(grid&&!grid.dataset.built){grid.dataset.built='1';cameras.forEach(camera=>{const card=document.createElement('div');card.className='guard-card';card.dataset.camera=camera.camera||'';
+const head=document.createElement('div');head.className='guard-head';const dot=document.createElement('span');dot.className='guard-dot';head.appendChild(dot);
+const name=document.createElement('span');name.textContent=camera.camera||'相机';head.appendChild(name);
+const badge=document.createElement('span');badge.className='guard-badge';badge.style.display='none';head.appendChild(badge);card.appendChild(head);
+const img=document.createElement('img');img.alt='画面';img.loading='lazy';card.appendChild(img);grid.appendChild(card)})}
+Array.from(grid?grid.children:[]).forEach(card=>{const id=card.dataset.camera;const state=(cameras.find(c=>c.camera===id)||{}).state||'';
+const dot=card.querySelector('.guard-dot');dot.className='guard-dot'+(knownStates.includes(state)?' '+state:'');
+const badge=card.querySelector('.guard-badge');const n=guardEvents[id]||0;badge.style.display=n?'':'none';badge.textContent=n+' 告警';
+const img=card.querySelector('img');img.src='/api/frame/'+encodeURIComponent(id)+'?t='+Date.now()});
+if(!cameras.length){const line=document.createElement('div');line.className='camera-line';
+line.textContent='尚未接线相机状态，请在值守运行时查看。';ui.cameraStatus.appendChild(line)}else{
+cameras.forEach(camera=>{const line=document.createElement('div');
+const state=knownStates.includes(camera.state)?camera.state:'';
+line.className='camera-line'+(state?' '+state:'');
+line.textContent=(camera.camera||'相机')+'：'+(camera.hint||'状态未知');ui.cameraStatus.appendChild(line)})}}
+catch(error){ui.cameraStatus.textContent='相机状态暂不可用：请确认值守工作台仍在运行。'}}
 async function refreshLists(){try{let response=await fetch('/api/review');let data=await response.json();
 const review=document.querySelector('#review tbody');review.replaceChildren();(data.segments||[]).forEach(s=>{const row=review.insertRow();
 row.insertCell().textContent=new Date(s.t_start*1000).toLocaleString();row.insertCell().textContent=s.camera||'';
 row.insertCell().textContent=s.severity||'';row.insertCell().textContent=(s.object_ids||[]).length;row.insertCell().textContent=s.reviewed?'已读':'待审'});
 response=await fetch('/api/events');data=await response.json();const events=document.querySelector('#events tbody');events.replaceChildren();
-(data.events||[]).forEach(e=>{const row=events.insertRow();row.insertCell().textContent=e.t_start?new Date(e.t_start*1000).toLocaleString():'';
+guardEvents={};(data.events||[]).forEach(e=>{if(e.camera)guardEvents[e.camera]=(guardEvents[e.camera]||0)+1;
+const row=events.insertRow();row.insertCell().textContent=e.t_start?new Date(e.t_start*1000).toLocaleString():'';
 let link=document.createElement('a');link.textContent=e.short_name||e.event_id;link.href='/api/events/'+encodeURIComponent(e.event_id);link.target='_blank';row.insertCell().appendChild(link);
 row.insertCell().textContent=e.detail||'';let cell=row.insertCell();if(e.best_frame_asset_id){link=document.createElement('a');link.textContent='最佳帧';link.href='/api/evidence/'+encodeURIComponent(e.best_frame_asset_id);link.target='_blank';cell.appendChild(link)}
-cell=row.insertCell();if(e.clip_asset_id){link=document.createElement('a');link.textContent='录像';link.href='/api/recordings/'+encodeURIComponent(e.clip_asset_id);link.target='_blank';cell.appendChild(link)}});
+cell=row.insertCell();if(e.clip_asset_id){link=document.createElement('a');link.textContent='录像';link.href='/api/recordings/'+encodeURIComponent(e.clip_asset_id);link.target='_blank';cell.appendChild(link)}
+cell=row.insertCell();const fb=document.createElement('button');fb.textContent='误报';fb.onclick=async()=>{try{const r=await fetch('/api/patterns/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({event_id:e.event_id,misreport:true})});fb.textContent=r.ok?'已标记':'无档案';fb.disabled=true}catch(err){fb.textContent='失败'}};cell.appendChild(fb)});
 response=await fetch('/api/patterns');data=await response.json();document.getElementById('patterns').textContent=(data.patterns||[]).map(p=>p.name).join('、')||'暂无已学习模式';
 }catch(error){document.getElementById('health').textContent='工作台数据暂不可用'}}
 window.addEventListener('resize',alignGrid);loadCameras().catch(()=>message('相机配置读取失败','error'));refreshLists();setInterval(refreshLists,3000);
+refreshHealth();setInterval(refreshHealth,5000);
 </script></body></html>'''
+
+
+# 逐相机运行状态与检测能力：固定词表，值守线程写入、工作台读取。
+RUNTIME_STATES = ("connecting", "online", "degraded", "stopped")
+CAPABILITY_STATES = ("alerting", "monitor_only", "detector_unavailable")
+
+# 固定 issue code → 固定中文动作。工作台故障只走这一条出口：不回显 source、
+# RTSP 凭据、模型绝对路径或原始异常正文（异常正文可能夹带 URL 与磁盘布局）。
+ISSUE_ACTIONS = {
+    "source_open_failed": "检查相机电源、网线与地址后等待自动重连",
+    "source_read_failed": "检查网络与相机供电；持续失败请重启相机",
+    "detector_missing": "把检测模型放到配置路径后重启值守",
+    "detector_load_failed": "确认模型文件完整且 onnxruntime 可用后重启值守",
+    "workbench_port_in_use": "关闭占用该端口的程序，或用 --port 改用其它端口",
+}
+
+_STATE_HINTS = {
+    "connecting": "连接中：正在建立视频源连接",
+    "online": "在线",
+    "degraded": "断流：视频源未能打开或读取失败",
+    "stopped": "已停止：值守线程已退出",
+}
+_CAPABILITY_HINTS = {
+    "alerting": "检测告警已启用",
+    "monitor_only": "仅预览：管理员未启用检测器",
+    "detector_unavailable": "检测不可用：模型缺失或加载失败",
+}
+
+
+def issue(code):
+    """固定 issue code → 去凭据的结构化 issue；未知 code 绝不回显原文。"""
+    action = ISSUE_ACTIONS.get(code)
+    if action is None:
+        return None
+    return {"code": code, "action": action}
+
+
+def _hint(state, capability, problem):
+    """一句简短可操作中文提示：状态 + 能力，有故障时以动作收尾。"""
+    if state == "stopped":
+        return _STATE_HINTS["stopped"]
+    if problem is not None:
+        return f"{_STATE_HINTS[state]}；{problem['action']}"
+    return f"{_STATE_HINTS[state]}；{_CAPABILITY_HINTS[capability]}"
+
+
+class CameraRuntimeRegistry:
+    """逐相机运行/能力状态的线程安全真值（工作台健康提示的唯一来源）。
+
+    所有已配置相机在构造时即登记为 ``connecting``；检测能力默认取最小能力
+    ``monitor_only``——注册表自身绝不推断 ``alerting``，只有值守线程按配置与
+    加载结果写入。快照只含固定状态、固定 issue code 与固定中文动作。
+    """
+
+    def __init__(self, camera_ids):
+        ids = [str(camera_id) for camera_id in camera_ids]
+        if len(ids) != len(set(ids)):
+            raise ValueError("camera ids must be unique")
+        self._lock = threading.Lock()
+        self._order = sorted(ids)
+        self._cameras = {
+            camera_id: {"camera": camera_id, "state": "connecting",
+                        "capability": "monitor_only", "issue": None,
+                        "detector_issue": None}
+            for camera_id in ids}
+
+    def _write(self, camera_id, **fields):
+        with self._lock:
+            try:
+                entry = self._cameras[str(camera_id)]
+            except KeyError as exc:
+                raise KeyError(f"unknown camera: {camera_id}") from exc
+            entry.update(fields)
+
+    def _set_state(self, camera_id, state, problem):
+        if state not in RUNTIME_STATES:
+            raise ValueError(f"unknown runtime state: {state!r}")
+        self._write(camera_id, state=state, issue=problem)
+
+    def starting(self, camera_id):
+        """值守线程已开始建立视频源连接。"""
+        self._set_state(camera_id, "connecting", None)
+
+    def online(self, camera_id):
+        """视频源已打开且帧可读；清除源侧 issue（读失败恢复也走这里）。"""
+        self._set_state(camera_id, "online", None)
+
+    def degraded(self, camera_id, code):
+        """源打开或读取失败：进入 degraded 并挂固定 issue。"""
+        problem = issue(code)
+        if problem is None:
+            raise ValueError(f"unknown issue code: {code!r}")
+        self._set_state(camera_id, "degraded", problem)
+
+    def detector(self, camera_id, capability, code=None):
+        """按配置或加载结果改写检测能力；``code`` 仅在不可用时给出。"""
+        if capability not in CAPABILITY_STATES:
+            raise ValueError(f"unknown capability: {capability!r}")
+        self._write(camera_id, capability=capability,
+                    detector_issue=issue(code))
+
+    def stopped(self, camera_id):
+        """值守线程已退出：源侧故障随之消失，检测配置事实保留。"""
+        self._set_state(camera_id, "stopped", None)
+
+    def snapshot(self):
+        """API 就绪快照：逐相机状态与固定中文提示，不含任何凭据或路径。"""
+        with self._lock:
+            cameras = []
+            for camera_id in self._order:
+                entry = self._cameras[camera_id]
+                problem = entry["issue"] or entry["detector_issue"]
+                cameras.append({
+                    "camera": entry["camera"],
+                    "state": entry["state"],
+                    "capability": entry["capability"],
+                    "issue": dict(problem) if problem is not None else None,
+                    "hint": _hint(entry["state"], entry["capability"], problem),
+                })
+        return {"cameras": cameras, "count": len(cameras)}
 
 
 class WorkbenchState:
@@ -214,6 +373,12 @@ class WorkbenchState:
         self.monitors = {}
         self.recorders = None      # RecordingManager（Z3，未启用时 None）
         self.recording = None      # RecordingStore（Z3，未启用时 None）
+        # CameraRuntimeRegistry（值守接线后设置）；未接线时不伪造相机状态。
+        self.runtime = None
+        # 运行实例身份：每次构造唯一，供 R3 重启验收区分“同一份配置的不同进程
+        # 实例”。只含随机标识与 UTC 启动时间——绝不含主机名、路径、PID 或凭据。
+        self.runtime_instance_id = uuid.uuid4().hex
+        self.started_at = datetime.now(timezone.utc).isoformat()
         # 默认本地优先。构造 provider 不会发起模型调用；只有管理员点击识别才会调用。
         self.environment_provider = (environment_provider
                                      if environment_provider is not None
@@ -558,6 +723,26 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                          if self.server.state.recorders is not None else [])
             payload = {"cameras": cams, "count": len(cams),
                        "recording": recording}
+            # 值守接线后才附加逐相机运行/能力状态；未接线时保持既有形状，
+            # 快照异常结构化降级，绝不让 health 端点 500。
+            runtime = getattr(self.server.state, "runtime", None)
+            if runtime is not None:
+                try:
+                    payload["runtime"] = runtime.snapshot()
+                except Exception as exc:
+                    payload["runtime"] = {
+                        "state": "unavailable", "error": type(exc).__name__}
+                # 运行实例身份只在值守已接线时声明：未接线路径（既有 Linux
+                # 兼容形状）顶层键集一字不动。值只含随机标识与 UTC 时间。
+                instance_id = getattr(
+                    self.server.state, "runtime_instance_id", None)
+                started_at = getattr(self.server.state, "started_at", None)
+                if isinstance(instance_id, str) and instance_id \
+                        and isinstance(started_at, str) and started_at:
+                    payload["runtime_instance"] = {
+                        "runtime_instance_id": instance_id,
+                        "started_at": started_at,
+                    }
             # Linux L3：入口传入 state.health 时才附加 watchdog/资源快照；
             # 采样失败结构化降级，绝不让 health 端点 500 或阻断其他线程。
             health = getattr(self.server.state, "health", None)
@@ -572,6 +757,23 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                     payload["resources"] = health.resources.sample()
                 except Exception as exc:
                     payload["resources"] = {
+                        "state": "unavailable", "error": type(exc).__name__}
+            # S2 慢系统：入口传入 state.slow_worker 时披露水位/计数/最近错误；
+            # 快照异常结构化降级，绝不让 health 端点 500 或拖慢快路径。
+            slow = getattr(self.server.state, "slow_worker", None)
+            if slow is not None:
+                try:
+                    payload["slow"] = slow.snapshot()
+                except Exception as exc:
+                    payload["slow"] = {
+                        "state": "unavailable", "error": type(exc).__name__}
+            # 通知出口（可选）：入口配置了 notify 段才披露；快照异常降级。
+            notify_hub = getattr(self.server.state, "notify_hub", None)
+            if notify_hub is not None:
+                try:
+                    payload["notify"] = notify_hub.snapshot()
+                except Exception as exc:
+                    payload["notify"] = {
                         "state": "unavailable", "error": type(exc).__name__}
             self._json(payload)
             return
@@ -751,6 +953,69 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                 self._json({"error": "review segment not found"}, 404)
                 return
             self._json({"ok": True})
+            return
+        if path == "/api/patterns/feedback":
+            # S3 金标反馈：事件→模式（或直给 pattern_id）→ human-verified/
+            # 误报降级；只动模式档案，绝不触碰管理员规则告警真值。
+            from .slow_core import SlowCore
+            pattern_id = body.get("pattern_id") or ""
+            event_id = body.get("event_id") or ""
+            misreport = bool(body.get("misreport", False))
+            name = body.get("name")
+            detail = body.get("detail")
+            if (not isinstance(pattern_id, str) or
+                    ("/" in pattern_id if pattern_id else False)) or \
+                    (not isinstance(event_id, str) or "/" in event_id) or \
+                    (not pattern_id and not event_id):
+                self._json({"error": "pattern_id or event_id required"},
+                           400)
+                return
+            if name is not None and (not isinstance(name, str)
+                                     or not 0 < len(name) <= 16):
+                self._json({"error": "name must be 1..16 chars"}, 400)
+                return
+            conn = self.server.state._conn()
+            camera = None
+            pid = pattern_id
+            if event_id:
+                if not isinstance(event_id, str) or "/" in event_id:
+                    conn.close()
+                    self._json({"error": "invalid event_id"}, 400)
+                    return
+                core = SlowCore(conn, camera="")   # camera 仅作占位
+                pid, camera = core.pattern_of_event(event_id)
+                if pid is None:
+                    conn.close()
+                    self._json({"error": "no slow profile for event"}, 404)
+                    return
+            if camera is None:
+                # 直给 pattern_id：从持久化 row_id（pat-<camera>-<N>）精确
+                # 反解相机——两侧各取数字尾段全等，杜绝 pat-3 误配 pat-13。
+                want_tail = str(pid).rsplit("-", 1)[-1]
+                for row in conn.execute(
+                        "SELECT pattern_id, camera FROM patterns").fetchall():
+                    rid_text = str(row["pattern_id"])
+                    if rid_text.startswith("pat-") and \
+                            rid_text.rsplit("-", 1)[-1] == want_tail:
+                        camera = row["camera"]
+                        break
+            if camera is None:
+                conn.close()
+                self._json({"error": "pattern not found"}, 404)
+                return
+            try:
+                core = SlowCore(conn, camera=camera)
+                summary = core.confirm_pattern(
+                    pid, name=name, detail=detail, misreport=misreport)
+            except ValueError as e:
+                conn.close()
+                self._json({"error": str(e)}, 400)
+                return
+            conn.close()
+            if summary is None:
+                self._json({"error": "pattern not found"}, 404)
+                return
+            self._json({"ok": True, "pattern": summary})
             return
         self.send_error(404)
 

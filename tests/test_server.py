@@ -6,6 +6,9 @@
 import io
 import hashlib
 import json
+import os
+import re
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import numpy as np
@@ -13,7 +16,8 @@ import pytest
 
 from scam.db import (connect, init_schema, insert_event, open_review_segment,
                      open_semantic_event, open_tracked_object)
-from scam.server import WorkbenchHandler, WorkbenchState
+from scam.server import (CameraRuntimeRegistry, WorkbenchHandler,
+                         WorkbenchState)
 from scam.zones import Grid
 
 
@@ -470,6 +474,199 @@ def test_indexed_path_traversal_is_never_read(state, tmp_path):
     assert st == 422 and body["state"] == "corrupt"
 
 
+# ---------- ZW-004：相机运行/能力状态与可操作故障提示 ----------
+
+def test_health_without_runtime_keeps_legacy_shape(state):
+    """未接线值守时 /api/health 形状不变（Linux 兼容与无 registry 语义）。"""
+    st, body = _get(state, "/api/health")
+    assert st == 200
+    assert set(body) == {"cameras", "count", "recording"}
+    # 运行实例身份只在值守接线后声明：未接线路径的顶层键集一字不动。
+    assert "runtime_instance" not in body
+
+
+def test_health_runtime_exposes_lifecycle_and_recovery(state):
+    """运行状态必须走真实生命周期，并在读失败恢复后清空 issue。"""
+    registry = CameraRuntimeRegistry(["front-door"])
+    state.runtime = registry
+
+    def camera():
+        st, body = _get(state, "/api/health")
+        assert st == 200
+        # 既有字段不回归：无在线相机时基线形状不变
+        assert body["cameras"] == [] and body["recording"] == []
+        assert body["runtime"]["count"] == 1
+        return body["runtime"]["cameras"][0]
+
+    initial = camera()
+    assert (initial["state"], initial["capability"]) == \
+        ("connecting", "monitor_only")
+    assert initial["issue"] is None
+
+    registry.online("front-door")
+    registry.detector("front-door", "alerting")
+    cam = camera()
+    assert cam["state"] == "online" and cam["capability"] == "alerting"
+    assert cam["issue"] is None
+
+    registry.degraded("front-door", "source_read_failed")
+    cam = camera()
+    assert cam["state"] == "degraded"
+    assert cam["issue"]["code"] == "source_read_failed"
+    assert cam["issue"]["action"] in cam["hint"], "提示必须带可操作中文动作"
+
+    registry.online("front-door")            # 读失败后恢复
+    cam = camera()
+    assert cam["state"] == "online" and cam["issue"] is None
+
+    registry.stopped("front-door")
+    cam = camera()
+    assert cam["state"] == "stopped"
+    assert cam["capability"] == "alerting", "停止不得改写检测能力"
+
+
+def test_health_runtime_separates_monitor_only_from_detector_unavailable(state):
+    """管理员放弃检测与检测不可用必须可区分，且各自给出下一步动作。"""
+    registry = CameraRuntimeRegistry(["yard"])
+    state.runtime = registry
+    registry.online("yard")
+
+    st, body = _get(state, "/api/health")
+    cam = body["runtime"]["cameras"][0]
+    assert cam["capability"] == "monitor_only" and cam["issue"] is None
+    assert "仅预览" in cam["hint"]
+
+    registry.detector("yard", "detector_unavailable", "detector_missing")
+    st, body = _get(state, "/api/health")
+    cam = body["runtime"]["cameras"][0]
+    assert cam["capability"] == "detector_unavailable"
+    assert cam["issue"] == {"code": "detector_missing",
+                            "action": "把检测模型放到配置路径后重启值守"}
+    assert "仅预览" not in cam["hint"]
+
+
+def test_health_runtime_never_echoes_paths_credentials_or_exception_text(state):
+    """健康出口只给固定状态与固定 code：路径、凭据与异常正文一个都不许出现。"""
+    registry = CameraRuntimeRegistry(["front-door"])
+    state.runtime = registry
+    registry.degraded("front-door", "source_open_failed")
+    registry.detector("front-door", "detector_unavailable",
+                      "detector_load_failed")
+
+    st, body = _get(state, "/api/health")
+    cam = body["runtime"]["cameras"][0]
+    # 源侧故障优先；检测不可用仍结构化保留，源恢复后浮出
+    assert cam["state"] == "degraded"
+    assert cam["issue"]["code"] == "source_open_failed"
+    assert cam["capability"] == "detector_unavailable"
+
+    registry.online("front-door")
+    st, body = _get(state, "/api/health")
+    cam = body["runtime"]["cameras"][0]
+    assert cam["state"] == "online"
+    assert cam["issue"]["code"] == "detector_load_failed"
+
+    serialized = json.dumps(body, ensure_ascii=False)
+    for leaked in ("rtsp://", "admin:secret", "camera/live", ".onnx",
+                   "C:\\", "Traceback", "Errno", "RuntimeError"):
+        assert leaked not in serialized, f"健康出口泄露了 {leaked}"
+
+
+def test_health_runtime_snapshot_failure_degrades_honestly(state):
+    """状态快照异常必须结构化降级，端点和既有字段都不受影响。"""
+    def _boom():
+        raise RuntimeError("registry exploded")
+
+    state.runtime = SimpleNamespace(snapshot=_boom)
+
+    st, body = _get(state, "/api/health")
+
+    assert st == 200
+    assert body["runtime"] == {"state": "unavailable", "error": "RuntimeError"}
+    assert body["cameras"] == [] and body["recording"] == []
+    # 实例身份来自 WorkbenchState 而非注册表：快照降级不影响身份声明。
+    assert set(body["runtime_instance"]) == {"runtime_instance_id",
+                                             "started_at"}
+
+
+# ---------- ZW-006：运行实例身份（R3 重启验收的唯一进程标识） ----------
+
+def test_health_runtime_instance_is_unique_per_state_and_credential_free(state):
+    """每次 WorkbenchState 构造唯一，且只含随机标识与 UTC 时间。"""
+    state.runtime = CameraRuntimeRegistry(["front-door"])
+
+    st, body = _get(state, "/api/health")
+
+    assert st == 200
+    # 既有字段逐条不回归（无在线相机时的基线形状）
+    assert body["cameras"] == [] and body["count"] == 0
+    assert body["recording"] == [] and body["runtime"]["count"] == 1
+    instance = body["runtime_instance"]
+    assert set(instance) == {"runtime_instance_id", "started_at"}
+    assert re.fullmatch(r"[0-9a-f]{32}", instance["runtime_instance_id"]), \
+        "实例标识必须是随机十六进制，不得夹带主机名、路径、PID 或凭据"
+    started = datetime.fromisoformat(instance["started_at"])
+    assert started.utcoffset() == timedelta(0), "启动时间必须是 UTC"
+
+    # 另一次构造必须是另一个实例——重启验收全靠这个差异
+    other = WorkbenchState(state.db_path)
+    other.runtime = CameraRuntimeRegistry(["front-door"])
+    st, body = _get(other, "/api/health")
+    assert body["runtime_instance"]["runtime_instance_id"] != \
+        instance["runtime_instance_id"]
+    assert state.runtime_instance_id == instance["runtime_instance_id"]
+    assert state.started_at == instance["started_at"]
+
+
+def test_health_runtime_instance_never_echoes_host_paths_pid_or_credentials(
+        state):
+    """身份出口只给随机标识与时间：任何路径、凭据、异常正文都不许出现。"""
+    state.runtime = CameraRuntimeRegistry(["front-door"])
+    st, body = _get(state, "/api/health")
+    serialized = json.dumps(body, ensure_ascii=False)
+    for leaked in ("rtsp://", "admin:secret", "camera/live", ".onnx", "C:\\",
+                   "Traceback", os.sep + "Users", "localhost"):
+        assert leaked not in serialized, f"健康出口泄露了 {leaked}"
+    for text in (body["runtime_instance"]["runtime_instance_id"],
+                 body["runtime_instance"]["started_at"]):
+        assert not re.search(r"[A-Za-z]:[\\/]", text)
+
+
+def test_health_runtime_instance_absent_when_state_cannot_declare_it(state):
+    """无法声明身份时如实不声明：绝不临时编造一个实例标识。"""
+    del state.runtime_instance_id
+    state.runtime = CameraRuntimeRegistry(["front-door"])
+
+    st, body = _get(state, "/api/health")
+
+    assert st == 200
+    assert "runtime_instance" not in body
+    assert body["runtime"]["count"] == 1
+
+
+def test_runtime_registry_rejects_unknown_camera_and_vocabulary():
+    registry = CameraRuntimeRegistry(["front"])
+    with pytest.raises(KeyError):
+        registry.online("missing")
+    with pytest.raises(ValueError):
+        registry.degraded("front", "not-a-real-code")
+    with pytest.raises(ValueError):
+        registry.detector("front", "detector_ok")
+    with pytest.raises(ValueError):
+        CameraRuntimeRegistry(["front", "front"])
+
+
+def test_index_polls_health_and_renders_actionable_camera_hints(state):
+    """页面必须周期读取健康状态，并渲染服务端给出的可操作中文提示。"""
+    handler = _get_handler(state, "/")
+    html = handler.wfile.getvalue().decode("utf-8")
+
+    assert handler.status == 200
+    for marker in ('id="camera-status"', "'/api/health'", "refreshHealth",
+                   "setInterval(refreshHealth,5000)", "camera.hint"):
+        assert marker in html, f"页面缺少相机状态接线: {marker}"
+
+
 def test_non_jpeg_asset_is_not_served_or_reclassified(state):
     conn = state._conn()
     conn.execute(
@@ -490,3 +687,18 @@ def test_non_jpeg_asset_is_not_served_or_reclassified(state):
         "SELECT state FROM evidence_assets WHERE asset_id='clip-1'"
     ).fetchone()[0] == "available"
     conn.close()
+
+
+def test_index_renders_multi_camera_guard_grid_contract(state):
+    """值守页多相机网格：卡片容器、状态点、快照刷新与告警徽章的静态契约。"""
+    handler = _get_handler(state, "/")
+    html = handler.wfile.getvalue().decode("utf-8")
+
+    assert handler.status == 200
+    for marker in (
+            'id="guard-grid"', 'guard-card', 'guard-dot',
+            'guard-badge', "class=\"guard-grid\"",
+            "/api/frame/'+encodeURIComponent(id)", 'guardEvents'):
+        assert marker in html, marker
+    # 告警计数来自语义事件表（前端聚合），不得引入新的后端面
+    assert "guardEvents[e.camera]" in html

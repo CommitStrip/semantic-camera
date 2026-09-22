@@ -28,3 +28,5 @@ tests/test_linux_context_ledger.py
 审查*.md
 .codex/
 .pytest-*/
+.test-tmp-*/
+方案-*.md

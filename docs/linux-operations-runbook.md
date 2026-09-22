@@ -72,7 +72,7 @@ python -m scam.linux_backup verify --bundle-dir <上一步的输出目录>
 python -m scam.linux_upgrade_contract prepare \
     --current-release-dir /opt/scam/releases/0.3.0 \
     --candidate-release-dir /opt/scam/releases/0.4.0 \
-    --backup-bundle-dir /var/backups/scam/state-20260921T010000Z \
+    --backup-bundle /var/backups/scam/state-20260921T010000Z \
     --output-dir /opt/scam/upgrades/20260921T011000Z
 
 # 只读复核合同、两棵发布树与已绑定状态包
@@ -84,6 +84,14 @@ python -m scam.linux_upgrade_contract verify \
   且**只含发布内容**——合同会对树内**每一个**文件求 SHA-256，不会静默忽略
   任何文件，因此不要把 `.venv`、日志、录像或备份包放进发布树。
 - 合同目录固定只含 `contract.json`；已存在的输出目录一律拒绝且内容不变。
+- CLI 拼写是**冻结**的：绑定状态包的选项只接受 `--backup-bundle`（`prepare` 与
+  `verify` 均已关闭 argparse 的选项缩写）；给该选项名增删字符、写后缀或缩写都
+  会被 argparse 以非零退出码直接拒绝，因此请照抄本节命令，不要自行改写选项名。
+- `prepare` 四个路径参数在 `--help` 里的占位符同样**冻结为 `DIR`**：
+  `--current-release-dir DIR`、`--candidate-release-dir DIR`、
+  `--backup-bundle DIR`、`--output-dir DIR`。help 不会显示由选项名派生的
+  `CURRENT_RELEASE_DIR` / `CANDIDATE_RELEASE_DIR` / `OUTPUT_DIR` 别名，
+  本节命令与 `--help` 输出因此逐词一致。
 - 合同会绑定状态包的 `bundle_valid=true`、manifest SHA-256 与
   database/config 内容摘要；**没有通过 O 模块只读校验的状态包就不可能生成
   可验证合同**。

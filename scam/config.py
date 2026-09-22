@@ -85,6 +85,11 @@ def validate_venue(v):
             if not (valid_number and valid_range):
                 relation = "≥0" if allow_zero else f">{default_min}"
                 errs.append(f"{cid}: {key} 必须为 {relation} 的数值")
+        # V-JEPA 段嵌入模型（可选）：字符串路径；缺席=纯结构匹配（零成本降级）
+        embed_model = cam.get("slow_embed_model")
+        if embed_model is not None and (not isinstance(embed_model, str)
+                                        or not embed_model):
+            errs.append(f"{cid}: slow_embed_model 必须为非空字符串（可选）")
 
         grid = cam.get("grid")
         if grid is not None and not isinstance(grid, dict):
@@ -141,6 +146,39 @@ def validate_venue(v):
                 errs.append(f"{cid}: schedule 必须为 HH:MM 格式")
                 break
 
+    errs.extend(_validate_notify(v))
+    return errs
+
+
+def _validate_notify(v):
+    """通知出口配置（可选顶层 notify 段）——fail-closed 校验。"""
+    errs = []
+    notify = v.get("notify")
+    if notify is None:
+        return errs
+    if not isinstance(notify, dict):
+        return ["notify 必须为对象"]
+    mqtt = notify.get("mqtt")
+    if mqtt is not None:
+        if not isinstance(mqtt, dict) or not mqtt.get("host") or \
+                not isinstance(mqtt.get("host"), str):
+            errs.append("notify.mqtt 必须为对象且 host 为非空字符串")
+        else:
+            port = mqtt.get("port", 1883)
+            if not (isinstance(port, int) and not isinstance(port, bool)
+                    and 1 <= port <= 65535):
+                errs.append("notify.mqtt.port 必须为 1..65535 整数")
+            for key in ("topic_prefix", "user", "pass"):
+                val = mqtt.get(key)
+                if val is not None and not isinstance(val, str):
+                    errs.append(f"notify.mqtt.{key} 必须为字符串")
+    webhook = notify.get("webhook")
+    if webhook is not None:
+        if not isinstance(webhook, dict) or \
+                not isinstance(webhook.get("url"), str) or \
+                not webhook["url"].lower().startswith(
+                    ("http://", "https://")):
+            errs.append("notify.webhook 必须为对象且 url 为 http(s) 字符串")
     return errs
 
 

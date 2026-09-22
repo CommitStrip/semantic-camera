@@ -4,8 +4,13 @@ One CLI with two subcommands over one immutable contract directory that
 holds exactly one entry, ``contract.json``::
 
     prepare --current-release-dir DIR --candidate-release-dir DIR
-            --backup-bundle-dir DIR --output-dir DIR
+            --backup-bundle DIR --output-dir DIR
     verify  --contract-dir DIR
+
+The option that binds the state bundle is spelled exactly
+``--backup-bundle``, the frozen LC-041 spelling; argparse's option
+abbreviation stays off, so neither a longer variant nor an abbreviated
+one (``--backup``, ``--backup-bundle-d``) is ever accepted.
 
 ``prepare`` only *plans and records* one upgrade transaction.  It reads
 the two release trees and one state bundle, then creates the contract
@@ -1176,21 +1181,31 @@ def verify_contract(contract_dir):
 
 
 def main(argv=None):
+    # 冻结 CLI 拼写：选项缩写一律关闭，杜绝靠前缀猜出 --backup-bundle 的近似拼写。
     parser = argparse.ArgumentParser(
+        allow_abbrev=False,
         description="Linux L4 升级/回滚事务合同：prepare 只读规划并原子排他生成合同，"
                     "verify 只读复核合同与两棵树/备份包的一致性"
                     "（零网络/零子进程/零服务控制/零发布切换；不代表任何门禁通过）")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     prepare_parser = subparsers.add_parser(
-        "prepare", help="只读规划升级事务并原子排他创建合同目录（只含 contract.json）")
-    prepare_parser.add_argument("--current-release-dir", required=True)
-    prepare_parser.add_argument("--candidate-release-dir", required=True)
-    prepare_parser.add_argument("--backup-bundle-dir", required=True)
-    prepare_parser.add_argument("--output-dir", required=True)
+        "prepare", allow_abbrev=False,
+        help="只读规划升级事务并原子排他创建合同目录（只含 contract.json）")
+    # LC-041 冻结 prepare 的四个路径占位符：help/usage 一律显示 DIR，不暴露
+    # 由选项名派生的 CURRENT_RELEASE_DIR/CANDIDATE_RELEASE_DIR/OUTPUT_DIR 别名。
+    prepare_parser.add_argument("--current-release-dir", required=True,
+                                metavar="DIR")
+    prepare_parser.add_argument("--candidate-release-dir", required=True,
+                                metavar="DIR")
+    # LC-041 冻结拼写 --backup-bundle；dest 保留内部变量名 backup_bundle_dir。
+    prepare_parser.add_argument("--backup-bundle", dest="backup_bundle_dir",
+                                required=True, metavar="DIR")
+    prepare_parser.add_argument("--output-dir", required=True, metavar="DIR")
 
     verify_parser = subparsers.add_parser(
-        "verify", help="只读复核合同、两个发布树与已绑定状态包")
+        "verify", allow_abbrev=False,
+        help="只读复核合同、两个发布树与已绑定状态包")
     verify_parser.add_argument("--contract-dir", required=True)
 
     args = parser.parse_args(argv)

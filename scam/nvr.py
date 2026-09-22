@@ -9,6 +9,7 @@
 """
 
 import argparse
+import errno
 import json
 import os
 import shutil
@@ -23,7 +24,8 @@ from .monitor import Monitor, to_gray
 from .editions import get_edition
 from .health import HealthRegistry
 from .platform import fix_console_encoding
-from .server import WorkbenchServer, WorkbenchState
+from .server import (ISSUE_ACTIONS, CameraRuntimeRegistry, WorkbenchServer,
+                     WorkbenchState)
 from .sinks import build_sinks
 from .source import CameraSource
 
@@ -69,23 +71,42 @@ def _recover_event_truth(conn, *, now=None, stale_after_s=30.0):
     return counts
 
 
-def _make_detector(det_cfg):
-    """构建 NanoDet；模型缺失/加载失败时返回 None 并大声告警（绝不静默零检测）。"""
+def _detector_plan(det_cfg):
+    """只按配置判定检测能力（不加载模型）：返回 (能力, 固定issue code)。
+
+    仅预览是管理员明确选择；配置了 ONNX 却缺模型，才算检测不可用。
+    """
     if det_cfg.get("engine") != "onnx" or not det_cfg.get("model"):
-        return None
-    from .detect import NanoDet
+        return "monitor_only", None
+    if not os.path.isfile(det_cfg["model"]):
+        return "detector_unavailable", "detector_missing"
+    # 模型在位只代表"可加载"，真实加载结果由 _make_detector 覆盖。
+    return "alerting", None
+
+
+def _make_detector(det_cfg):
+    """构建 NanoDet；返回 (检测器或None, 能力状态, 固定issue code)。
+
+    模型缺失/加载失败绝不静默零检测：如实进入 detector_unavailable。
+    """
+    capability, det_issue = _detector_plan(det_cfg)
+    if capability != "alerting":
+        if det_issue == "detector_missing":
+            print(f"[警告] 检测模型不存在: {det_cfg['model']}"
+                  f"（该相机只跑门控，不会产生检测告警；放置模型后重启）")
+        return None, capability, det_issue
     model = det_cfg["model"]
-    if not os.path.isfile(model):
-        print(f"[警告] 检测模型不存在: {model}"
-              f"（该相机只跑门控，不会产生检测告警；放置模型后重启）")
-        return None
     try:
-        return NanoDet(model, det_cfg.get("classes", ["person"]),
-                       conf=det_cfg.get("conf", 0.4))
+        # 导入也放进 try：onnxruntime/依赖缺失同样是"检测不可用"，
+        # 绝不能让异常逃逸后留下一个声称 alerting 的假状态。
+        from .detect import NanoDet
+        return (NanoDet(model, det_cfg.get("classes", ["person"]),
+                        conf=det_cfg.get("conf", 0.4)),
+                "alerting", None)
     except Exception as e:
         print(f"[警告] 检测模型加载失败: {model}（{e}；"
               f"该相机只跑门控，不会产生检测告警）")
-        return None
+        return None, "detector_unavailable", "detector_load_failed"
 
 
 def _run_camera(cam_cfg, zones, db_path, stop_event, state, watchdog=None):
@@ -93,8 +114,21 @@ def _run_camera(cam_cfg, zones, db_path, stop_event, state, watchdog=None):
 
     值守消费 detect 角色（source_kind 决定源类型；detect_source 可覆盖 source）；
     record 角色与录像接线属 L2（Z3），配置缺省不开录像。
+    运行/能力状态只写固定状态与固定issue code——source、凭据、模型路径与异常
+    正文都不进工作台。
     """
     camera_id = cam_cfg["id"]
+    runtime = getattr(state, "runtime", None)
+    det_cfg = cam_cfg.get("detector") or {}
+    # 先按配置判定检测能力：源没打开时也要让管理员看到真实能力与下一步动作。
+    # 但“模型在位”只代表可加载：NanoDet 真实构造成功前不得预判 alerting，否则
+    # 加载窗口里工作台会显示“检测告警已启用”（C-052）。缺失/加载失败的固定结果
+    # 仍按配置如实上报。
+    if runtime is not None:
+        capability, det_issue = _detector_plan(det_cfg)
+        declared = "monitor_only" if capability == "alerting" else capability
+        runtime.detector(camera_id, declared, det_issue)
+        runtime.starting(camera_id)
     source_kind = cam_cfg.get("source_kind", "rtsp")
     detect_url = cam_cfg.get("detect_source") or cam_cfg["source"]
     source = CameraSource(camera_id, detect_url, source_kind=source_kind)
@@ -105,24 +139,35 @@ def _run_camera(cam_cfg, zones, db_path, stop_event, state, watchdog=None):
         had_open_failure = True
         if watchdog is not None:
             watchdog.failure("open", "source open failed")
+        if runtime is not None:
+            runtime.degraded(camera_id, "source_open_failed")
         print(f"[NVR] {camera_id} 源打开失败，5s 后重试")
         stop_event.wait(5.0)
     if stop_event.is_set():
         source.close()
         if watchdog is not None:
             watchdog.stopped()
+        if runtime is not None:
+            runtime.stopped(camera_id)
         return
 
     if watchdog is not None:
         watchdog.opened(reconnect=had_open_failure)
 
     try:
-        det = _make_detector(cam_cfg.get("detector") or {})
+        det, capability, det_issue = _make_detector(det_cfg)
+        if runtime is not None:
+            runtime.detector(camera_id, capability, det_issue)
         monitor = Monitor({**cam_cfg, "zones": zones},
                           detect_fn=(det.detect if det else (lambda f: [])),
                           sinks=build_sinks({"sqlite": db_path}))
         if state is not None:
             state.monitors[camera_id] = monitor
+        # 首次 online 必须推迟到检测器加载与 Monitor 构造都成功之后：源 open()
+        # 成功只证明视频源可达，模型在位但仍在加载的窗口里工作台要保持保守的
+        # connecting，不能提前宣称“在线+检测告警已启用”。
+        if runtime is not None:
+            runtime.online(camera_id)
 
         print(f"[NVR] {camera_id} 值守启动"
               + ("" if det else "（无检测器：只跑门控，不产生检测告警）"))
@@ -133,16 +178,22 @@ def _run_camera(cam_cfg, zones, db_path, stop_event, state, watchdog=None):
                 recovering = True
                 if watchdog is not None:
                     watchdog.failure("read", "source read failed")
+                if runtime is not None:
+                    runtime.degraded(camera_id, "source_read_failed")
                 stop_event.wait(0.5)
                 continue
             # 真实源时间戳贯穿：仅当源显式证明 source_capture 才采用采集时间；
             # host_receive 含解码等待、unknown 无法溯源——都不能冒充采集时刻
             # （L4 验收口径），此时退回墙钟处理时间。
             kind = (source.stats or {}).get("timestamp_kind")
-            if watchdog is not None:
-                if recovering:
+            if recovering:
+                # 恢复与看门狗无关：无 watchdog 时也必须把状态收回 online。
+                if watchdog is not None:
                     watchdog.opened(reconnect=True)
-                    recovering = False
+                if runtime is not None:
+                    runtime.online(camera_id)
+                recovering = False
+            if watchdog is not None:
                 watchdog.frame(source_ts=ts, timestamp_kind=kind)
             now = (ts * 1000.0) if (ts and kind == "source_capture") \
                 else time.time() * 1000.0
@@ -154,9 +205,30 @@ def _run_camera(cam_cfg, zones, db_path, stop_event, state, watchdog=None):
         source.close()
         if watchdog is not None:
             watchdog.stopped()
+        if runtime is not None:
+            runtime.stopped(camera_id)
         if state is not None:
             state.monitors.pop(camera_id, None)
         print(f"[NVR] {camera_id} 值守结束")
+
+
+# 固定中文绑定失败原因；原始异常正文（可能夹带主机与磁盘细节）不外露。
+_BIND_REASONS = {
+    errno.EADDRINUSE: "端口已被其它程序占用",
+    errno.EACCES: "端口被系统保留或权限不足",
+    errno.EADDRNOTAVAIL: "监听地址在本机不可用",
+    10048: "端口已被其它程序占用",   # Windows WSAEADDRINUSE 的原始码
+}
+
+
+def _bind_failure_reason(exc):
+    """把绑定失败翻成固定中文原因；未知码只给通用原因。"""
+    for code in (getattr(exc, "errno", None),
+                 getattr(exc, "winerror", None)):
+        reason = _BIND_REASONS.get(code)
+        if reason is not None:
+            return reason
+    return "无法绑定工作台监听地址"
 
 
 def main(argv=None, *, edition=None):
@@ -174,6 +246,8 @@ def main(argv=None, *, edition=None):
                     help="工作台监听地址（默认仅本机；远程走 SSH 隧道/反向代理）")
     ap.add_argument("--port", type=int, default=product.default_port)
     ap.add_argument("--no-workbench", action="store_true")
+    ap.add_argument("--no-slow", action="store_true",
+                    help="停用慢系统后台 worker（快路径告警不受影响）")
     args = ap.parse_args(argv)
 
     if not os.path.isfile(args.config):
@@ -208,13 +282,24 @@ def main(argv=None, *, edition=None):
                     for c in cams}
     conn.close()
 
+    # 逐相机运行/能力状态的唯一真值：相机线程写，工作台读。
+    runtime = CameraRuntimeRegistry([c["id"] for c in cams])
     state = None
     server = None
     if not args.no_workbench:
         state = WorkbenchState(args.db)
+        state.runtime = runtime
         try:
             server = WorkbenchServer(state, host=args.host, port=args.port)
         except OSError as e:
+            if product.key == "win11":
+                # Win11门禁：没有工作台就看不到相机状态与下一步动作，值守会
+                # 变成不可观测的盲跑——给出固定中文原因后中止启动。
+                print(f"[NVR] 工作台启动失败：{args.host}:{args.port} "
+                      f"{_bind_failure_reason(e)}")
+                print(f"[NVR] {ISSUE_ACTIONS['workbench_port_in_use']}")
+                print("[NVR] 已中止启动，未启动任何相机线程")
+                return 1
             print(f"[NVR] 工作台启动失败（{e}）——值守继续，无工作台")
             server = None
             state = None
@@ -283,6 +368,49 @@ def main(argv=None, *, edition=None):
     if record_cams and recording_store is not None and ffmpeg_path:
         threading.Thread(target=_export_loop, daemon=True).start()
 
+    # S2 慢系统有界后台接线（Linux 主链）：独立线程消费闭合审查段（S1 核心）；
+    # 快路径永不等待，worker 故障只降级慢结果并在 /api/health slow 段可见。
+    # provider 暂缺省 None：重复段纯结构匹配零 VLM，新异段 pending_naming
+    # 诚实降级（真实 VLM 通道由后续批次按配置显式接入）。
+    slow_worker = None
+    if product.key == "linux-nvr" and not args.no_slow:
+        from .slow_worker import SlowWorker
+        # V-JEPA 段嵌入（可选）：任一相机显式配置 slow_embed_model 且文件在
+        # 位才构建；缺失/加载失败大声降级为纯结构匹配（零成本，不阻断）。
+        embedder = None
+        embed_model = next(
+            (c.get("slow_embed_model") for c in cams
+             if c.get("slow_embed_model")), None)
+        if embed_model:
+            if os.path.isfile(embed_model):
+                try:
+                    from .embed import JepaEmbedder
+                    embedder = JepaEmbedder(embed_model)
+                    print(f"[NVR] 慢系统段嵌入已启用（{embed_model}）")
+                except Exception as e:
+                    print(f"[警告] 段嵌入模型加载失败（降级纯结构匹配）：{e}")
+            else:
+                print(f"[警告] 段嵌入模型不存在: {embed_model}"
+                      f"（降级纯结构匹配；放置模型后重启）")
+        slow_worker = SlowWorker(args.db, [c["id"] for c in cams],
+                                 stop_event=stop_event, embedder=embedder)
+        slow_worker.start()
+        if state is not None:
+            state.slow_worker = slow_worker
+        print("[NVR] 慢系统 worker 已启动（30s 轮询；--no-slow 可停用）")
+
+    # 通知出口（可选顶层 notify 段）：MQTT + webhook；未配置=线程不启动
+    # 零开销；出口失败只计数降级（/api/health notify 段），绝不阻断告警。
+    notify_hub = None
+    if cfg.get("notify"):
+        from .notify import NotificationHub
+        notify_hub = NotificationHub(args.db, cfg["notify"],
+                                     stop_event=stop_event)
+        notify_hub.start()
+        if state is not None:
+            state.notify_hub = notify_hub
+        print("[NVR] 通知出口已启动（配置了 notify 段）")
+
     def _shutdown(signum, frame):
         stop_event.set()
 
@@ -315,6 +443,12 @@ def main(argv=None, *, edition=None):
         server.shutdown()
     if recorders is not None:
         recorders.stop_all()
+    if slow_worker is not None:
+        if not slow_worker.stop(timeout=10.0):
+            print("[NVR] 慢系统 worker 关机超时（未完成事实留在水位，"
+                  "下次启动续跑）")
+    if notify_hub is not None:
+        notify_hub.stop(timeout=5.0)
     for t in threads:
         t.join(timeout=5)
     print("[NVR] 已停机")

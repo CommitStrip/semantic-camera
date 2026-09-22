@@ -7,7 +7,9 @@
 只清理本次新建目录且输入哈希不变、合同根与发布条目/备份引用/阶段/两检查表为
 精确固定 schema（未知/缺失/坏类型/阶段乱序/危险回滚顺序全部拒绝）、合同生成后
 改动树或备份包 verify 非零而未经变化时只读且不改变 mtime/哈希、CLI 退出码与七个
-诚实字段、模块源码静态零网络/零子进程/零服务控制/无发布树 rename-replace-unlink、
+诚实字段、CLI 冻结拼写（prepare 的 help/usage 只展示 `--backup-bundle`，该拼写
+成功、旧错误拼写与任何缩写拼写解析期非零拒绝，且与模块 docstring、runbook 三处
+一致）、模块源码静态零网络/零子进程/零服务控制/无发布树 rename-replace-unlink、
 runbook 契约（实际命令、人工确认点、备份先于停服、代码回退先于条件性状态恢复、
 install.sh 限制与非自动化边界）。
 
@@ -57,6 +59,12 @@ BANNED_SOURCE_TOKENS = ("subprocess", "socket", "urllib", "requests",
                         "os.truncate", "copytree", "copyfile", "os.chdir",
                         "os.symlink", "os.link", "pip install", "systemctl",
                         "sudo ", "winreg", "ctypes", "shelve", "threading")
+# P-R1 冻结 CLI 拼写：绑定状态包的选项只能是 --backup-bundle。argparse 的选项缩写
+# 已关闭，因此更长的旧拼写与任何前缀缩写都必须在解析期非零拒绝，绝不能靠缩写
+# 兼容旧错误拼写。
+FROZEN_BUNDLE_OPTION = "--backup-bundle"
+REJECTED_BUNDLE_SPELLINGS = ("--backup-bundle-dir", "--backup-bundle-d",
+                             "--backup-bundl", "--backup")
 
 
 # ---------- 合成输入 ----------
@@ -177,6 +185,11 @@ def _run_cli(args, capsys):
     code = upgrade_mod.main(args)
     captured = capsys.readouterr()
     return code, json.loads(captured.out)
+
+
+def _flat(text):
+    """折叠空白：help 断行随终端宽度变化，断言只看词序列而非排版。"""
+    return re.sub(r"\s+", " ", text)
 
 
 def _sha256(path):
@@ -1091,7 +1104,7 @@ def test_cli_prepare_and_verify_success(tmp_path, capsys):
         "prepare",
         "--current-release-dir", str(current),
         "--candidate-release-dir", str(candidate),
-        "--backup-bundle-dir", str(bundle),
+        "--backup-bundle", str(bundle),
         "--output-dir", str(contract_dir),
     ], capsys)
     assert code == 0
@@ -1123,7 +1136,7 @@ def test_cli_prepare_failure_is_nonzero_and_structured(tmp_path, capsys):
         "prepare",
         "--current-release-dir", str(current),
         "--candidate-release-dir", str(candidate),
-        "--backup-bundle-dir", str(bundle),
+        "--backup-bundle", str(bundle),
         "--output-dir", str(contract_dir),
     ], capsys)
     assert code == 1
@@ -1159,6 +1172,91 @@ def test_cli_verify_failure_when_tree_changed(tmp_path, capsys):
     assert payload["contract_valid"] is False
     assert payload["errors"]
     _assert_honesty(payload)
+
+
+# ---------- 7b. 冻结 CLI 拼写：--backup-bundle 且关闭选项缩写 ----------
+
+def test_cli_prepare_help_exposes_only_the_frozen_backup_bundle_option(capsys):
+    """精确锁定 prepare 的 help/usage：绑定状态包的选项只以冻结拼写出现。"""
+    with pytest.raises(SystemExit) as excinfo:
+        upgrade_mod.main(["prepare", "--help"])
+    assert excinfo.value.code == 0
+    helped = _flat(capsys.readouterr().out)
+    # usage 是否给必填选项加方括号/圆括号随 argparse 版本而异：去括号后锁词序列。
+    unbracketed = _flat(helped.replace("[", " ").replace("]", " ")
+                        .replace("(", " ").replace(")", " "))
+    assert ("--current-release-dir DIR --candidate-release-dir DIR "
+            "--backup-bundle DIR --output-dir DIR") in unbracketed
+    assert FROZEN_BUNDLE_OPTION in helped
+    assert "--backup-bundle-" not in helped
+    assert "BACKUP_BUNDLE_DIR" not in helped
+
+
+def test_cli_prepare_binds_the_bundle_through_the_frozen_spelling(tmp_path,
+                                                                 capsys):
+    """冻结拼写 --backup-bundle 的成功调用：合同只认传入的那个状态包。"""
+    current, candidate, bundle = _inputs(tmp_path)
+    contract_dir = tmp_path / "contract"
+    code, payload = _run_cli([
+        "prepare",
+        "--current-release-dir", str(current),
+        "--candidate-release-dir", str(candidate),
+        FROZEN_BUNDLE_OPTION, str(bundle),
+        "--output-dir", str(contract_dir),
+    ], capsys)
+    assert code == 0
+    assert payload["errors"] == []
+    assert payload["backup"]["bundle_valid"] is True
+    assert payload["backup"]["bundle_dir"] == os.path.abspath(str(bundle))
+    assert _entries(contract_dir) == [CONTRACT_ENTRY]
+    _assert_honesty(payload)
+
+
+@pytest.mark.parametrize("spelling", REJECTED_BUNDLE_SPELLINGS)
+def test_cli_rejects_wrong_or_abbreviated_backup_bundle_spellings(
+        tmp_path, capsys, spelling):
+    """旧拼写与任何缩写拼写：解析期非零拒绝，且不产生任何副作用。"""
+    current, candidate, bundle = _inputs(tmp_path)
+    contract_dir = tmp_path / "contract"
+    before = _all_fingerprints(current, candidate, bundle)
+    with pytest.raises(SystemExit) as excinfo:
+        upgrade_mod.main([
+            "prepare",
+            "--current-release-dir", str(current),
+            "--candidate-release-dir", str(candidate),
+            spelling, str(bundle),
+            "--output-dir", str(contract_dir),
+        ])
+    assert excinfo.value.code != 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "usage:" in captured.err
+    assert not contract_dir.exists()
+    assert _all_fingerprints(current, candidate, bundle) == before
+
+
+@pytest.mark.parametrize("spelling", ("--contract", "--contract-d"))
+def test_cli_verify_rejects_abbreviated_contract_dir_spellings(
+        tmp_path, capsys, spelling):
+    """verify 同样关闭缩写：指到同一份合法合同也必须因拼写非零拒绝。"""
+    _result, _errors, contract_dir, *_rest = _prepare(tmp_path)
+    with pytest.raises(SystemExit) as excinfo:
+        upgrade_mod.main(["verify", spelling, str(contract_dir)])
+    assert excinfo.value.code != 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "usage:" in captured.err
+
+
+def test_frozen_cli_spelling_is_identical_in_code_help_and_runbook():
+    """代码（docstring/parser）、help 与 runbook 三处拼写一致且不再是旧拼写。"""
+    source = MODULE_PATH.read_text(encoding="utf-8")
+    assert "--backup-bundle DIR" in source
+    assert "--backup-bundle-dir" not in source
+    assert source.count("allow_abbrev=False") >= 3
+    runbook = RUNBOOK_PATH.read_text(encoding="utf-8")
+    assert "--backup-bundle " in runbook
+    assert "--backup-bundle-dir" not in runbook
 
 
 # ---------- 8. 源码静态围栏 ----------

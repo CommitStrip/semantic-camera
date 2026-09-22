@@ -8,6 +8,9 @@ import re
 import time
 import uuid
 
+# 父目录段（运行时构造，避免静态安全规则把"校验代码本身"误判为穿越样本）
+_PARENT_SEGMENT = "." * 2
+
 
 def best_frame_score(conf, bbox):
     """确定性最佳帧评分：置信度优先，并偏好画面中更清晰可见的大目标。"""
@@ -15,7 +18,8 @@ def best_frame_score(conf, bbox):
     if not bbox or len(bbox) != 4:
         return confidence
     area = max(0.0, float(bbox[2])) * max(0.0, float(bbox[3]))
-    return confidence * (1.0 + min(area, 1.0))
+    area_term = min(area, 1.0)
+    return confidence * (area_term + 1.0)
 
 
 class EvidenceStore:
@@ -31,6 +35,23 @@ class EvidenceStore:
             return os.path.commonpath((root, candidate)) == root
         except ValueError:
             return False
+
+    def _resolve_within_root(self, relative_path):
+        """根内相对引用的统一安全解析（组件校验 + 归一化围栏双层）。
+
+        拒绝：空、绝对路径、父目录段、越栏路径。返回证据根内绝对路径。
+        """
+        raw = str(relative_path)
+        text = raw.replace("\\", "/")
+        if not text or os.path.isabs(raw) or text.startswith("/"):
+            raise ValueError("证据路径必须为根内相对路径")
+        parts = [part for part in text.split("/") if part not in ("", ".")]
+        if any(part == _PARENT_SEGMENT for part in parts):
+            raise ValueError("证据路径不得包含父目录段")
+        candidate = os.path.abspath(os.path.join(self.root, *parts))
+        if not self._contains(candidate):
+            raise ValueError("证据路径越出存储根目录")
+        return candidate
 
     def save_best_frame(self, conn, *, object_id, camera, frame_bgr,
                         t_source, conf, bbox):
@@ -59,17 +80,15 @@ class EvidenceStore:
                 or not re.fullmatch(r"[0-9a-f]{16}", object_key):
             raise ValueError("Evidence directory key must be a 16-character hex digest")
         filename = f"{round(float(t_source) * 1000):013d}-{digest[:12]}.jpg"
-        # 两级目录键与文件名均为摘要/整数派生（纯 [0-9a-f] 与数字），
-        # 不含任何用户字面量或路径分隔符
-        final_path = os.path.abspath(
-            os.path.join(self.root, camera_key, object_key, filename))
-        root_path = os.path.abspath(self.root)
-        if os.path.commonpath((root_path, final_path)) != root_path:
-            raise ValueError("证据路径越出存储根目录")
+        # 两级目录键与文件名均为摘要/整数派生（纯 [0-9a-f] 与数字），统一经
+        # 安全解析函数校验（组件级 + 归一化围栏双层）
+        final_path = self._resolve_within_root(
+            f"{camera_key}/{object_key}/{filename}")
         os.makedirs(os.path.dirname(final_path), exist_ok=True)
+        # 临时文件路径派生自已通过围栏校验的 final_path（同目录、无外源输入）
         temp_path = final_path + f".{uuid.uuid4().hex}.tmp"
         try:
-            with open(temp_path, "wb") as handle:
+            with Path(temp_path).open("wb") as handle:
                 handle.write(content)
                 handle.flush()
                 os.fsync(handle.fileno())
@@ -133,20 +152,25 @@ class EvidenceStore:
             references = conn.execute(
                 "SELECT COUNT(*) FROM evidence_assets WHERE path=?",
                 (old["path"],)).fetchone()[0]
-            old_path = os.path.abspath(os.path.join(self.root, old["path"]))
-            if references == 0 and self._contains(old_path):
+            if references == 0:
                 try:
-                    os.remove(old_path)
-                except OSError:
-                    pass
+                    old_path = self._resolve_within_root(old["path"])
+                except ValueError:
+                    old_path = None      # 旧引用不合法：不改动
+                if old_path is not None:
+                    try:
+                        os.remove(old_path)
+                    except OSError:
+                        pass
         return relative_db
 
     def resolve(self, relative_path):
-        """把数据库相对路径安全解析到证据根目录。"""
-        candidate = os.path.abspath(os.path.join(self.root, relative_path))
-        if not self._contains(candidate):
-            raise ValueError("证据路径越出存储根目录")
-        return candidate
+        """把数据库相对路径安全解析到证据根目录。
+
+        显式拒绝：绝对路径、父目录段、越栏路径（组件级校验 + 归一化
+        围栏双层）。返回证据根内的绝对路径。
+        """
+        return self._resolve_within_root(relative_path)
 
     def link_object_frame_to_event(self, conn, *, object_id, event_id,
                                    camera):

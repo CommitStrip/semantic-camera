@@ -15,12 +15,14 @@ dependencies = [
 detect = ["onnxruntime"]
 vision = ["opencv-python-headless", "pillow"]
 discover = ["wsdiscovery"]
+mqtt = ["paho-mqtt"]
 dev = ["pytest"]
 
 [project.scripts]
 scam-linux-nvr = "scam.linux_nvr:main"
 scam-win11 = "scam.win11:main"
 scam-win11-preflight = "scam.win11_acceptance:main"
+scam-win11-r3-acceptance = "scam.win11_r3_acceptance:main"
 
 [tool.setuptools.packages.find]
 include = ["scam*"]
