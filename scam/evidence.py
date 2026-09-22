@@ -47,7 +47,7 @@ class EvidenceStore:
             raise ValueError("证据路径必须为根内相对路径")
         parts = [part for part in text.split("/") if part not in ("", ".")]
         if any(part == _PARENT_SEGMENT for part in parts):
-            raise ValueError("证据路径不得包含父目录段")
+            raise ValueError("证据路径越出存储根目录（含父目录段）")
         candidate = os.path.abspath(os.path.join(self.root, *parts))
         if not self._contains(candidate):
             raise ValueError("证据路径越出存储根目录")

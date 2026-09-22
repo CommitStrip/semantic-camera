@@ -54,10 +54,17 @@ def find_ffmpeg():
 
 
 def app_data_dir(app_name="semantic-camera"):
-    """获取应用数据目录（跨平台）。"""
+    """获取应用数据目录（跨平台）。
+
+    显式设置 `LOCALAPPDATA` 时优先采用（便于测试注入与受控部署）；
+    否则 Windows 用 %LOCALAPPDATA%，其他平台用 XDG 风格路径。
+    """
+    override = os.environ.get("LOCALAPPDATA")
+    if override:
+        return os.path.join(override, app_name)
     if is_windows():
-        base = os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))
-        return os.path.join(base, app_name)
+        base = os.path.expanduser("~")
+        return os.path.join(base, "AppData", "Local", app_name)
     return os.path.join(os.path.expanduser("~"), ".local", "share", app_name)
 
 

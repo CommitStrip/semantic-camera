@@ -28,8 +28,14 @@ jobs:
             > /tmp/scam-nvr.service
           cat /tmp/scam-nvr.service
           systemd-analyze verify /tmp/scam-nvr.service
-      - name: Run tests (含 Linux 服务级 smoke)
-        run: python -m pytest tests/ -v
+      - name: Run tests (含 Linux 服务级 smoke；Win11 产品面归 windows 任务)
+        run: |
+          python -m pytest tests/ -v \
+            --ignore=tests/test_win11_acceptance.py \
+            --ignore=tests/test_win11_deploy_contract.py \
+            --ignore=tests/test_win11_first_use.py \
+            --ignore=tests/test_win11_r3_acceptance.py \
+            --ignore=tests/test_win11_r3_runner.py
       - name: Linux NVR edition contract
         run: |
           python -m scam.linux_nvr --help

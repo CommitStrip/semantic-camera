@@ -187,7 +187,8 @@ def test_symlink_input_rejected(tmp_path):
     except (OSError, NotImplementedError):
         pytest.skip("当前环境不允许创建符号链接")
 
-    code, error = _run_error(["--expected", link, "--actual", good])
+    code, error = _run_error(["--expected", str(link),
+                              "--actual", str(good)])
 
     assert code == 1
     assert any("symlink" in err for err in error["errors"])

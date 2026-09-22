@@ -233,6 +233,17 @@ class SlowCore:
 
     # ---------- 段证据帧（V-JEPA 嵌入 / provider 三帧输入） ----------
 
+    @staticmethod
+    def _is_absolute_reference(text):
+        """平台无关的绝对路径判定：POSIX 根、Windows 驱动器、UNC 前缀。
+
+        不依赖 `os.path.isabs`（Posix 上不认 `C:/...`）——证据引用来自
+        数据库，任何平台都必须拒绝外部绝对位置。
+        """
+        if text.startswith("/") or text.startswith("//"):
+            return True
+        return len(text) >= 2 and text[1] == ":" and text[0].isalpha()
+
     def _safe_evidence_refs(self, review, limit=MAX_FRAMES):
         """段内证据资产的**安全引用**列表（最多 limit 条）。
 
@@ -262,9 +273,9 @@ class SlowCore:
         refs = []
         for row in rows:
             raw = row[0]
-            if not raw or os.path.isabs(str(raw)):
-                continue                     # 绝对路径：拒绝
-            text = str(raw).replace("\\", "/")
+            text = str(raw).replace("\\", "/") if raw else ""
+            if not text or self._is_absolute_reference(text):
+                continue                     # 绝对路径（平台无关判定）：拒绝
             if ".." in text.split("/"):
                 continue                     # 父目录穿越：拒绝
             candidate = os.path.abspath(os.path.join(root, text))
