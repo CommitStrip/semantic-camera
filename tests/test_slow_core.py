@@ -2100,7 +2100,7 @@ def test_exhausted_finalize_snapshot_change_loses_cas(tmp_path):
     conn_a = _conn(tmp_path)
     _seed_claim(conn_a, "rev-cas2", _claim_payload_text(seconds_old=1200),
                 retries=1)
-    old = json.loads(_claim_payload_json(conn_a, "rev-cas2"))
+    old_text = _claim_payload_json(conn_a, "rev-cas2")
     core = SlowCore(conn_a, camera="front", max_retries=1)
 
     # 另一连接改写认领（新 owner+t_claim）
@@ -2111,9 +2111,8 @@ def test_exhausted_finalize_snapshot_change_loses_cas(tmp_path):
     conn_b.commit()
     new_text = _claim_payload_json(conn_b, "rev-cas2")
 
-    finalized = core._finalize_exhausted_claim(
-        "rev-cas2", expected_owner=old["owner"],
-        expected_t_claim=old["t_claim"])
+    # SC-B-R3：CAS 依据是**整份原始 payload 文本快照**
+    finalized = core._finalize_exhausted_claim("rev-cas2", old_text)
     assert finalized is False, "旧快照收官必须竞输"
     assert _claim_payload_json(conn_b, "rev-cas2") == new_text, \
         "数据库必须保留新 owner/t_claim"
@@ -2193,4 +2192,616 @@ def test_exhausted_finalize_changes_only_segment(tmp_path):
     assert before[:4] == after[:4], \
         "patterns/embeddings/events/generation 必须逐字节不变"
     assert after[4] == "1", "retry 值不得增加"
+    conn.close()
+
+
+# ---------- LZ-083 SC-B-R3：认领文档保真解析与整份 payload 快照 CAS ----------
+
+def _retry_value(conn, rid):
+    row = conn.execute("SELECT value FROM meta WHERE key=?",
+                       (f"slow:retry:{rid}",)).fetchone()
+    return row[0] if row else None
+
+
+def _dep_spy():
+    """三个昂贵依赖的调用计数；注入即抛，证明 fail-closed 路径零调用。"""
+    calls = {"provider": 0, "embedder": 0, "loader": 0}
+
+    class _BoomProvider:
+        name = "boom"
+
+        def understand(self, *args, **kwargs):
+            calls["provider"] += 1
+            raise RuntimeError("provider 不得被调用")
+
+    def boom_loader(refs, context):
+        calls["loader"] += 1
+        raise RuntimeError("frame_loader 不得被调用")
+
+    def boom_emb_fn(review):
+        calls["embedder"] += 1
+        raise RuntimeError("embedder 不得被调用")
+
+    return calls, _BoomProvider(), boom_loader, boom_emb_fn
+
+
+def _run_failclosed_round(tmp_path, rid, payload_text):
+    """数据库真实入口跑一轮 recover_stale=True / stale_after_s=1。"""
+    conn = _conn(tmp_path)
+    _seed_claim(conn, rid, payload_text, retries=1)
+    before = _claim_payload_json(conn, rid)
+    retry_before = _retry_value(conn, rid)
+    calls, provider, loader, emb_fn = _dep_spy()
+    core = SlowCore(conn, camera="front", max_retries=1, frame_loader=loader)
+    stats = core.process_pending(recover_stale=True, stale_after_s=1,
+                                 provider=provider, emb_fn=emb_fn)
+    after = _claim_payload_json(conn, rid)
+    retry_after = _retry_value(conn, rid)
+    return conn, before, after, retry_before, retry_after, stats, calls, core
+
+
+def _assert_failclosed(conn, before, after, retry_before, retry_after,
+                       stats, calls, core):
+    """fail-closed 全量断言：不接管/不终态化/不增 retry/不减 backlog/零依赖。"""
+    assert stats["failed"] == 0, "不得制造 failed 事实"
+    assert stats["processed"] == 0
+    assert stats["retried"] == 0
+    assert stats["conflict"] == 0
+    assert after == before, "payload 必须逐字节不变"
+    assert retry_after == retry_before, "retry 必须不变"
+    assert core.waterlevel()["pending"] == 1, "backlog 必须保持 1"
+    assert calls == {"provider": 0, "embedder": 0, "loader": 0}, calls
+    conn.close()
+
+
+def test_db_bool_true_t_claim_fails_closed(tmp_path):
+    """1. 数据库真实入口：`t_claim:true` 必须 fail-closed（LZ-082 P0 回归）。"""
+    conn = _conn(tmp_path)
+    _seed_claim(conn, "rev-r3-true",
+                json.dumps({"status": "claiming", "owner": "dead",
+                            "t_claim": True}), retries=1)
+    # 钉住 P0 前提：SQL 层确实把 JSON true 归一成整数 1（原始类型已丢失）
+    probe = conn.execute(
+        "SELECT json_extract(payload,'$.t_claim') AS v,"
+        " json_type(payload,'$.t_claim') AS t FROM segments"
+        " WHERE segment_id='rev-r3-true'").fetchone()
+    assert probe["v"] == 1 and probe["t"] == "true", \
+        "P0 前提：json_extract 把 true 归一成整数 1"
+    before = _claim_payload_json(conn, "rev-r3-true")
+    retry_before = _retry_value(conn, "rev-r3-true")
+    calls, provider, loader, emb_fn = _dep_spy()
+    core = SlowCore(conn, camera="front", max_retries=1, frame_loader=loader)
+
+    stats = core.process_pending(recover_stale=True, stale_after_s=1,
+                                 provider=provider, emb_fn=emb_fn)
+
+    _assert_failclosed(conn, before, _claim_payload_json(conn, "rev-r3-true"),
+                       retry_before, _retry_value(conn, "rev-r3-true"),
+                       stats, calls, core)
+
+
+def test_db_bool_false_t_claim_fails_closed(tmp_path):
+    """2. `t_claim:false` 同样必须完全不改写。"""
+    conn, before, after, rb, ra, stats, calls, core = _run_failclosed_round(
+        tmp_path, "rev-r3-false",
+        json.dumps({"status": "claiming", "owner": "dead",
+                    "t_claim": False}))
+    _assert_failclosed(conn, before, after, rb, ra, stats, calls, core)
+
+
+_BAD_T_CLAIM_CASES = [
+    ("null", {"t_claim": None}),
+    ("missing", {}),
+    ("string-1", {"t_claim": "1"}),
+    ("float-1.0", {"t_claim": 1.0}),
+    ("array", {"t_claim": [1, 2]}),
+    ("object", {"t_claim": {"us": 1}}),
+    ("nan", {"t_claim": float("nan")}),
+    ("inf", {"t_claim": float("inf")}),
+    ("neg-inf", {"t_claim": float("-inf")}),
+]
+
+
+@pytest.mark.parametrize("tag,extra", _BAD_T_CLAIM_CASES,
+                         ids=[case[0] for case in _BAD_T_CLAIM_CASES])
+def test_db_unprovable_t_claim_types_fail_closed(tmp_path, tag, extra):
+    """3. 参数化：缺失/null/字符串/浮点/数组/对象/NaN/±Inf 一律 fail-closed。"""
+    doc = {"status": "claiming", "owner": "dead"}
+    doc.update(extra)
+    conn, before, after, rb, ra, stats, calls, core = _run_failclosed_round(
+        tmp_path, f"rev-r3-{tag}", json.dumps(doc))
+    _assert_failclosed(conn, before, after, rb, ra, stats, calls, core)
+
+
+_OWNER_CASES = [
+    ("bool-true", True),
+    ("bool-false", False),
+    ("number", 1),
+    ("empty", ""),
+    ("null", None),
+    ("array", [1]),
+    ("object", {"a": 1}),
+]
+
+
+@pytest.mark.parametrize("tag,owner_value", _OWNER_CASES,
+                         ids=[case[0] for case in _OWNER_CASES])
+def test_db_owner_type_errors_fail_closed(tmp_path, tag, owner_value):
+    """4. owner 类型错误：即使 t_claim 看似足够陈旧也不得接管或收官。"""
+    stale_us = int((time.time() - 1200) * 1e6)
+    conn, before, after, rb, ra, stats, calls, core = _run_failclosed_round(
+        tmp_path, f"rev-r3-owner-{tag}",
+        json.dumps({"status": "claiming", "owner": owner_value,
+                    "t_claim": stale_us}))
+    _assert_failclosed(conn, before, after, rb, ra, stats, calls, core)
+
+
+def test_db_owner_missing_fails_closed(tmp_path):
+    """4b. owner 缺失：同样不得接管或收官。"""
+    stale_us = int((time.time() - 1200) * 1e6)
+    conn, before, after, rb, ra, stats, calls, core = _run_failclosed_round(
+        tmp_path, "rev-r3-owner-missing",
+        json.dumps({"status": "claiming", "t_claim": stale_us}))
+    _assert_failclosed(conn, before, after, rb, ra, stats, calls, core)
+
+
+def test_db_malformed_json_does_not_poison_the_batch(tmp_path):
+    """5. 非法 JSON 不毒死整批：前一条损坏，后一条合法陈旧耗尽仍正常收官。"""
+    conn = _conn(tmp_path)
+    _seed_claim(conn, "rev-r3-bad", "{not json at all",
+                t0=1000.0, t1=1120.0)
+    _seed_claim(conn, "rev-r3-good", _claim_payload_text(seconds_old=1200),
+                t0=2000.0, t1=2120.0, retries=1)
+    bad_before = _claim_payload_json(conn, "rev-r3-bad")
+    core = SlowCore(conn, camera="front", max_retries=1)
+
+    stats = core.process_pending(recover_stale=True, stale_after_s=1)
+
+    assert stats["failed"] == 1, "failed 只计合法那一条"
+    assert stats["processed"] == 0
+    assert stats["retried"] == 0 and stats["conflict"] == 0
+    assert _claim_payload_json(conn, "rev-r3-bad") == bad_before, \
+        "损坏 payload 必须逐字节不变"
+    payload = json.loads(_claim_payload_json(conn, "rev-r3-good"))
+    assert payload["status"] == "failed"
+    assert payload["error"] == "retries_exhausted"
+    assert payload["final"] is True
+    conn.close()
+
+
+def test_db_non_object_and_terminal_rows_are_untouched(tmp_path):
+    """5b. 根非 object / status 非 claiming / 终态行：一律不触碰且不抛异常。"""
+    conn = _conn(tmp_path)
+    rows = {
+        "rev-r3-arr": "[1, 2, 3]",
+        "rev-r3-num": "12345",
+        "rev-r3-stat": json.dumps({"status": 1, "owner": "dead",
+                                   "t_claim": 1}),
+        "rev-r3-done": json.dumps({"status": "recorded"}),
+    }
+    for index, (rid, text) in enumerate(rows.items()):
+        _seed_claim(conn, rid, text, t0=1000.0 + index * 500,
+                    t1=1120.0 + index * 500)
+    before = {rid: _claim_payload_json(conn, rid) for rid in rows}
+    core = SlowCore(conn, camera="front", max_retries=1)
+
+    stats = core.process_pending(recover_stale=True, stale_after_s=1)
+
+    assert stats["failed"] == 0 and stats["processed"] == 0
+    for rid, text in before.items():
+        assert _claim_payload_json(conn, rid) == text, rid
+    conn.close()
+
+
+def test_db_terminal_rows_do_not_starve_pending_window(tmp_path):
+    """5c. 大量终态行排在前面也不得挤占 LIMIT 窗口、饿死真正待办。"""
+    conn = _conn(tmp_path)
+    for index in range(40):
+        _seed_claim(conn, f"rev-r3-done-{index:02d}",
+                    json.dumps({"status": "recorded", "n": index}),
+                    t0=float(index), t1=float(index) + 120)
+    _seed_claim(conn, "rev-r3-starve", _claim_payload_text(seconds_old=1200),
+                t0=100.0, t1=220.0, retries=1)
+    core = SlowCore(conn, camera="front", max_retries=1)
+
+    # limit=1 是最窄窗口：若终态行参与 LIMIT 截断，真待办必然拿不到名额
+    assert core.pending_reviews(1, recover_stale=True,
+                                stale_after_s=1) == []
+
+    payload = json.loads(_claim_payload_json(conn, "rev-r3-starve"))
+    assert payload["status"] == "failed", "终态行不得挤占 LIMIT 窗口"
+    assert payload["error"] == "retries_exhausted"
+    assert core.waterlevel()["pending"] == 0
+    conn.close()
+
+
+def test_db_extra_field_change_loses_snapshot_cas(tmp_path):
+    """6a. owner/t_claim 未变、只改额外字段：原快照收官必竞输。"""
+    conn_a = _conn(tmp_path)
+    _seed_claim(conn_a, "rev-r3-epoch", _claim_payload_text(seconds_old=1200),
+                retries=1)
+    old_text = _claim_payload_json(conn_a, "rev-r3-epoch")
+    core = SlowCore(conn_a, camera="front", max_retries=1)
+
+    conn_b = db.connect(str(tmp_path / "slow.db"))
+    doc = json.loads(old_text)
+    doc["lease_epoch"] = 2
+    new_text = json.dumps(doc)
+    conn_b.execute(
+        "UPDATE segments SET payload=? WHERE segment_id='rev-r3-epoch'",
+        (new_text,))
+    conn_b.commit()
+
+    finalized = core._finalize_exhausted_claim("rev-r3-epoch", old_text)
+
+    assert finalized is False, "owner/t_claim 未变也必须竞输（整份快照 CAS）"
+    assert _claim_payload_json(conn_b, "rev-r3-epoch") == new_text, \
+        "新 payload 必须保留"
+    assert json.loads(new_text)["status"] == "claiming", "不得出现 failed 终态"
+    assert _retry_value(conn_a, "rev-r3-epoch") == "1", "retry 不得增加"
+    conn_a.close()
+    conn_b.close()
+
+
+def test_db_takeover_loses_cas_when_payload_changes(tmp_path, monkeypatch):
+    """6b. 接管路径：计划已读、CAS 未写的窗口里 payload 被改 → 竞输。"""
+    conn = _conn(tmp_path)
+    _seed_claim(conn, "rev-r3-take", _claim_payload_text(seconds_old=1200))
+    conn_b = db.connect(str(tmp_path / "slow.db"))
+    calls, provider, loader, emb_fn = _dep_spy()
+    core = SlowCore(conn, camera="front", max_retries=3, frame_loader=loader)
+
+    real_claim_payload = SlowCore._claim_payload
+
+    def racing_claim_payload(self, t_claim_us=None):
+        text = real_claim_payload(self, t_claim_us)
+        row = conn_b.execute(
+            "SELECT payload FROM segments WHERE segment_id='rev-r3-take'"
+        ).fetchone()
+        doc = json.loads(row[0])
+        doc["lease_epoch"] = 2          # owner/t_claim 保持不变
+        conn_b.execute(
+            "UPDATE segments SET payload=? WHERE segment_id='rev-r3-take'",
+            (json.dumps(doc),))
+        conn_b.commit()
+        return text
+
+    monkeypatch.setattr(SlowCore, "_claim_payload", racing_claim_payload)
+
+    claimed = core.pending_reviews(recover_stale=True, stale_after_s=1)
+
+    assert claimed == [], "旧快照接管必须竞输（不得进入本轮执行）"
+    doc = json.loads(_claim_payload_json(conn, "rev-r3-take"))
+    assert doc["lease_epoch"] == 2 and doc["status"] == "claiming"
+    assert calls == {"provider": 0, "embedder": 0, "loader": 0}, calls
+    conn.close()
+    conn_b.close()
+
+
+def test_valid_canonical_stale_exhausted_still_finalizes(tmp_path):
+    """7. 有效 canonical 整数微秒：异实例+耗尽+过阈值 仍单轮收官。"""
+    conn = _conn(tmp_path)
+    _seed_claim(conn, "rev-r3-valid", _claim_payload_text(seconds_old=1200),
+                retries=1)
+    core = SlowCore(conn, camera="front", max_retries=1)
+
+    stats = core.process_pending(recover_stale=True, stale_after_s=1)
+
+    assert stats["failed"] == 1
+    assert core.waterlevel()["pending"] == 0, "backlog 必须由 1 变 0"
+    payload = json.loads(_claim_payload_json(conn, "rev-r3-valid"))
+    assert payload["status"] == "failed"
+    assert payload["error"] == "retries_exhausted"
+    assert payload["final"] is True
+    conn.close()
+
+
+def test_valid_canonical_fresh_claim_is_protected(tmp_path):
+    """8. 有效 canonical 整数微秒但未过阈值：保持 claiming、payload 不变。"""
+    conn = _conn(tmp_path)
+    _seed_claim(conn, "rev-r3-fresh", _claim_payload_text(seconds_old=1),
+                retries=1)
+    before = _claim_payload_json(conn, "rev-r3-fresh")
+    core = SlowCore(conn, camera="front", max_retries=1)
+
+    stats = core.process_pending(recover_stale=True, stale_after_s=600)
+
+    assert stats["failed"] == 0
+    assert _claim_payload_json(conn, "rev-r3-fresh") == before
+    assert core.waterlevel()["pending"] == 1
+    conn.close()
+
+
+def test_terminal_cas_snapshot_correct_on_all_three_claim_paths(tmp_path):
+    """9a. 新建认领/同实例续跑/陈旧接管：三条路径终态 CAS 快照都必须正确。"""
+    conn = _conn(tmp_path)
+    core = SlowCore(conn, camera="front")
+
+    # ① 新建认领（INSERT 路径）
+    _seed_segment(conn, rid="rev-r3-p1")
+    stats = core.process_pending()
+    assert stats["processed"] == 1 and stats["conflict"] == 0
+    assert json.loads(_claim_payload_json(conn, "rev-r3-p1"))["status"] \
+        in ("matched", "recorded")
+
+    # ② 同实例续跑（快照=数据库读到的原始文本）
+    _seed_claim(conn, "rev-r3-p2",
+                _claim_payload_text(owner=core.instance_id, seconds_old=1),
+                t0=3000.0, t1=3120.0)
+    stats = core.process_pending()
+    assert stats["processed"] == 1 and stats["conflict"] == 0
+    assert json.loads(_claim_payload_json(conn, "rev-r3-p2"))["status"] \
+        in ("matched", "recorded")
+
+    # ③ 异实例陈旧接管（快照=接管后写入的新文本）
+    _seed_claim(conn, "rev-r3-p3", _claim_payload_text(seconds_old=1200),
+                t0=4000.0, t1=4120.0)
+    stats = core.process_pending(recover_stale=True, stale_after_s=1)
+    assert stats["processed"] == 1 and stats["conflict"] == 0
+    assert json.loads(_claim_payload_json(conn, "rev-r3-p3"))["status"] \
+        in ("matched", "recorded")
+    conn.close()
+
+
+def test_terminal_cas_conflict_rolls_back_all_tables(tmp_path, monkeypatch):
+    """9b. 认领后被另一连接改动：终态 CAS 冲突，patterns/嵌入/事件文本全回滚。"""
+    conn = _conn(tmp_path)
+    _seed_segment(conn, rid="rev-r3-rollback")
+    conn_b = db.connect(str(tmp_path / "slow.db"))
+    core = SlowCore(conn, camera="front")
+
+    real_compute = SlowCore._compute
+
+    def racing_compute(self, review, **kwargs):
+        outcome = real_compute(self, review, **kwargs)
+        row = conn_b.execute(
+            "SELECT payload FROM segments WHERE segment_id=?",
+            (review["review_id"],)).fetchone()
+        doc = json.loads(row[0])
+        doc["lease_epoch"] = 7          # 只改额外字段，owner/t_claim 不变
+        conn_b.execute(
+            "UPDATE segments SET payload=? WHERE segment_id=?",
+            (json.dumps(doc), review["review_id"]))
+        conn_b.commit()
+        return outcome
+
+    monkeypatch.setattr(SlowCore, "_compute", racing_compute)
+
+    stats = core.process_pending()
+
+    assert stats["conflict"] == 1, "终态 CAS 必须冲突"
+    assert stats["processed"] == 0 and stats["failed"] == 0
+    assert stats["retried"] == 0
+    assert conn.execute("SELECT COUNT(*) FROM patterns").fetchone()[0] == 0, \
+        "patterns 必须随事务回滚"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM pattern_embeddings").fetchone()[0] == 0
+    doc = json.loads(_claim_payload_json(conn, "rev-r3-rollback"))
+    assert doc["lease_epoch"] == 7 and doc["status"] == "claiming"
+    text = conn.execute(
+        "SELECT short_name, detail FROM semantic_events"
+        " WHERE semantic_event_id='rev-r3-rollback:sem'").fetchone()
+    assert text["short_name"] is None and text["detail"] is None, \
+        "事件文本不得在冲突事务中落库"
+    conn.close()
+    conn_b.close()
+
+
+def test_decode_claim_snapshot_strict_type_contract():
+    """补充：解析器本身的精确类型契约（bool 不是 int）。"""
+    ok = SlowCore._decode_claim_snapshot(
+        json.dumps({"status": "claiming", "owner": "o", "t_claim": 123}))
+    assert ok == {"owner": "o", "t_claim": 123,
+                  "payload": json.dumps({"status": "claiming", "owner": "o",
+                                         "t_claim": 123})}
+    for bad in (True, False, 1.0, "1", None, [1], {"a": 1}):
+        text = json.dumps({"status": "claiming", "owner": "o",
+                           "t_claim": bad})
+        assert SlowCore._decode_claim_snapshot(text) is None, bad
+    assert SlowCore._decode_claim_snapshot("{bad json") is None
+    assert SlowCore._decode_claim_snapshot("NaN") is None
+    assert SlowCore._decode_claim_snapshot(
+        '{"status":"claiming","owner":"o","t_claim":NaN}') is None
+    assert SlowCore._decode_claim_snapshot(None) is None
+    assert SlowCore._decode_claim_snapshot("") is None
+
+
+# ============ SC-B-R4：唯一 backlog 真值与坏认领可观测性 ============
+
+_R4_CORRUPT_PAYLOADS = [
+    ("bad-json", "{not json at all"),
+    ("root-array", "[1, 2, 3]"),
+    ("root-string", '"claiming"'),
+    ("root-number", "12345"),
+    ("root-bool", "true"),
+    ("root-null", "null"),
+    ("no-status", json.dumps({"owner": "dead"})),
+    ("status-int", json.dumps({"status": 1})),
+    ("status-null", json.dumps({"status": None})),
+    ("status-array", json.dumps({"status": ["claiming"]})),
+    ("status-object", json.dumps({"status": {"name": "claiming"}})),
+    ("unknown-status", json.dumps({"status": "mystery"})),
+    ("case-typo", json.dumps({"status": "Claiming"})),
+    ("broken-claim", json.dumps({"status": "claiming", "owner": True,
+                                 "t_claim": "1"})),
+]
+
+
+def _seed_r4(conn, rid, payload_text, *, camera="front", t0=1000.0,
+             t1=1120.0, retries=None, with_row=True):
+    """R4 播种：任意相机 + 任意 payload（含 SQL NULL / 无 segments 行）。"""
+    db.open_review_segment(conn, review_id=rid, camera=camera, t_start=t0)
+    db.close_review_segment(conn, rid, t_end=t1, reason="quiet")
+    if with_row:
+        conn.execute(
+            "INSERT INTO segments (segment_id,camera,t_start,t_end,signature,"
+            "detail,payload) VALUES (?,?,?,?,NULL,NULL,?)",
+            (rid, camera, str(t0), str(t1), payload_text))
+    if retries is not None:
+        conn.execute(
+            "INSERT INTO meta (key,value) VALUES (?,?)"
+            " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (f"slow:retry:{rid}", str(retries)))
+    conn.commit()
+
+
+def test_core_pending_covers_corrupt_payload_matrix(tmp_path):
+    """1. 损坏矩阵：全部不被改写、零昂贵调用、pending 等于损坏行总数。
+
+    未知不是完成、损坏不是清零——这些行不进入本轮执行（fail-closed），
+    但必须继续暴露为 backlog（诚实可观测）。
+    """
+    conn = _conn(tmp_path)
+    before = {}
+    for index, (tag, text) in enumerate(_R4_CORRUPT_PAYLOADS):
+        rid = f"rev-r4-{tag}"
+        _seed_r4(conn, rid, text, t0=1000.0 + index * 500,
+                 t1=1120.0 + index * 500, retries=1)
+        before[rid] = _claim_payload_json(conn, rid)
+
+    calls, provider, loader, emb_fn = _dep_spy()
+    core = SlowCore(conn, camera="front", max_retries=1, frame_loader=loader)
+    stats = core.process_pending(recover_stale=True, stale_after_s=1,
+                                 provider=provider, emb_fn=emb_fn)
+
+    assert stats["failed"] == 0 and stats["processed"] == 0
+    assert stats["retried"] == 0 and stats["conflict"] == 0
+    for rid, text in before.items():
+        assert _claim_payload_json(conn, rid) == text, rid
+    level = core.waterlevel()
+    assert level["pending"] == len(_R4_CORRUPT_PAYLOADS)
+    assert level["failed_final"] == 0
+    assert calls == {"provider": 0, "embedder": 0, "loader": 0}, calls
+    conn.close()
+
+
+def test_core_known_terminals_exit_backlog(tmp_path):
+    """2. 只有 matched/recorded/failed 三个合法终态退出 backlog。"""
+    conn = _conn(tmp_path)
+    for index, status in enumerate(("matched", "recorded", "failed")):
+        _seed_r4(conn, f"rev-r4-term-{status}", json.dumps({"status": status}),
+                 t0=1000.0 + index * 500, t1=1120.0 + index * 500)
+    core = SlowCore(conn, camera="front")
+
+    level = core.waterlevel()
+
+    assert level["pending"] == 0
+    assert level["failed_final"] == 1, "failed_final 只计合法 failed"
+    conn.close()
+
+
+def test_core_pending_mixed_exact_counts(tmp_path):
+    """3. 混合精确计数：2 无档案 + 3 合法 claiming + 4 损坏 + 3 终态 = 9。"""
+    conn = _conn(tmp_path)
+    for index in range(2):
+        _seed_r4(conn, f"rev-r4-norow-{index}", None,
+                 t0=1000.0 + index * 10, t1=1100.0 + index * 10,
+                 with_row=False)
+    for index in range(3):
+        _seed_r4(conn, f"rev-r4-claim-{index}",
+                 _claim_payload_text(seconds_old=1),
+                 t0=2000.0 + index * 10, t1=2100.0 + index * 10)
+    for index, (_, text) in enumerate(_R4_CORRUPT_PAYLOADS[:4]):
+        _seed_r4(conn, f"rev-r4-bad-{index}", text,
+                 t0=3000.0 + index * 10, t1=3100.0 + index * 10)
+    for index, status in enumerate(("matched", "recorded", "failed")):
+        _seed_r4(conn, f"rev-r4-done-{index}", json.dumps({"status": status}),
+                 t0=4000.0 + index * 10, t1=4100.0 + index * 10)
+    core = SlowCore(conn, camera="front")
+
+    level = core.waterlevel()
+
+    assert level["pending"] == 2 + 3 + 4 == 9
+    assert level["failed_final"] == 1
+    assert SlowCore.count_pending_reviews(conn, camera=None) == 9
+    conn.close()
+
+
+def test_count_pending_reviews_camera_filter(tmp_path):
+    """4. 相机过滤：front/back 各自精确，None 为全局之和。"""
+    conn = _conn(tmp_path)
+    for index in range(2):
+        _seed_r4(conn, f"rev-r4-fp-{index}", "{not json",
+                 t0=1000.0 + index * 10, t1=1100.0 + index * 10)
+    _seed_r4(conn, "rev-r4-ft", json.dumps({"status": "matched"}),
+             t0=1200.0, t1=1300.0)
+    for index in range(3):
+        _seed_r4(conn, f"rev-r4-bp-{index}", json.dumps({"status": "mystery"}),
+                 camera="back", t0=2000.0 + index * 10, t1=2100.0 + index * 10)
+    for index in range(2):
+        _seed_r4(conn, f"rev-r4-bt-{index}", json.dumps({"status": "recorded"}),
+                 camera="back", t0=2200.0 + index * 10, t1=2300.0 + index * 10)
+
+    assert SlowCore.count_pending_reviews(conn, camera="front") == 2
+    assert SlowCore.count_pending_reviews(conn, camera="back") == 3
+    assert SlowCore.count_pending_reviews(conn, camera=None) == 5
+    assert SlowCore(conn, camera="front").waterlevel()["pending"] == 2
+    assert SlowCore(conn, camera="back").waterlevel()["pending"] == 3
+    conn.close()
+
+
+def test_pending_window_and_backlog_are_separate(tmp_path):
+    """9. 处理窗口与 backlog 分离：坏认领不占 LIMIT，但仍计入 backlog。
+
+    "是否进入本轮执行"与"是否仍计入 backlog"是两件事：坏认领不进入执行
+    （fail-closed），但绝不能被抹出 backlog（那等于谎报清零）。
+    """
+    conn = _conn(tmp_path)
+    for index in range(30):
+        _seed_r4(conn, f"rev-r4-badlim-{index}", "{not json",
+                 t0=1000.0 + index, t1=1005.0 + index, retries=1)
+    for index in range(20):
+        _seed_r4(conn, f"rev-r4-termlim-{index}",
+                 json.dumps({"status": "recorded"}),
+                 t0=1100.0 + index, t1=1105.0 + index)
+    _seed_r4(conn, "rev-r4-live", None, t0=2000.0, t1=2120.0, with_row=False)
+
+    core = SlowCore(conn, camera="front", max_retries=1)
+    stats = core.process_pending(limit=1)
+
+    assert stats["processed"] == 1, "唯一合法待办必须在 limit=1 窗口内拿到名额"
+    assert core.waterlevel()["pending"] == 30, "30 条坏认领仍计入 backlog"
+    assert json.loads(_claim_payload_json(conn, "rev-r4-live"))["status"] \
+        in ("matched", "recorded")
+    conn.close()
+
+
+def test_count_pending_reviews_is_read_only(tmp_path):
+    """10. 只读与事务边界：不开事务、不 commit、不改任何表、不接慢依赖。"""
+    conn = _conn(tmp_path)
+    _seed_r4(conn, "rev-r4-ro-claim", _claim_payload_text(seconds_old=1),
+             t0=1000.0, t1=1120.0)
+    _seed_r4(conn, "rev-r4-ro-bad", "{not json", t0=2000.0, t1=2120.0)
+    calls, provider, loader, emb_fn = _dep_spy()
+
+    def digest():
+        return (
+            conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(LENGTH(COALESCE(payload,''))),0)"
+                " FROM segments").fetchone()[:],
+            conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(LENGTH(COALESCE(payload,''))),0)"
+                " FROM review_segments").fetchone()[:],
+            conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(LENGTH(COALESCE(value,''))),0)"
+                " FROM meta").fetchone()[:],
+            conn.execute("SELECT COUNT(*) FROM patterns").fetchone()[0],
+            conn.execute(
+                "SELECT COUNT(*) FROM pattern_embeddings").fetchone()[0],
+        )
+
+    before = digest()
+    changes_before = conn.total_changes
+    assert conn.in_transaction is False
+
+    # 类方法可直接用裸连接调用——不需要 SlowCore 实例，也就无从接慢依赖
+    assert SlowCore.count_pending_reviews(conn) == 2
+    assert SlowCore.count_pending_reviews(conn, camera="front") == 2
+    assert SlowCore.count_pending_reviews(conn, camera="back") == 0
+    assert SlowCore.count_pending_reviews(conn, camera=None) == 2
+
+    assert conn.in_transaction is False, "统一统计不得开启事务"
+    assert conn.total_changes == changes_before, "统一统计不得修改任何行"
+    assert digest() == before
+    assert calls == {"provider": 0, "embedder": 0, "loader": 0}, calls
     conn.close()

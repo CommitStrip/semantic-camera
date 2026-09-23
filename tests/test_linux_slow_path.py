@@ -11,6 +11,7 @@ import pytest
 
 import scam.db as db
 from scam import linux_slow_path
+from scam.slow_core import SlowCore
 
 
 def _conn(tmp_path):
@@ -221,10 +222,13 @@ def test_adapter_source_has_no_write_state_machine():
                       "def _record_failure", "def _write_segment",
                       "def _enrich_event_text"):
         assert forbidden not in source, forbidden
-    # 允许的 SQL 只有两处只读 SELECT（相机列表 + backlog 汇总）
-    assert source.count(".execute(") == 2
+    # SC-B-R4：适配器只剩一处只读 SELECT（相机列表）；backlog 汇总必须走
+    # 唯一真值入口 `SlowCore.count_pending_reviews`，不得自带第二份判定。
+    assert source.count(".execute(") == 1
     assert "SELECT DISTINCT camera" in source
-    assert "SELECT COUNT(*)" in source
+    assert "count_pending_reviews" in source
+    assert "json_extract" not in source, "适配器不得自带 JSON 判定 SQL"
+    assert "SELECT COUNT(*)" not in source, "backlog 汇总不得在适配器复制"
 
 
 def test_adapter_has_no_network_or_subprocess_side_effects():
@@ -537,4 +541,146 @@ def test_adapter_stale_exhausted_finalizes_in_one_round(tmp_path):
     ).fetchone()[0])
     assert payload["status"] == "failed"
     assert payload["error"] == "retries_exhausted"
+    conn.close()
+
+
+# ---------- LZ-083 SC-B-R3：适配器不得绕过类型保真合同 ----------
+
+def test_adapter_does_not_bypass_bool_t_claim_fidelity(tmp_path):
+    """数据库 `t_claim:true` 经适配器入口仍必须 fail-closed（类型保真）。"""
+    conn = _conn(tmp_path)
+    _seed_segment(conn, "rev-adb", t0=9000.0, t1=9120.0)
+    conn.execute(
+        "INSERT INTO segments (segment_id,camera,t_start,t_end,signature,"
+        "detail,payload) VALUES ('rev-adb','front',9000.0,9120.0,NULL,"
+        "NULL,?)",
+        (json.dumps({"status": "claiming", "owner": "dead",
+                     "t_claim": True}),))
+    conn.execute(
+        "INSERT INTO meta (key,value) VALUES ('slow:retry:rev-adb','1')")
+    conn.commit()
+    before = conn.execute(
+        "SELECT payload FROM segments WHERE segment_id='rev-adb'"
+    ).fetchone()[0]
+
+    stats = linux_slow_path.run_once(conn, recover_stale=True,
+                                     stale_after_s=1, max_attempts=1)
+
+    assert stats["failed"] == 0, f"适配器不得绕过类型保真合同: {stats}"
+    assert stats["processed"] == 0 and stats["retried"] == 0
+    assert stats["backlog"] == 1, "backlog 必须保持 1"
+    after = conn.execute(
+        "SELECT payload FROM segments WHERE segment_id='rev-adb'"
+    ).fetchone()[0]
+    assert after == before, "payload 必须逐字节不变"
+    retry = conn.execute(
+        "SELECT value FROM meta WHERE key='slow:retry:rev-adb'"
+    ).fetchone()[0]
+    assert retry == "1", "retry 不得增加"
+    conn.close()
+
+
+# ============ SC-B-R4：统一 backlog 真值（适配器侧） ============
+
+
+def _seed_adapter_row(conn, rid, payload_text, *, camera="front", t0=9000.0,
+                      t1=9120.0):
+    _seed_segment(conn, rid, camera=camera, t0=t0, t1=t1)
+    conn.execute(
+        "INSERT INTO segments (segment_id,camera,t_start,t_end,signature,"
+        "detail,payload) VALUES (?,?,?,?,NULL,NULL,?)",
+        (rid, camera, t0, t1, payload_text))
+    conn.commit()
+
+
+def _adapter_payload(conn, rid):
+    return conn.execute(
+        "SELECT payload FROM segments WHERE segment_id=?", (rid,)).fetchone()[0]
+
+
+def test_adapter_bad_json_does_not_raise_and_stays_in_backlog(tmp_path):
+    """5. 坏 JSON：适配器不得抛 OperationalError，且必须计入 backlog。"""
+    conn = _conn(tmp_path)
+    _seed_adapter_row(conn, "rev-r4-badjson", "{not json at all")
+    before = _adapter_payload(conn, "rev-r4-badjson")
+
+    stats = linux_slow_path.run_once(conn, recover_stale=True, stale_after_s=1)
+
+    assert stats["backlog"] == 1, f"坏 JSON 必须计入 backlog: {stats}"
+    assert stats["processed"] == 0 and stats["failed"] == 0
+    assert stats["retried"] == 0 and stats["claimed"] == 0
+    assert _adapter_payload(conn, "rev-r4-badjson") == before, \
+        "坏行必须逐字节不变"
+    conn.close()
+
+
+@pytest.mark.parametrize("tag,text", [
+    ("array", "[1, 2]"),
+    ("string", '"claiming"'),
+    ("number", "12345"),
+    ("null", "null"),
+])
+def test_adapter_non_object_payload_stays_in_backlog(tmp_path, tag, text):
+    """6. 合法 JSON 但根非 object：不抛异常、计入 backlog、不被处理。"""
+    conn = _conn(tmp_path)
+    rid = f"rev-r4-{tag}"
+    _seed_adapter_row(conn, rid, text)
+    before = _adapter_payload(conn, rid)
+
+    stats = linux_slow_path.run_once(conn, recover_stale=True, stale_after_s=1)
+
+    assert stats["backlog"] == 1, f"{tag}: {stats}"
+    assert stats["processed"] == 0 and stats["failed"] == 0
+    assert _adapter_payload(conn, rid) == before
+    conn.close()
+
+
+def test_adapter_backlog_honest_after_commit_with_corrupt_row(tmp_path):
+    """7. 提交后统计一致性：坏行在场时首轮正常提交、次轮不重复执行。"""
+    conn = _conn(tmp_path)
+    _seed_adapter_row(conn, "rev-r4-corrupt", "{not json at all",
+                      t0=9000.0, t1=9120.0)
+    _seed_segment(conn, "rev-r4-live", t0=9500.0, t1=9620.0)   # 无 segments 行
+
+    first = linux_slow_path.run_once(conn)
+    assert first["processed"] == 1, f"正常行必须成功提交: {first}"
+    assert first["backlog"] == 1, "坏行仍须计入 backlog"
+
+    second = linux_slow_path.run_once(conn)
+    assert second["processed"] == 0, "已成功处理的行不得重复执行"
+    assert second["backlog"] == 1
+
+    assert json.loads(_adapter_payload(conn, "rev-r4-live"))["status"] \
+        in ("matched", "recorded")
+    assert _adapter_payload(conn, "rev-r4-corrupt") == "{not json at all"
+    conn.close()
+
+
+def test_adapter_global_backlog_sums_cameras(tmp_path):
+    """8. 全局 backlog = 各相机 pending 之和；terminal 不计入、损坏计入。"""
+    conn = _conn(tmp_path)
+    _seed_adapter_row(conn, "rev-r4-f1", "{not json", t0=9000.0, t1=9120.0)
+    _seed_adapter_row(conn, "rev-r4-f2", "[1]", t0=9200.0, t1=9320.0)
+    _seed_adapter_row(conn, "rev-r4-f3", json.dumps({"status": "matched"}),
+                      t0=9400.0, t1=9520.0)
+    _seed_adapter_row(conn, "rev-r4-b1", "{not json", camera="back",
+                      t0=9000.0, t1=9120.0)
+    _seed_adapter_row(conn, "rev-r4-b2", json.dumps({"status": "mystery"}),
+                      camera="back", t0=9200.0, t1=9320.0)
+    _seed_adapter_row(conn, "rev-r4-b3",
+                      json.dumps({"status": "claiming", "owner": True,
+                                  "t_claim": 1}),
+                      camera="back", t0=9400.0, t1=9520.0)
+    _seed_adapter_row(conn, "rev-r4-b4", json.dumps({"status": "recorded"}),
+                      camera="back", t0=9600.0, t1=9720.0)
+    _seed_adapter_row(conn, "rev-r4-b5", json.dumps({"status": "failed"}),
+                      camera="back", t0=9800.0, t1=9920.0)
+
+    assert SlowCore(conn, camera="front").waterlevel()["pending"] == 2
+    assert SlowCore(conn, camera="back").waterlevel()["pending"] == 3
+
+    stats = linux_slow_path.run_once(conn)
+
+    assert stats["processed"] == 0, "没有可处理的合法待办"
+    assert stats["backlog"] == 5, f"全局 backlog 必须是两相机之和: {stats}"
     conn.close()

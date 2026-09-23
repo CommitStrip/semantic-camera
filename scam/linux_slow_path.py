@@ -177,12 +177,9 @@ def run_once(source, *, limit=DEFAULT_LIMIT, library=None, vlm=None,
         totals["fallbacks"] += stats["fallbacks"]
         totals["retried"] += stats["retried"]
         totals["failed"] += stats["failed"]
-    # backlog：处理结束后对**全部相机**做只读水位汇总（不启动任何处理）
-    backlog_row = connection.execute(
-        "SELECT COUNT(*) FROM review_segments r"
-        " LEFT JOIN segments s ON s.segment_id = r.review_id"
-        " WHERE r.t_end IS NOT NULL"
-        " AND (s.segment_id IS NULL"
-        " OR json_extract(s.payload,'$.status')='claiming')").fetchone()
-    totals["backlog"] = int(backlog_row[0])
+    # backlog：处理结束后对**全部相机**做只读水位汇总（不启动任何处理）。
+    # SC-B-R4：本模块不再自带第二份 backlog SQL——调用唯一真值入口，与核心
+    # `SlowCore.waterlevel()` 同口径（损坏/未知状态一律计入，只有三个已知
+    # 终态退出）；坏 JSON 因此不会再在"处理已提交"之后抛 OperationalError。
+    totals["backlog"] = SlowCore.count_pending_reviews(connection, camera=None)
     return {key: max(0, int(totals[key])) for key in STAT_FIELDS}

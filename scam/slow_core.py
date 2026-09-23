@@ -30,6 +30,46 @@ MAX_FRAMES = 3          # SC-B：provider 每段最多三帧（旧 linux_slow_pa
 MODALITY_DAY = "DAY-COLOR"
 MODALITY_NIGHT = "NIGHT-BW"
 
+# SC-B-R3：认领文档状态字面量（严格相等比较用，避免散落裸字符串）
+CLAIM_STATUS = "claiming"
+
+# SC-B-R4：唯一终态集合——只有这三态退出 backlog（核心水位与全局汇总共用）
+FAILED_SEGMENT_STATUS = "failed"
+TERMINAL_SEGMENT_STATUSES = ("matched", "recorded", FAILED_SEGMENT_STATUS)
+
+# SC-B-R4：唯一 backlog 真值 SQL（只读；参数绑定，不做字符串拼装）。
+#
+# 判定口径：**未被严格认定为核心终态**的闭合审查段一律计入 backlog——
+# 无档案行、payload 为 NULL、非法 JSON、根非 object、status 缺失/非字符串/
+# 未知取值/大小写不符，全部算未完成。未知不是完成，损坏不是清零。
+#
+# JSON 函数一律放在 `CASE` 分支里：SQL 只保证 `CASE` 的 WHEN 按序求值并在
+# 命中后跳过后续分支，布尔表达式的短路是偶然行为——因此不写
+# `json_valid(x) AND json_type(x)=...`，改用单条 CASE 明确围栏。
+_PENDING_COUNT_SQL = (
+    "SELECT COUNT(*) FROM review_segments r"
+    " LEFT JOIN segments s ON s.segment_id = r.review_id"
+    " WHERE r.t_end IS NOT NULL"
+    " AND (? IS NULL OR r.camera = ?)"
+    " AND CASE"
+    "       WHEN s.segment_id IS NULL THEN 1"
+    "       WHEN json_valid(s.payload) IS NOT 1 THEN 1"
+    "       WHEN json_type(s.payload) <> 'object' THEN 1"
+    "       WHEN json_type(s.payload,'$.status') IS NOT 'text' THEN 1"
+    "       WHEN json_extract(s.payload,'$.status') IN (?,?,?) THEN 0"
+    "       ELSE 1"
+    "     END = 1"
+)
+
+
+def _reject_json_constant(name):
+    """SC-B-R3 严格 JSON 常量钩子：NaN / Infinity / -Infinity 一律判非法。
+
+    `json.loads` 默认把这三个非标准常量解析成 float('nan')/±inf——宽松
+    默认会让"无法证明陈旧"的输入看起来像合法数值，故在此 fail-closed。
+    """
+    raise ValueError(f"非法 JSON 常量：{name}")
+
 
 class SlowPersistenceConflict(RuntimeError):
     """终态持久化时认领快照过期/被接管（CAS rowcount=0）。
@@ -114,11 +154,44 @@ class SlowCore:
         return number
 
     def _failed_final_count(self):
+        """failed 终态计数。
+
+        口径（SC-B-R4）：**有效 JSON object 且 `status` 为字符串 `failed`**
+        才计入；非法 JSON、根非 object、status 类型错误或未知状态都不算数
+        （它们计入 pending，不在这里冒充失败事实）。
+        SC-B-R3 围栏保留：JSON 函数只在 `json_valid` 之后的 CASE 分支执行，
+        单条损坏 payload 不得让本计数抛 `malformed JSON` 而毒死整批。
+        """
         row = self.conn.execute(
             "SELECT COUNT(*) FROM segments WHERE camera=?"
-            " AND json_extract(payload,'$.status')='failed'",
-            (self.camera,)).fetchone()
+            " AND CASE WHEN json_valid(payload) IS NOT 1 THEN 0"
+            "          WHEN json_type(payload) <> 'object' THEN 0"
+            "          WHEN json_type(payload,'$.status') IS NOT 'text' THEN 0"
+            "          WHEN json_extract(payload,'$.status') = ? THEN 1"
+            "          ELSE 0 END = 1",
+            (self.camera, FAILED_SEGMENT_STATUS)).fetchone()
         return int(row[0])
+
+    @classmethod
+    def count_pending_reviews(cls, connection, camera=None):
+        """唯一 backlog 真值入口（SC-B-R4）：闭合审查段中**非终态**的条数。
+
+        - `camera=None`：统计全部相机；传相机 id 则只统计该相机；
+        - 只读边界：单条 SELECT、不开事务、不 commit、不写任何表、不调用
+          provider/embedder/frame_loader；计数在 SQL 侧完成，不把 payload
+          取回 Python（健康接口会周期性调用，不能在这里加载大字段）；
+        - 任意 payload 内容（非法 JSON、非 object、未知 status、损坏认领）
+          都不得让本查询抛 `malformed JSON`，也不得让它们被静默隐藏。
+
+        核心水位 `SlowCore.waterlevel()` 与薄适配器 `run_once()` 的最终
+        backlog 汇总都调用本方法——判定只有一份实现，不设第二份 SQL。
+        """
+        if camera is not None and (not isinstance(camera, str) or not camera):
+            raise ValueError("camera 必须是非空字符串或 None（拒绝 bool/数字）")
+        row = connection.execute(
+            _PENDING_COUNT_SQL,
+            (camera, camera) + tuple(TERMINAL_SEGMENT_STATUSES)).fetchone()
+        return max(0, int(row[0]))
 
     def _read_generation_sql(self):
         """当前库代数（不 BEGIN、不 commit；由调用方保证快照语义）。"""
@@ -371,15 +444,62 @@ class SlowCore:
 
     STALE_CLAIM_S = 600.0   # 异实例接管的陈旧阈值（同实例重试不受限）
 
+    @staticmethod
+    def _decode_claim_snapshot(raw_payload):
+        """SC-B-R3 认领文档**保真解析**：返回严格验证过的快照，或 None。
+
+        权威输入必须是数据库里的**原始 payload 文本**——SQLite 的
+        `json_extract` 会把 JSON `true` 归一化成整数 `1`，原始类型在 SQL 层
+        已经丢失（这正是 LZ-082 的 P0），因此陈旧判断绝不能以
+        `json_extract(...'$.t_claim')` 的结果为据。
+
+        返回 `{"owner": str, "t_claim": int, "payload": str}`；以下任一条
+        不成立一律返回 None（= 无法证明陈旧 → 调用方 fail-closed）：
+        - payload 非字符串/空串，或不是有效 JSON（严格 `parse_constant`
+          拒绝 NaN / Infinity / -Infinity）；
+        - JSON 根不是 object；
+        - `status` 不是字符串，或不严格等于 `"claiming"`；
+        - `owner` 不是非空字符串（null/bool/数字/数组/对象/空串全部拒绝）；
+        - `t_claim` 不满足 `type(x) is int`——**精确类型判断**，因为 Python
+          的 `bool` 是 `int` 子类；缺失/null/true/false/字符串数字/
+          浮点（含 1.0）/数组/对象一律拒绝。
+
+        返回的 `payload` 即调用方持有的 CAS 快照（原始文本，逐字节）。
+        """
+        if not isinstance(raw_payload, str) or not raw_payload:
+            return None
+        try:
+            doc = json.loads(raw_payload,
+                             parse_constant=_reject_json_constant)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(doc, dict):
+            return None
+        status = doc.get("status")
+        if not isinstance(status, str) or status != CLAIM_STATUS:
+            return None
+        owner = doc.get("owner")
+        if not isinstance(owner, str) or not owner:
+            return None
+        t_claim = doc.get("t_claim")
+        if type(t_claim) is not int:        # 精确类型：bool 是 int 子类
+            return None
+        return {"owner": owner, "t_claim": t_claim, "payload": raw_payload}
+
     def _claim_is_provably_stale(self, owner, t_claim, stale_s, now=None):
         """fail-closed 陈旧证明：无法可靠证明"已超阈值"一律返回 False。
 
-        拒绝：owner/t_claim 缺失或 null、bool、非数值、NaN/±Inf、无法换算。
+        SC-B-R3：类型权威已上移到 `_decode_claim_snapshot`——到达本方法的
+        `t_claim` 只可能是已证明的精确 `int`。这里的拒绝分支保留为**纵深
+        防线**（直接调用/未来新增调用点时仍 fail-closed）：owner/t_claim
+        缺失或 null、bool、非数值、NaN/±Inf、无法换算全部返回 False。
         "无法证明陈旧"≠"按陈旧处理"——绝不据此改写活跃认领。
         """
         if owner is None or t_claim is None:
             return False
-        if isinstance(t_claim, bool) or not isinstance(t_claim, (int, float)):
+        if not isinstance(owner, str) or not owner:
+            return False
+        if type(t_claim) is not int:        # 精确类型：bool/float/str 全拒
             return False
         value = float(t_claim)
         if not math.isfinite(value):
@@ -387,14 +507,17 @@ class SlowCore:
         moment = time.time() if now is None else now
         return (moment - value / 1e6) >= stale_s
 
-    def _finalize_exhausted_claim(self, review_id, *, expected_owner,
-                                  expected_t_claim):
-        """耗尽认领专用收官（P0-B）：单事务、单 CAS、零慢系统依赖。
+    def _finalize_exhausted_claim(self, review_id, expected_payload):
+        """耗尽认领专用收官（SC-B-R3）：单事务、单 CAS、零慢系统依赖。
+
+        CAS 依据是**整份原始 payload 文本快照**（`segment_id + payload`
+        精确相等），而不是经 SQLite 归一化的 status/owner/t_claim 三字段——
+        后者既丢失 `t_claim` 原始类型，也保护不了认领文档里的其他并发字段。
 
         只把"已无法再执行且已证明陈旧"的 claiming 行写成固定失败终态；
         不写 patterns/pattern_embeddings、不改 semantic_events、不调
         provider/embedder/frame_loader、不加 retry、不递增库代数。
-        返回 True=收官成功；False=竞输（rollback，不覆盖赢家）。
+        返回 True=收官成功；False=竞输（rollback，不覆盖赢家、不重试）。
         """
         conn = self.conn
         self._require_clean_connection("_finalize_exhausted_claim")
@@ -405,10 +528,8 @@ class SlowCore:
         try:
             cur = conn.execute(
                 "UPDATE segments SET payload=? WHERE segment_id=?"
-                " AND json_extract(payload,'$.status')='claiming'"
-                " AND json_extract(payload,'$.owner')=?"
-                " AND json_extract(payload,'$.t_claim')=?",
-                (payload, review_id, expected_owner, expected_t_claim))
+                " AND payload=?",
+                (payload, review_id, expected_payload))
             if cur.rowcount != 1:
                 conn.rollback()
                 return False
@@ -423,7 +544,7 @@ class SlowCore:
 
     def pending_reviews(self, limit=20, *, recover_stale=False,
                         stale_after_s=None):
-        """认领待办闭合审查段（计划快照 CAS + 耗尽收官决策表，SC-B-R2）。
+        """认领待办闭合审查段（整份 payload 快照 CAS + 耗尽收官，SC-B-R3）。
 
         互斥语义：无行→INSERT 占位成功者独占；claiming 行按下表处理：
 
@@ -435,13 +556,24 @@ class SlowCore:
         | 异实例·已耗尽·未过阈值 | 跳过（保持 claiming，本轮 failed=0） |
         | 异实例·已耗尽·过阈值·`True` | **不接管刷新**——按计划快照直接 CAS 收官
         | （`failed/retries_exhausted/final=true`），本轮 failed+1、backlog-1 |
-        | 同实例·未耗尽 | 续跑（快照=当前行值） |
+        | 同实例·未耗尽 | 续跑（快照=当前行原始 payload 文本） |
         | 同实例·已耗尽·未过阈值 | 跳过（活跃最后尝试保护） |
         | 同实例·已耗尽·过阈值 | 按当前计划快照 CAS 收官 |
-        | 时间无法证明陈旧 | 一律跳过（fail-closed：不接管、不终态） |
+        | 认领文档无法严格解析 | 一律跳过（fail-closed：不接管、不终态化、
+        | 不刷新、不增 retry、不减 backlog、不调昂贵依赖、payload 逐字节不变） |
+
+        SC-B-R3 查询纪律（两道防线）：
+        - SQL 侧只返回**候选**行（无档案行，或 `json_valid` 且 status 严格为
+          `claiming` 文本）——`json_valid` 先行 + `CASE` 保证无效 JSON 绝不
+          进入 `json_type/json_extract`（不再有 `malformed JSON` 毒死整批），
+          且终态行与损坏行**不占用 LIMIT 窗口**（防真正待办饥饿）；
+        - Python 侧对原始 payload 文本做 `_decode_claim_snapshot` 严格解析，
+          未通过者一律跳过——权威类型判断只在 Python 层，绝不采信
+          `json_extract` 的归一化结果。
 
         接管/收官 CAS 竞输均不处理、不重试、不写终态。返回条目携带
-        claim_owner/claim_t_claim 快照，供持久化阶段终态 CAS 使用。
+        `claim_payload_snapshot`（原始 payload 文本快照），供持久化阶段
+        终态 CAS 使用。
         """
         self._require_clean_connection("pending_reviews")   # P0-A：认领前守卫
         checked_stale = self._validate_stale_after(stale_after_s)
@@ -449,24 +581,34 @@ class SlowCore:
                    else checked_stale)
         rows = self.conn.execute(
             "SELECT r.review_id, r.camera, r.t_start, r.t_end,"
-            " json_extract(s.payload,'$.status') AS s_status,"
-            " json_extract(s.payload,'$.owner') AS s_owner,"
-            " json_extract(s.payload,'$.t_claim') AS s_tclaim"
+            " s.payload AS s_payload"
             " FROM review_segments r"
             " LEFT JOIN segments s ON s.segment_id = r.review_id"
             " WHERE r.t_end IS NOT NULL AND r.camera=?"
-            " AND (s.segment_id IS NULL OR s_status='claiming')"
+            " AND (s.segment_id IS NULL"
+            "      OR (json_valid(s.payload)"
+            "          AND CASE WHEN json_valid(s.payload)"
+            "                   THEN json_type(s.payload,'$.status') END"
+            "              = 'text'"
+            "          AND CASE WHEN json_valid(s.payload)"
+            "                   THEN json_extract(s.payload,'$.status') END"
+            "              = ?))"
             " ORDER BY r.t_start LIMIT ?",
-            (self.camera, int(limit))).fetchall()
+            (self.camera, CLAIM_STATUS, int(limit))).fetchall()
         claimed = []
         now_us = int(time.time() * 1e6)
         for row in rows:
             rid = row["review_id"]
             entry = dict(review_id=rid, camera=row["camera"],
                          t_start=row["t_start"], t_end=row["t_end"])
-            if row["s_status"] == "claiming":
-                old_owner = row["s_owner"]
-                old_t = row["s_tclaim"]
+            raw_payload = row["s_payload"]
+            if raw_payload is not None:
+                # 权威类型判断只在 Python 层：原始 payload 文本严格解析
+                snapshot = self._decode_claim_snapshot(raw_payload)
+                if snapshot is None:
+                    continue    # fail-closed：无法证明 → 不接管、不终态化
+                old_owner = snapshot["owner"]
+                old_t = snapshot["t_claim"]
                 provably_stale = self._claim_is_provably_stale(
                     old_owner, old_t, stale_s)
                 exhausted = self._retries(rid) >= self.max_retries
@@ -476,43 +618,42 @@ class SlowCore:
                     # 才按计划快照直接收官——绝不刷新 t_claim 后重新等待
                     can_finalize = provably_stale and                         (same_instance or recover_stale)
                     if can_finalize:
-                        self._finalize_exhausted_claim(
-                            rid, expected_owner=old_owner,
-                            expected_t_claim=old_t)   # False=竞输，静默
+                        # 整份原始 payload 快照 CAS（False=竞输，静默）
+                        self._finalize_exhausted_claim(rid, raw_payload)
                     continue        # 已耗尽：无论收官成败都不进本轮执行
                 if same_instance:
-                    entry["claim_owner"] = old_owner
-                    entry["claim_t_claim"] = old_t
+                    # 同实例续跑：快照=数据库读到的原始 payload 文本
+                    entry["claim_payload_snapshot"] = raw_payload
                     claimed.append(entry)
                     continue
                 if not recover_stale or not provably_stale:
                     continue        # 不可接管（未开启/未过阈值/无法证明）
-                # 陈旧接管：UPDATE 严格绑定计划快照（owner+t_claim）
+                # 陈旧接管：先用**旧整份 payload** 做 CAS，成功才写新认领
                 new_us = int(time.time() * 1e6)
+                new_text = self._claim_payload(new_us)   # 只生成一次
                 cur = self.conn.execute(
-                    "UPDATE segments SET payload=? WHERE segment_id=?"
-                    " AND json_extract(payload,'$.status')='claiming'"
-                    " AND json_extract(payload,'$.owner')=?"
-                    " AND json_extract(payload,'$.t_claim')=?",
-                    (self._claim_payload(new_us), rid, old_owner, old_t))
+                    "UPDATE segments SET payload=?"
+                    " WHERE segment_id=? AND payload=?",
+                    (new_text, rid, raw_payload))
                 self.conn.commit()
                 if cur.rowcount != 1:
                     continue        # 竞输/快照过期：留给下一轮观察
-                entry["claim_owner"] = self.instance_id
-                entry["claim_t_claim"] = new_us
+                # 接管成功：后续终态写入绑定**新** payload 快照
+                entry["claim_payload_snapshot"] = new_text
                 claimed.append(entry)
                 continue
             # 无行：INSERT 占位即认领（rowcount=1 者独占）
+            claim_text = self._claim_payload(now_us)   # 只生成一次
             cur = self.conn.execute(
                 "INSERT OR IGNORE INTO segments"
                 " (segment_id,camera,t_start,t_end,signature,detail,payload)"
                 " VALUES (?,?,?,?,?,?,?)",
                 (rid, row["camera"], row["t_start"], row["t_end"],
-                 None, None, self._claim_payload(now_us)))
+                 None, None, claim_text))
             self.conn.commit()
             if cur.rowcount == 1:
-                entry["claim_owner"] = self.instance_id
-                entry["claim_t_claim"] = now_us
+                # 同一字符串既是落库文本也是快照（绝不生成两次再假设等价）
+                entry["claim_payload_snapshot"] = claim_text
                 claimed.append(entry)
         return claimed
 
@@ -654,7 +795,8 @@ class SlowCore:
         - BEGIN IMMEDIATE → **generation CAS**（数据库当前代数必须等于本实例
           内存库加载快照——旧 worker 不得覆盖管理员刚提交的金标）→
           patterns/embeddings SQL → segment claiming→终态 CAS（绑定
-          segment_id+status+owner+t_claim 快照）→ 一次 commit；
+          `segment_id` + **整份原始 payload 文本快照**，SC-B-R3）→ 一次
+          commit；
         - generation 不等 → rollback、不写任何表、抛 SlowGenerationConflict、
           不覆盖管理员反馈、缓存失效（调用方下一轮重新加载重算）；
         - segment CAS rowcount != 1 → 整个事务 rollback（patterns 不得单独提交）
@@ -676,18 +818,14 @@ class SlowCore:
             self._save_library_sql()
             cur = conn.execute(
                 "UPDATE segments SET signature=?, detail=?, payload=?"
-                " WHERE segment_id=?"
-                " AND json_extract(payload,'$.status')='claiming'"
-                " AND json_extract(payload,'$.owner')=?"
-                " AND json_extract(payload,'$.t_claim')=?",
+                " WHERE segment_id=? AND payload=?",
                 (json.dumps(signature, ensure_ascii=False, sort_keys=True)
                  if signature is not None else None,
                  detail,
                  json.dumps(payload, ensure_ascii=False,
                             separators=(",", ":")),
                  review["review_id"],
-                 review.get("claim_owner"),
-                 review.get("claim_t_claim")))
+                 review.get("claim_payload_snapshot")))
             if cur.rowcount != 1:
                 raise SlowPersistenceConflict(
                     f"segment {review['review_id']} 认领快照过期或被接管："
@@ -1050,19 +1188,20 @@ class SlowCore:
     def waterlevel(self):
         """待办水位与失败终态数（S2 接 NVR 后进 /api/health）。
 
-        pending=无档案或仍处 claiming（活跃/陈旧认领）的闭合段。
+        SC-B-R4：pending 不再由本方法自己写 SQL——统一调用
+        `count_pending_reviews`（唯一 backlog 真值入口），核心健康面与薄
+        适配器的全局汇总因此永远同口径。
+
+        口径：**未被严格认定为核心终态**的闭合审查段一律计入 pending——
+        无档案、payload 为 NULL、非法 JSON、根非 object、`status` 缺失/
+        非字符串/未知/大小写不符、认领结构损坏（owner/t_claim 无效）全部
+        算未完成；只有 matched/recorded/failed 三个合法终态退出。无法严格
+        解析的认领文档仍在 backlog 里：我们 fail-closed 拒绝触碰它，但把它
+        从水位里抹掉等于谎报清零。
+        failed_final：有效 JSON object 且 `status` 为字符串 failed 的条数。
         """
-        open_count = self.conn.execute(
-            "SELECT COUNT(*) FROM review_segments r"
-            " LEFT JOIN segments s ON s.segment_id = r.review_id"
-            " WHERE r.t_end IS NOT NULL AND r.camera=?"
-            " AND (s.segment_id IS NULL"
-            " OR json_extract(s.payload,'$.status')='claiming')",
-            (self.camera,)).fetchone()[0]
-        failed = self.conn.execute(
-            "SELECT COUNT(*) FROM segments WHERE camera=?"
-            " AND json_extract(payload,'$.status')='failed'",
-            (self.camera,)).fetchone()[0]
-        return {"camera": self.camera, "pending": open_count,
-                "failed_final": failed,
+        return {"camera": self.camera,
+                "pending": self.count_pending_reviews(self.conn,
+                                                      camera=self.camera),
+                "failed_final": self._failed_final_count(),
                 "patterns": len(self.library.patterns)}
