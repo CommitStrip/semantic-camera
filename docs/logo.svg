@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120" role="img" aria-label="语义摄像头">
+  <title>语义摄像头 · Semantic Camera</title>
+  <!-- 3×3 网格圈选：一格高亮 = 管理员定义的重点管理区域 -->
+  <rect x="0" y="0" width="120" height="120" rx="26" fill="#1e293b"/>
+  <g fill="#38bdf8">
+    <rect x="18" y="18" width="22" height="22" rx="5"/>
+    <rect x="49" y="18" width="22" height="22" rx="5"/>
+    <rect x="80" y="18" width="22" height="22" rx="5"/>
+    <rect x="18" y="49" width="22" height="22" rx="5"/>
+    <rect x="80" y="49" width="22" height="22" rx="5"/>
+    <rect x="18" y="80" width="22" height="22" rx="5"/>
+    <rect x="49" y="80" width="22" height="22" rx="5"/>
+    <rect x="80" y="80" width="22" height="22" rx="5"/>
+  </g>
+  <rect x="49" y="49" width="22" height="22" rx="5" fill="#f59e0b"/>
+</svg>
