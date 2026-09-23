@@ -180,7 +180,101 @@ def test_vus_without_timestamp_attestation_remains_unknown(monkeypatch):
     src = CameraSource("cam", "rtsp://example/stream")
     monkeypatch.setattr(src, "_build", lambda: StubVusSource())
     assert src.open() is True
-    assert src.stats == {"frames": 3, "timestamp_kind": "unknown"}
+    assert src.stats == {"frames": 3, "timestamp_kind": "unknown",
+                         "eof_reopens": 0}
+
+
+# ---------- 文件源片尾回绕（值守不因文件读完而停摆） ----------
+
+class _FiniteStubSource:
+    """有限回放源桩：读满 total 帧后返回失败，且**不自行回绕**。
+
+    这正是 vus `FileSource` 的语义（片尾即结束），用于锁住
+    `CameraSource` 必须自己重开、否则相机永久停摆的回归。
+    """
+
+    def __init__(self, total=3):
+        self.total = total
+        self.reads = 0
+        self.opens = 0
+        self.closed = 0
+
+    def open(self):
+        self.reads = 0
+        self.opens += 1
+        return True
+
+    def close(self):
+        self.closed += 1
+
+    def read(self):
+        if self.reads >= self.total:
+            return False, None, None
+        self.reads += 1
+        return True, "frame", 1.0
+
+    @property
+    def stats(self):
+        return {"frames": self.reads}
+
+
+def _file_source_with(monkeypatch, stub):
+    src = CameraSource("cam", "clip.mp4", source_kind="file")
+    monkeypatch.setattr(src, "_build", lambda: stub)
+    assert src.open() is True
+    return src
+
+
+def test_file_source_loops_at_eof_instead_of_dying(monkeypatch):
+    """片尾必须重开回到首帧：文件源值守不得因读完而永久停摆。"""
+    stub = _FiniteStubSource(total=3)
+    src = _file_source_with(monkeypatch, stub)
+
+    ok_count = 0
+    for _ in range(10):
+        ok, frame, _ts = src.read()
+        if ok:
+            ok_count += 1
+
+    assert ok_count == 10, "片尾之后必须继续出帧（回绕），而不是永久失败"
+    assert stub.opens >= 4, "每读到片尾都必须重开源"
+    assert src.eof_reopens >= 3
+    assert src.read_failures == 0, "回绕成功不得计入读失败"
+    assert src.stats["eof_reopens"] == src.eof_reopens
+
+
+def test_file_source_reopen_failure_is_counted_as_read_failure(monkeypatch):
+    """重开也失败（文件被移走/损坏）时：如实计读失败，不冒充成功。"""
+    stub = _FiniteStubSource(total=1)
+
+    def failing_open():
+        return False
+    monkeypatch.setattr(stub, "open", failing_open)
+    src = CameraSource("cam", "clip.mp4", source_kind="file")
+    monkeypatch.setattr(src, "_build", lambda: stub)
+    monkeypatch.setattr(src, "open", lambda: True)
+    src._src = stub
+    src.reads = 0
+
+    ok, frame, _ts = src.read()      # 首帧成功
+    assert ok is True
+    ok, frame, _ts = src.read()      # 片尾 → 重开失败
+    assert ok is False and frame is None
+    assert src.read_failures == 1
+    assert src.eof_reopens == 0
+
+
+def test_non_file_source_is_not_reopened_by_wrapper(monkeypatch):
+    """rtsp/camera 源不受该回绕逻辑影响（避免掩盖真实断流）。"""
+    stub = _FiniteStubSource(total=1)
+    src = CameraSource("cam", "rtsp://example/stream", source_kind="rtsp")
+    monkeypatch.setattr(src, "_build", lambda: stub)
+    assert src.open() is True
+
+    assert src.read()[0] is True
+    assert src.read()[0] is False
+    assert stub.opens == 1, "非文件源不得由本层重开"
+    assert src.read_failures == 1
 
 
 # ---------- 源时间戳贯穿：只有 source_capture 溯源才能进 Monitor ----------

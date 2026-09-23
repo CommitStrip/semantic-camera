@@ -206,6 +206,50 @@ def test_camera_thread_marks_degraded_then_online_on_read_recovery(monkeypatch):
     assert steps_seen[0]["issue"] is None
 
 
+def test_file_source_uses_file_wording_for_failures(monkeypatch):
+    """文件源故障给文件口径提示：不得套用网络相机的“检查网络与供电”。"""
+    stop = _FastStop()
+    seen = []
+    reads = []
+
+    class Source:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def open(self):
+            return True
+
+        def read(self):
+            reads.append(1)
+            seen.append(_camera_state(registry, "clip"))
+            if len(reads) == 1:
+                return False, None, None
+            stop.set()
+            return True, "frame", 2000.0
+
+        @property
+        def stats(self):
+            return {"timestamp_kind": "host_receive", "eof_reopens": 0}
+
+        def close(self):
+            pass
+
+    registry = CameraRuntimeRegistry(["clip"])
+    state = SimpleNamespace(monitors={}, runtime=registry)
+    _patch_runtime(monkeypatch, Source)
+    nvr_mod._run_camera(
+        {"id": "clip", "source": "clip.mp4", "source_kind": "file",
+         "detector": {"engine": "none"}},
+        [], "events.db", stop, state)
+
+    assert seen[1]["state"] == "degraded"
+    assert seen[1]["issue"] == {
+        "code": "file_source_read_failed",
+        "action": "检查视频文件是否完整可解码；读完会自动从头继续"}
+    assert "网络" not in seen[1]["issue"]["action"]
+    assert "供电" not in seen[1]["issue"]["action"]
+
+
 def test_detector_construction_keeps_state_connecting_until_online(
         tmp_path, monkeypatch):
     """C-051/C-052：源已打开但检测器尚未构造成功时，工作台必须保持保守状态。

@@ -94,6 +94,9 @@ class CameraSource:
         self.max_reconnects = max_reconnects
         self._src = None
         self.read_failures = 0
+        # 文件源片尾回绕计数：vus FileSource 是有限回放源，读到片尾返回失败且
+        # 不自行回绕；值守语义要求继续值守，由本类重开后回到首帧。
+        self.eof_reopens = 0
         # vus 三类源全部用 time.monotonic() 打点（直播语义、抗时钟跳变）；
         # 首次成功读帧时锚定 (单调, 墙钟) 原点，把单调时间映射回墙钟序列。
         self._vus_monotonic = False
@@ -122,17 +125,41 @@ class CameraSource:
         self._src = self._build()
         self._mono_anchor = None
         self._wall_anchor = None
+        self.eof_reopens = 0
         ok = self._src.open()
         self.ok = bool(ok)
         return self.ok
+
+    def _reopen_after_eof(self) -> bool:
+        """文件源片尾重开（回到首帧）；失败返回 False，由调用方计入读失败。"""
+        src = self._src
+        if src is None:
+            return False
+        try:
+            src.close()
+        except Exception:
+            pass
+        try:
+            ok = bool(src.open())
+        except Exception:
+            return False
+        if ok:
+            self.eof_reopens += 1
+        return ok
 
     def read(self):
         """返回 (ok, frame_bgr, ts)；断流/失败时计一次失败并返回 (False, None, None)。
 
         vus 源的单调时间戳经锚点映射为墙钟序列（跨重连稳定，NTP 跳变不扭曲
         事件时间）；溯源仍是 host_receive——主机读帧时刻不冒充相机采集时刻。
+
+        文件源是**有限回放**语义：片尾即读失败。值守不能因片尾结束，因此这里
+        重开一次源并补读（回到首帧）；重开也失败才按读失败上报。
         """
         ok, frame, ts = self._src.read()
+        if not ok and self.source_kind == "file":
+            if self._reopen_after_eof():
+                ok, frame, ts = self._src.read()
         if not ok:
             self.read_failures += 1
             self.ok = False
@@ -167,4 +194,6 @@ class CameraSource:
             stats.setdefault("timestamp_kind", "host_receive")
         else:
             stats.setdefault("timestamp_kind", "unknown")
+        # 文件源片尾回绕次数（值守不因片尾结束的确定性证据）
+        stats["eof_reopens"] = self.eof_reopens
         return stats

@@ -132,6 +132,11 @@ def _run_camera(cam_cfg, zones, db_path, stop_event, state, watchdog=None):
     source_kind = cam_cfg.get("source_kind", "rtsp")
     detect_url = cam_cfg.get("detect_source") or cam_cfg["source"]
     source = CameraSource(camera_id, detect_url, source_kind=source_kind)
+    # 文件源的故障口径与网络相机不同（文件不存在/损坏 ≠ 网络/供电问题）。
+    open_issue = ("file_source_open_failed" if source_kind == "file"
+                  else "source_open_failed")
+    read_issue = ("file_source_read_failed" if source_kind == "file"
+                  else "source_read_failed")
     if watchdog is not None:
         watchdog.started()
     had_open_failure = False
@@ -140,7 +145,7 @@ def _run_camera(cam_cfg, zones, db_path, stop_event, state, watchdog=None):
         if watchdog is not None:
             watchdog.failure("open", "source open failed")
         if runtime is not None:
-            runtime.degraded(camera_id, "source_open_failed")
+            runtime.degraded(camera_id, open_issue)
         print(f"[NVR] {camera_id} 源打开失败，5s 后重试")
         stop_event.wait(5.0)
     if stop_event.is_set():
@@ -179,7 +184,7 @@ def _run_camera(cam_cfg, zones, db_path, stop_event, state, watchdog=None):
                 if watchdog is not None:
                     watchdog.failure("read", "source read failed")
                 if runtime is not None:
-                    runtime.degraded(camera_id, "source_read_failed")
+                    runtime.degraded(camera_id, read_issue)
                 stop_event.wait(0.5)
                 continue
             # 真实源时间戳贯穿：仅当源显式证明 source_capture 才采用采集时间；

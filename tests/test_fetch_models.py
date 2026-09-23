@@ -1,6 +1,7 @@
 """LZ-055 模型交付脚本测试：白名单边界/哈希校验/原子入位/围栏（不真下载）。"""
 
 import os
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -35,20 +36,47 @@ def test_non_public_ip_rejected(monkeypatch):
         fm._assert_safe_url(url)
 
 
-def test_redirect_refused():
-    handler = fm._NoRedirect()
+def test_redirect_to_non_whitelisted_host_refused():
+    """重定向逐跳限白名单：跳出白名单立即拒绝（不跳第三方）。"""
+    handler = fm._WhitelistRedirect()
     with pytest.raises(Exception, match="拒绝重定向"):
         handler.redirect_request(None, None, 302, "Found", {},
                                  "https://evil.example/x")
+    with pytest.raises(Exception, match="拒绝重定向"):
+        handler.redirect_request(None, None, 302, "Found", {},
+                                 "http://github.com/x")
+
+
+def test_redirect_to_whitelisted_cdn_allowed():
+    """GitHub Release 资产会 302 到白名单资产域：必须允许，否则官方源永远下不来。"""
+    handler = fm._WhitelistRedirect()
+    req = urllib.request.Request("https://github.com/a/b.onnx")
+    followed = handler.redirect_request(
+        req, None, 302, "Found", {},
+        "https://objects.githubusercontent.com/a/b.onnx")
+    assert followed is not None and followed.full_url.endswith("b.onnx")
 
 
 # ---------- fetch：未冻结拒绝下载 / 哈希不符不落位 / 成功原子入位 ----------
 
+def test_registry_nanodet_url_and_hash_are_frozen():
+    """交付清单必须是成对冻结的公网 HTTPS 官方资产（占位 None 视为未冻结）。"""
+    item = fm.MODELS["nanodet"]
+    assert item["url"].startswith("https://github.com/RangiLyu/nanodet/")
+    assert "nanodet" in item["url"] and item["url"].endswith(".onnx")
+    assert isinstance(item["sha256"], str) and len(item["sha256"]) == 64, \
+        "哈希未冻结会静默关闭自动下载，必须显式冻结"
+    assert fm.urllib.request.urlparse(item["url"]).hostname in fm._ALLOWED_HOSTS
+
+
 def test_fetch_refuses_unfrozen_sha(tmp_path, monkeypatch):
     called = []
+    monkeypatch.setitem(fm.MODELS, "probe",
+                        {"url": "https://github.com/a/b.onnx",
+                         "sha256": None, "path": "models/probe.onnx"})
     monkeypatch.setattr(fm, "_download_to",
                         lambda *a, **k: called.append(1) or str(tmp_path))
-    state, _ = fm.fetch("nanodet")
+    state, _ = fm.fetch("probe")
     assert state == "unfrozen" and not called
 
 
@@ -135,8 +163,8 @@ def test_status_states(tmp_path, monkeypatch):
     target.parent.mkdir(parents=True)
     target.write_bytes(b"x")
     rows = {r["model"]: r for r in fm.status()}
-    assert rows["nanodet"]["state"] == "unfrozen", \
-        "未冻结哈希时在位文件也只能是 unfrozen，不得冒充 ok"
+    assert rows["nanodet"]["state"] == "mismatch", \
+        "哈希已冻结后，内容不符的文件只能是 mismatch，不得冒充 ok"
 
 
 def test_cli_list_exit_zero(monkeypatch):

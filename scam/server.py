@@ -251,6 +251,10 @@ CAPABILITY_STATES = ("alerting", "monitor_only", "detector_unavailable")
 ISSUE_ACTIONS = {
     "source_open_failed": "检查相机电源、网线与地址后等待自动重连",
     "source_read_failed": "检查网络与相机供电；持续失败请重启相机",
+    # 文件源（回放/演示）故障原因与网络相机不同：文件不存在、被移动或编码
+    # 损坏，套用“检查网络与供电”会把人引到错误方向。
+    "file_source_open_failed": "检查视频文件是否存在且可读；修好后等待自动重连",
+    "file_source_read_failed": "检查视频文件是否完整可解码；读完会自动从头继续",
     "detector_missing": "把检测模型放到配置路径后重启值守",
     "detector_load_failed": "确认模型文件完整且 onnxruntime 可用后重启值守",
     "workbench_port_in_use": "关闭占用该端口的程序，或用 --port 改用其它端口",
