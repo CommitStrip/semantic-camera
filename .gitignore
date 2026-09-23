@@ -30,3 +30,12 @@ tests/test_linux_context_ledger.py
 .pytest-*/
 .test-tmp-*/
 方案-*.md
+
+# 内部开发规划文档（路线图 / 对标分析 / 借鉴边界 / 发布计划）——本地私有，永不入公开仓
+docs/frigate-alignment.md
+docs/frigate-gap-analysis.md
+docs/frigate-parity-roadmap.md
+docs/linux-frigate-adoption.md
+docs/linux-nvr-roadmap.md
+docs/linux-release-plan.md
+docs/win11-roadmap.md

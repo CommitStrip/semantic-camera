@@ -41,13 +41,9 @@ A budget-aware semantic video event runtime for Linux NVR and Windows 11
 | Linux NVR 版 | `python -m scam.linux_nvr` | 常驻服务、多相机、录像、远程运维、24h 稳态 | Linux CI + systemd + 真机浸泡 |
 | Win11 值守工作站版 | `python -m scam.win11` | 本机交互、桌面启动、Windows 数据目录和故障恢复 | Windows CI + 原生 Win11 实机验收 |
 
-两版共享 `scam` 领域核心，但入口、默认值、部署链、功能路线和验收报告分别维护。`python -m scam.nvr` 仅为旧部署兼容入口。
+两版共享 `scam` 领域核心，但入口、默认值、部署链和验收报告分别维护。`python -m scam.nvr` 仅为旧部署兼容入口。
 
-独立路线图：[Linux NVR](docs/linux-nvr-roadmap.md) ·
-[Linux 发布实施计划](docs/linux-release-plan.md) ·
-[Linux 运维 Runbook](docs/linux-operations-runbook.md) ·
-[Linux Frigate 借鉴边界](docs/linux-frigate-adoption.md) ·
-[Win11 工作站](docs/win11-roadmap.md)
+运维（安装 / 升级 / 回滚 / 备份恢复）见[运维 Runbook](docs/linux-operations-runbook.md)。
 
 ## 🚀 快速开始
 
@@ -178,12 +174,7 @@ docs/                    路线图、对标分析与运维 Runbook
 
 | 文档 | 内容 |
 |---|---|
-| [Linux NVR 路线图](docs/linux-nvr-roadmap.md) | 版本定位、验收口径与状态记账纪律 |
-| [Linux 发布实施计划](docs/linux-release-plan.md) | 发布目标与实施步骤 |
 | [运维 Runbook](docs/linux-operations-runbook.md) | 安装 / 升级 / 回滚 / 备份恢复（含人工确认点） |
-| [Win11 工作站路线图](docs/win11-roadmap.md) | Win11 版定位与验收边界 |
-| [Frigate 借鉴边界](docs/linux-frigate-adoption.md) | 借鉴什么、不复制什么 |
-| [差距分析](docs/frigate-gap-analysis.md) · [对齐路线图](docs/frigate-parity-roadmap.md) · [对标路线](docs/frigate-alignment.md) | 与成熟 NVR 的逐项对照与冲刺计划 |
 
 ## ⚠️ 已知限制（诚实清单）
 

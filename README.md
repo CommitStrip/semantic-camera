@@ -39,13 +39,10 @@ Core idea: **wrap uncertain models with deterministic engineering**. The fast sy
 | Linux NVR | `python -m scam.linux_nvr` | Always-on service, multi-camera, recording, remote operations, 24h soak | Linux CI + systemd + on-device soak |
 | Windows 11 Workstation | `python -m scam.win11` | Local interactive use, desktop startup, Windows data paths, recovery | Windows CI + native Windows 11 acceptance |
 
-Both editions share the `scam` domain core, while entry points, defaults, deployment chains, roadmaps and acceptance reports are maintained separately. `python -m scam.nvr` is kept for legacy deployments only.
+Both editions share the `scam` domain core, while entry points, defaults, deployment chains and acceptance reports are maintained separately. `python -m scam.nvr` is kept for legacy deployments only.
 
-Edition roadmaps: [Linux NVR](docs/linux-nvr-roadmap.md) ·
-[Linux release plan](docs/linux-release-plan.md) ·
-[Linux operations runbook](docs/linux-operations-runbook.md) ·
-[Linux Frigate adoption boundary](docs/linux-frigate-adoption.md) ·
-[Windows 11 Workstation](docs/win11-roadmap.md)
+Operations (install / upgrade / rollback / backup and restore) are covered by the
+[operations runbook](docs/linux-operations-runbook.md).
 
 ## 🚀 Quick start
 
@@ -178,12 +175,7 @@ docs/                    roadmaps, benchmark analyses, operations runbook
 
 | Document | Contents |
 |---|---|
-| [Linux NVR roadmap](docs/linux-nvr-roadmap.md) | Edition positioning, acceptance criteria and status bookkeeping rules |
-| [Linux release plan](docs/linux-release-plan.md) | Release goals and implementation steps |
 | [Operations runbook](docs/linux-operations-runbook.md) | Install / upgrade / rollback / backup and restore, with human confirmation points |
-| [Windows 11 roadmap](docs/win11-roadmap.md) | Windows 11 edition positioning and acceptance boundary |
-| [Frigate adoption boundary](docs/linux-frigate-adoption.md) | What is adopted and what is deliberately not copied |
-| [Gap analysis](docs/frigate-gap-analysis.md) · [Parity roadmap](docs/frigate-parity-roadmap.md) · [Alignment](docs/frigate-alignment.md) | Item-by-item comparison with a mature NVR and the resulting sprint plan |
 
 ## ⚠️ Known limitations (honest list)
 
