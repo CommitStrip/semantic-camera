@@ -15,7 +15,9 @@ class JepaEmbedder:
         providers = (["CUDAExecutionProvider", "CPUExecutionProvider"]
                      if "CUDAExecutionProvider" in avail
                      else ["CPUExecutionProvider"])
-        self.sess = ort.InferenceSession(onnx_path, providers=providers)
+        from .detect import session_options
+        self.sess = ort.InferenceSession(onnx_path, session_options(),
+                                        providers=providers)
         self.input_name = self.sess.get_inputs()[0].name
 
     def embed(self, frames_bgr):

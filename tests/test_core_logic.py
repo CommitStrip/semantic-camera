@@ -161,3 +161,23 @@ def test_validate_venue_type_hardening():
     assert any("zones 必须为数组" in e for e in errs)
     assert any("相机条目必须为对象" in e for e in errs)
     assert any("schedule 必须为数组" in e for e in errs)
+
+# ---------- ONNX 会话线程数有界（小模型线程超订会吃掉整机 CPU） ----------
+
+def test_onnx_session_options_bound_intra_op_threads():
+    """会话必须显式限线程：默认按核数开会把 416×416 小推理放大到 10 倍 CPU。"""
+    from scam import detect
+
+    assert isinstance(detect.INTRA_OP_THREADS, int)
+    assert 1 <= detect.INTRA_OP_THREADS <= 4,         "线程数必须是有界小值（实测 2 线程比默认更快且 CPU 仅 1/9）"
+    assert detect.session_options().intra_op_num_threads == detect.INTRA_OP_THREADS
+
+
+def test_embedder_uses_bounded_session_options():
+    """嵌入器同源复用同一份受控会话选项，避免两处各写一套。"""
+    import inspect
+
+    from scam import embed
+
+    source = inspect.getsource(embed.JepaEmbedder.__init__)
+    assert "session_options" in source, "嵌入器必须复用受控会话选项"

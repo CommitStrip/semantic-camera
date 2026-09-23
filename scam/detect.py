@@ -10,6 +10,20 @@ import numpy as np
 STRIDES = (8, 16, 32, 64)
 REG_BINS = 8
 
+# onnxruntime 默认按逻辑核数开 intra-op 线程。对 416×416 这种小输入，线程调度
+# 开销远大于并行收益：本机 20 核实测每次推理墙钟 52ms 却耗 CPU 542ms（10.4 倍
+# 放大）；限到 2 线程后墙钟 31ms（更快）而 CPU 降到 61ms。默认限流既省机器也
+# 不伤延迟；需要调优的宿主直接改这个常量即可。
+INTRA_OP_THREADS = 2
+
+
+def session_options():
+    """受控的 onnxruntime 会话选项：线程数有界，避免小模型线程超订。"""
+    import onnxruntime as ort
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = INTRA_OP_THREADS
+    return options
+
 
 def decode_nanodet(data, num_anchors, num_classes, opts):
     """GFL 导出头解码。
@@ -98,7 +112,8 @@ class NanoDet:
         avail = ort.get_available_providers()
         providers = (["CUDAExecutionProvider", "CPUExecutionProvider"]
                      if "CUDAExecutionProvider" in avail else ["CPUExecutionProvider"])
-        self.sess = ort.InferenceSession(model_path, providers=providers)
+        self.sess = ort.InferenceSession(model_path, session_options(),
+                                        providers=providers)
 
     def _prep(self, frame_bgr):
         import cv2

@@ -99,15 +99,38 @@ class LocalOllama:
         self.num_ctx = num_ctx
         self.num_predict = num_predict
 
+    @staticmethod
+    def _context_text(context):
+        """把上下文渲染成纯文本。
+
+        聊天接口的 system 消息 content 必须是字符串：直接塞 dict 会被接口拒绝，
+        整次调用静默失败（实测表现为"环境识别永远 unavailable"）。这里统一
+        序列化，保证任何调用方传 dict/None/字符串都能发出去。
+        """
+        if context is None:
+            return ""
+        if isinstance(context, str):
+            return context
+        try:
+            return json.dumps(context, ensure_ascii=False, sort_keys=True)
+        except (TypeError, ValueError):
+            return str(context)
+
     def understand(self, prompt, frames_b64, context=None):
         """frames_b64: 纯 base64 JPEG 列表（无 data: 前缀）。返回 JSON 或 None。"""
         body = {"model": self.model, "stream": False, "keep_alive": "30m",
-                "messages": [{"role": "system", "content": context or ""},
+                "messages": [{"role": "system", "content": self._context_text(context)},
                              {"role": "user", "content": prompt,
                               "images": frames_b64}],
+                # 结构化输出是本通道的唯一契约（环境档案/命名都要求 JSON）。
+                # 显式约束同时抑制小模型的重复退化：实测不加约束时非思考模型
+                # 会退化成复读（"…有一个黑色的桌子"刷屏），加了才稳定出 JSON。
+                "response_format": {"type": "json_object"},
                 "options": {"temperature": 0,
                             "num_predict": self.num_predict,
-                            "num_ctx": self.num_ctx}}
+                            "num_ctx": self.num_ctx,
+                            "repeat_penalty": 1.15,
+                            "repeat_last_n": 128}}
         try:
             resp = _post_json(self.base + "/v1/chat/completions", body, self.timeout)
             content = resp["choices"][0]["message"]["content"]
@@ -143,7 +166,7 @@ class CloudOpenAICompat:
                             "image_url": {"url": "data:image/jpeg;base64,"
                                                 + b64}})
         body = {"model": self.model, "stream": False, "temperature": 0,
-                "messages": [{"role": "system", "content": context or ""},
+                "messages": [{"role": "system", "content": self._context_text(context)},
                              {"role": "user", "content": content}]}
         headers = {"Authorization": f"Bearer {self.key}"} if self.key else None
         try:

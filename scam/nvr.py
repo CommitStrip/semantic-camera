@@ -19,6 +19,7 @@ import threading
 import time
 
 from .config import validate_venue
+from .models import build_provider
 from .db import connect, init_schema, recover_stale_records
 from .monitor import Monitor, to_gray
 from .editions import get_edition
@@ -292,7 +293,10 @@ def main(argv=None, *, edition=None):
     state = None
     server = None
     if not args.no_workbench:
-        state = WorkbenchState(args.db)
+        state = WorkbenchState(
+            args.db,
+            environment_provider=build_provider(cfg.get("models")
+                                                 or {"channel": "local"}))
         state.runtime = runtime
         try:
             server = WorkbenchServer(state, host=args.host, port=args.port)

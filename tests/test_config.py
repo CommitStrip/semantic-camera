@@ -91,3 +91,26 @@ def test_valid_recording_settings_pass():
         "record_segment_seconds": 600,
     })
     assert validate_venue(venue) == []
+
+# ---------- 模型通道档案段（本地模型可配；默认行为不变） ----------
+
+def _venue(**extra):
+    base = {"cameras": [{"id": "c1", "source": "rtsp://x",
+                        "detector": {"engine": "none"}}]}
+    base.update(extra)
+    return base
+
+
+def test_models_section_accepts_local_model_override():
+    from scam.config import validate_venue
+
+    assert validate_venue(_venue(models={"channel": "local",
+                                         "model": "qwen2.5vl:3b"})) == []
+
+
+def test_models_section_rejects_unknown_channel_and_cloud_without_model():
+    from scam.config import validate_venue
+
+    assert validate_venue(_venue(models={"channel": "bogus"})) ==         ["models.channel 必须为 local|cloud"]
+    assert validate_venue(_venue(models={"channel": "cloud"})) ==         ["models.channel=cloud 时必须指定 models.model"]
+    assert validate_venue(_venue(models="local")) == ["models 必须为对象"]

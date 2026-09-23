@@ -281,3 +281,51 @@ def test_corrupt_stored_profile_is_not_returned(tmp_path):
     store.conn.commit()
 
     assert store.load("front") is None
+
+# ---------- 本地 VLM 通道的请求体契约（真实调用前的最后一道围栏） ----------
+
+def test_local_provider_renders_context_as_text(monkeypatch):
+    """system 消息 content 必须是字符串：传 dict 会被聊天接口拒绝，整次调用静默失败。"""
+    from scam import models as models_mod
+
+    captured = {}
+
+    def fake_post(url, body, timeout):
+        captured["body"] = body
+        return {"choices": [{"message": {"content": '{"ok": true}'}}]}
+
+    monkeypatch.setattr(models_mod, "_post_json", fake_post)
+    provider = models_mod.LocalOllama(model="probe-model")
+
+    out = provider.understand("prompt", ["base64jpeg"],
+                              context={"camera_id": "c1"})
+
+    assert out == {"ok": True}
+    system = captured["body"]["messages"][0]
+    assert isinstance(system["content"], str), "system content 不得是 dict"
+    assert "c1" in system["content"]
+    assert captured["body"]["response_format"] == {"type": "json_object"},         "结构化输出是本通道的唯一契约，必须显式约束"
+
+
+def test_environment_analyze_works_with_dict_context(monkeypatch, tmp_path):
+    """端到端接线：产品用 dict 上下文调用时，本地通道仍必须产出档案。"""
+    from scam import models as models_mod
+    from scam.environment import EnvironmentStore
+
+    profile = {"scene_type": "室内走廊", "elements": ["门"],
+               "lighting": "自然光", "risk_notes": "无", "suggested_zones": []}
+    monkeypatch.setattr(models_mod, "_post_json",
+                        lambda url, body, timeout: {
+                            "choices": [{"message": {
+                                "content": json.dumps(profile,
+                                                      ensure_ascii=False)}}]})
+    conn = db.connect(str(tmp_path / "env.db"))
+    db.init_schema(conn)
+    store = EnvironmentStore(conn)
+    frame = np.zeros((32, 32, 3), np.uint8)
+
+    state, got = store.analyze("cam-1", provider=models_mod.LocalOllama(),
+                               frame_bgr=frame, cloud_confirmed=False)
+
+    assert state == "ok" and got and got["scene_type"] == "室内走廊"
+    conn.close()

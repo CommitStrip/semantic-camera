@@ -13,17 +13,25 @@ class _Cv2Source:
     读失败（含文件 EOF、设备掉线）必须 release 后重建，绝不原地永久失败；
     重连退避指数增长但封顶 30s，文件源重建成功不额外等待（EOF 循环回放）。
     stats 暴露确定性计数：open_failures / reconnects / read_failures / last_frame_ts。
+
+    realtime=True（文件源值守）：按视频 fps 节拍喂帧。文件读得比实时快得多，
+    不节流会把机器跑满（实测文件源值守吃满约 7 个核）；节流后与实时流等价。
     """
 
-    def __init__(self, url, reconnect_delay=2.0):
+    FALLBACK_FPS = 25.0
+
+    def __init__(self, url, reconnect_delay=2.0, realtime=False):
         self.url = url
         self.reconnect_delay = reconnect_delay
+        self.realtime = bool(realtime)
         self.cap = None
         self.open_failures = 0
         self.reconnects = 0
         self.read_failures = 0
         self.last_frame_ts = None
         self._backoff_step = 0
+        self._fps = 0.0
+        self._next_deadline = None
 
     def open(self):
         import cv2
@@ -35,7 +43,32 @@ class _Cv2Source:
             self.open_failures += 1
             self.cap.release()
             self.cap = None
+            return ok
+        self._fps = self._read_fps()
+        self._next_deadline = None
         return ok
+
+    def _read_fps(self):
+        try:
+            fps = float(self.cap.get(5))        # cv2.CAP_PROP_FPS
+        except Exception:
+            fps = 0.0
+        return fps if fps and fps > 0.1 else self.FALLBACK_FPS
+
+    def _pace(self):
+        """按 fps 节拍等待到下一帧时刻；落后超过 1 秒则丢弃追赶（不补偿）。"""
+        if not self.realtime or self.cap is None:
+            return
+        fps = self._fps or self.FALLBACK_FPS
+        now = time.monotonic()
+        if self._next_deadline is None:
+            self._next_deadline = now
+        self._next_deadline += 1.0 / fps
+        delay = self._next_deadline - now
+        if delay <= -1.0:
+            self._next_deadline = now
+        elif delay > 0:
+            time.sleep(delay)
 
     def _release(self):
         if self.cap is not None:
@@ -66,6 +99,7 @@ class _Cv2Source:
             if not ok:
                 return False, None, None
         self.last_frame_ts = time.time()
+        self._pace()
         return True, frame, self.last_frame_ts
 
     def close(self):
@@ -109,14 +143,17 @@ class CameraSource:
             from vus.source import (RTSPSource, FileSource,
                                     CameraSource as VusCamera)
         except ImportError:
-            return _Cv2Source(self.source_url, self.reconnect_delay)
+            return _Cv2Source(self.source_url, self.reconnect_delay,
+                              realtime=self.source_kind == "file")
         self._vus_monotonic = True
         if self.source_kind == "rtsp":
             return RTSPSource(self.source_url,
                               reconnect_delay=self.reconnect_delay,
                               max_reconnects=self.max_reconnects)
         if self.source_kind == "file":
-            return FileSource(self.source_url)
+            # realtime=True：按视频 fps 节拍喂帧。文件解码远快于实时，不节流
+            # 会把宿主跑满（实测吃满约 7 个核），值守应等价于一路实时流。
+            return FileSource(self.source_url, realtime=True)
         if self.source_kind == "camera":
             return VusCamera(self.source_url)
         raise ValueError("未知源类型: " + self.source_kind)

@@ -146,7 +146,28 @@ def validate_venue(v):
                 errs.append(f"{cid}: schedule 必须为 HH:MM 格式")
                 break
 
+    errs.extend(_validate_models(v))
     errs.extend(_validate_notify(v))
+    return errs
+
+
+def _validate_models(v):
+    """模型通道配置（可选顶层 models 段）——本地通道可指定本地模型名。"""
+    models = v.get("models")
+    if models is None:
+        return []
+    if not isinstance(models, dict):
+        return ["models 必须为对象"]
+    errs = []
+    channel = models.get("channel", "local")
+    if channel not in ("local", "cloud"):
+        errs.append("models.channel 必须为 local|cloud")
+    for key in ("model", "base"):
+        value = models.get(key)
+        if value is not None and (not isinstance(value, str) or not value):
+            errs.append(f"models.{key} 必须为非空字符串")
+    if channel == "cloud" and not models.get("model"):
+        errs.append("models.channel=cloud 时必须指定 models.model")
     return errs
 
 

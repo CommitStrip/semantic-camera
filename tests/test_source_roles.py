@@ -277,6 +277,75 @@ def test_non_file_source_is_not_reopened_by_wrapper(monkeypatch):
     assert src.read_failures == 1
 
 
+# ---------- 文件源节流：值守等价实时流，不把宿主跑满 ----------
+
+class _StubCapture:
+    def __init__(self, fps=10.0):
+        self._fps = fps
+
+    def isOpened(self):
+        return True
+
+    def get(self, prop):
+        return self._fps
+
+    def read(self):
+        return True, "frame"
+
+    def release(self):
+        pass
+
+
+def test_file_source_is_paced_to_video_fps(monkeypatch):
+    """realtime 回退源按 fps 节拍喂帧：10fps → 每帧约 100ms。"""
+    import scam.source as source_mod
+
+    clock = {"now": 1000.0}
+    sleeps = []
+
+    def fake_sleep(duration):
+        sleeps.append(duration)
+        clock["now"] += duration        # 假时钟随睡眠推进，否则节拍会漂移
+
+    monkeypatch.setattr(source_mod.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(source_mod.time, "sleep", fake_sleep)
+    src = source_mod._Cv2Source("clip.mp4", realtime=True)
+    src.cap = _StubCapture(10.0)
+    src._fps = 10.0
+
+    for _ in range(4):
+        src.read()
+
+    assert len(sleeps) == 4, "realtime 文件源每帧都要节流"
+    assert all(0.05 <= d <= 0.15 for d in sleeps), sleeps
+
+
+def test_rtsp_source_is_not_paced(monkeypatch):
+    """非文件源不得被本层节流（RTSP 由网络自然限速）。"""
+    import scam.source as source_mod
+
+    sleeps = []
+    monkeypatch.setattr(source_mod.time, "sleep", lambda d: sleeps.append(d))
+    src = source_mod._Cv2Source("rtsp://example/stream", realtime=False)
+    src.cap = _StubCapture(10.0)
+    src._fps = 10.0
+
+    src.read()
+    src.read()
+
+    assert sleeps == []
+
+
+def test_camera_source_requests_realtime_for_file_kind(monkeypatch):
+    """CameraSource 构造文件源时必须要求实时节拍（值守等价实时流）。"""
+    src = CameraSource("cam", "clip.mp4", source_kind="file")
+    built = src._build()
+    assert getattr(built, "realtime", None) is True
+
+    rtsp = CameraSource("cam", "rtsp://example/stream", source_kind="rtsp")
+    assert getattr(rtsp._build(), "realtime", None) in (None, False)
+
+
 # ---------- 源时间戳贯穿：只有 source_capture 溯源才能进 Monitor ----------
 
 def test_run_camera_uses_attested_source_timestamp(tmp_path, monkeypatch):
