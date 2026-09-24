@@ -434,6 +434,80 @@ def recover_stale_records(conn, *, now, stale_after_s=30.0):
     return counts
 
 
+RECOVERY_LAYERS = ("tracked_objects", "review_segments", "semantic_events")
+
+
+def snapshot_pending_recovery(conn, *, now, stale_after_s=30.0):
+    """启动快照：宽限窗内仍未闭合的遗留记录（层 + 主键 + t_last）。
+
+    宽限窗内的记录启动时不能立即闭合（它可能仍属活跃数据），但也不能就此
+    不管——启动收口只跑一次，跳过的记录若无复核就会永远悬挂。这里把它们的
+    身份与"启动那一刻的 t_last"定格下来，交给宽限窗结束后的一次性复核，
+    复核时用 CAS 确认记录未被新事实改写。
+    """
+    cutoff = now - stale_after_s
+    snapshot = []
+    for row in conn.execute(
+            "SELECT object_id, t_last FROM tracked_objects"
+            " WHERE t_end IS NULL AND t_last>?", (cutoff,)):
+        snapshot.append({"layer": "tracked_objects", "key": row["object_id"],
+                         "t_last": row["t_last"]})
+    for row in conn.execute(
+            "SELECT review_id, t_last FROM review_segments"
+            " WHERE t_end IS NULL AND t_last>?", (cutoff,)):
+        snapshot.append({"layer": "review_segments", "key": row["review_id"],
+                         "t_last": row["t_last"]})
+    for row in conn.execute(
+            "SELECT semantic_event_id, t_last FROM semantic_events"
+            " WHERE t_end IS NULL AND t_last>?", (cutoff,)):
+        snapshot.append({"layer": "semantic_events",
+                         "key": row["semantic_event_id"],
+                         "t_last": row["t_last"]})
+    return snapshot
+
+
+def finalize_snapshot_records(conn, snapshot):
+    """按启动快照做一次性 CAS 收口；返回各层闭合数量。
+
+    每条记录的三重条件全部满足才闭合，缺一不动：
+    - 仍开放（`t_end IS NULL`）；
+    - 主键与快照一致；
+    - `t_last` 与快照完全一致（快照之后被任何一方更新过就说明它仍是活事实）。
+
+    因此新实例续写、管理员关闭、状态机改写都会让 CAS 失败——恢复任务绝不
+    覆盖新事实，也绝不改写已有的 `end_reason`。重复执行幂等（第一次闭合后
+    `t_end` 非空，第二次自然零改动）。
+    """
+    counts = {layer: 0 for layer in RECOVERY_LAYERS}
+    reason = "recovered_after_restart"
+    for item in snapshot:
+        layer = item["layer"]
+        key = item["key"]
+        t_last = item["t_last"]
+        if layer == "tracked_objects":
+            cur = conn.execute(
+                "UPDATE tracked_objects SET t_end=t_last,end_reason=?"
+                " WHERE object_id=? AND t_end IS NULL AND t_last=?",
+                (reason, key, t_last))
+        elif layer == "review_segments":
+            cur = conn.execute(
+                "UPDATE review_segments SET t_end=t_last,end_reason=?"
+                " WHERE review_id=? AND t_end IS NULL AND t_last=?",
+                (reason, key, t_last))
+        elif layer == "semantic_events":
+            cur = conn.execute(
+                "UPDATE semantic_events SET t_end=t_last,end_reason=?,"
+                " state='closed'"
+                " WHERE semantic_event_id=? AND t_end IS NULL AND t_last=?",
+                (reason, key, t_last))
+        else:
+            raise ValueError(f"未知恢复层: {layer}")
+        if cur.rowcount == 1:
+            counts[layer] += 1
+    conn.commit()
+    return counts
+
+
 def insert_event(conn, *, event_id, camera, kind, t_processed, t_source=None,
                  cls=None, conf=None, zone_id=None, template=None,
                  short_name=None, detail=None, rationale=None, payload=None):

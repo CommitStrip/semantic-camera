@@ -20,7 +20,8 @@ import time
 
 from .config import validate_venue
 from .models import build_provider
-from .db import connect, init_schema, recover_stale_records
+from .db import (connect, finalize_snapshot_records, init_schema,
+                  recover_stale_records, snapshot_pending_recovery)
 from .monitor import Monitor, to_gray
 from .editions import get_edition
 from .health import HealthRegistry
@@ -70,6 +71,47 @@ def _recover_event_truth(conn, *, now=None, stale_after_s=30.0):
               f"审查段 {counts['review_segments']}，"
               f"语义事件 {counts['semantic_events']}")
     return counts
+
+
+def _schedule_pending_recovery(db_path, snapshot, *, delay_s, stop_event=None,
+                               on_done=None):
+    """宽限窗过后的**一次性**遗留记录复核（F8 收口）。
+
+    - 只处理启动时定格进快照的记录（不扫描新建事实）；
+    - 独立数据库连接，绝不占用启动连接；
+    - daemon 线程 + 可被停机事件提前唤醒：进程退出不被定时器阻塞；
+    - 复核走 CAS（见 `finalize_snapshot_records`），新实例续写、管理员关闭或
+      状态改写的记录一律不覆盖。
+    """
+    if not snapshot:
+        return None
+
+    def _worker():
+        if stop_event is not None:
+            if stop_event.wait(delay_s) or stop_event.is_set():
+                return
+        else:
+            time.sleep(delay_s)
+        conn = connect(db_path)
+        try:
+            counts = finalize_snapshot_records(conn, snapshot)
+        except Exception as e:
+            # 恢复是兜底动作：任何失败都不许打断值守或退出流程。
+            print(f"[NVR] 遗留记录延迟复核失败: {type(e).__name__}")
+            return
+        finally:
+            conn.close()
+        if sum(counts.values()):
+            print("[NVR] 宽限窗后收口遗留记录: "
+                  f"对象 {counts['tracked_objects']}，"
+                  f"审查段 {counts['review_segments']}，"
+                  f"语义事件 {counts['semantic_events']}")
+        if on_done is not None:
+            on_done(counts)
+
+    thread = threading.Thread(target=_worker, name="pending-recovery", daemon=True)
+    thread.start()
+    return thread
 
 
 def _detector_plan(det_cfg):
@@ -281,8 +323,12 @@ def main(argv=None, *, edition=None):
     init_schema(conn)
     # Linux NVR 由 systemd 保证单实例；新进程启动时数据库里的开放状态只可能
     # 属于上一实例，所以立即按最后活动时刻闭合。其他产品保留宽限窗。
-    _recover_event_truth(
-        conn, stale_after_s=0.0 if product.key == "linux-nvr" else 30.0)
+    startup_grace_s = 0.0 if product.key == "linux-nvr" else 30.0
+    _recover_event_truth(conn, stale_after_s=startup_grace_s)
+    # 宽限窗内没被立即闭合的遗留记录不能就此悬挂：定格它们的启动快照，
+    # 等宽限窗结束后做一次性 CAS 复核（Linux 零宽限时快照必为空，行为不变）。
+    pending_recovery = snapshot_pending_recovery(
+        conn, now=time.time(), stale_after_s=startup_grace_s)
     _seed_zones(conn, cams)
     zones_by_cam = {c["id"]: _zones_of(conn, c["id"], c.get("zones") or [])
                     for c in cams}
@@ -440,6 +486,11 @@ def main(argv=None, *, edition=None):
     if server is not None:
         threading.Thread(target=server.serve_forever, daemon=True).start()
         print(f"[NVR] 工作台: http://{args.host}:{args.port}")
+
+    # 宽限窗结束后做一次性遗留收口（Linux 零宽限时快照为空，不会起线程）。
+    _schedule_pending_recovery(args.db, pending_recovery,
+                               delay_s=startup_grace_s + 1.0,
+                               stop_event=stop_event)
 
     print(f"[NVR] {product.display_name}值守中"
           f"（{len(cams)} 路相机，Ctrl+C 停机）")

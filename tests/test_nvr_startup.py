@@ -8,6 +8,7 @@ import errno
 import json
 import signal
 import threading
+import time
 from types import SimpleNamespace
 
 import scam.db as db
@@ -514,3 +515,73 @@ def test_linux_workbench_bind_failure_keeps_standalone_degradation(
     output = capsys.readouterr().out
     assert "值守继续，无工作台" in output
     assert "已中止启动" not in output
+
+# ---------- F8：宽限窗后一次性遗留收口的调度语义 ----------
+
+def _seed_open_three_layers(db_path, t_last):
+    conn = db.connect(db_path)
+    db.init_schema(conn)
+    db.open_tracked_object(conn, object_id="obj-x", camera="front",
+                           t_start=1.0, cls="person")
+    db.open_review_segment(conn, review_id="rev-x", camera="front", t_start=1.0)
+    db.open_semantic_event(conn, semantic_event_id="sem-x", camera="front",
+                           review_id="rev-x", object_id="obj-x", t_start=2.0,
+                           template="enter-and-dwell", zone_id="yard")
+    db.update_tracked_object(conn, "obj-x", t_last=t_last)
+    db.update_review_segment(conn, "rev-x", t_last=t_last)
+    db.update_semantic_event(conn, "sem-x", t_last=t_last)
+    snapshot = db.snapshot_pending_recovery(conn, now=100.0, stale_after_s=30.0)
+    conn.close()
+    return snapshot
+
+
+def test_pending_recovery_scheduler_noop_without_snapshot():
+    """空快照不起线程（Linux 零宽限路径因此完全不受影响）。"""
+    assert nvr_mod._schedule_pending_recovery("unused.db", [], delay_s=0.0) is None
+
+
+def test_pending_recovery_scheduler_closes_snapshot_once(tmp_path):
+    """一次性复核：按快照把宽限窗内遗留的三层记录收口，且线程是守护线程。"""
+    db_path = str(tmp_path / "pending.db")
+    snapshot = _seed_open_three_layers(db_path, t_last=95.0)
+    assert len(snapshot) == 3
+    done = []
+    thread = nvr_mod._schedule_pending_recovery(
+        db_path, snapshot, delay_s=0.0, on_done=done.append)
+
+    assert thread is not None and thread.daemon is True, "退出不得被定时器阻塞"
+    thread.join(5.0)
+    assert not thread.is_alive()
+    assert done and sum(done[0].values()) == 3
+
+    conn = db.connect(db_path)
+    for table, key in (("tracked_objects", "obj-x"),
+                       ("review_segments", "rev-x"),
+                       ("semantic_events", "sem-x")):
+        row = conn.execute(
+            f"SELECT t_end,end_reason FROM {table}"            # noqa: S608
+            f" WHERE t_end IS NOT NULL").fetchone()
+        assert row is not None and row["end_reason"] == "recovered_after_restart"
+    conn.close()
+
+
+def test_pending_recovery_scheduler_exits_early_on_stop(tmp_path):
+    """停机事件到来时立即返回：不把长延时睡满（退出不被定时器阻塞）。"""
+    db_path = str(tmp_path / "pending-stop.db")
+    snapshot = _seed_open_three_layers(db_path, t_last=95.0)
+    stop = threading.Event()
+    stop.set()
+
+    started = time.monotonic()
+    thread = nvr_mod._schedule_pending_recovery(
+        db_path, snapshot, delay_s=30.0, stop_event=stop)
+    thread.join(5.0)
+    elapsed = time.monotonic() - started
+
+    assert not thread.is_alive()
+    assert elapsed < 5.0, f"停机后不得等满 30 秒（实测 {elapsed:.1f}s）"
+    conn = db.connect(db_path)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM tracked_objects WHERE t_end IS NOT NULL"
+    ).fetchone()[0] == 0, "停机路径不得写库"
+    conn.close()
