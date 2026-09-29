@@ -18,6 +18,10 @@ from .platform import open_browser
 
 
 _CAMERA_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+class SetupRejected(ValueError):
+    """向导校验失败：文案由本模块固定产出，可以安全回显给浏览器。"""
 _MAX_BODY = 16 * 1024
 
 
@@ -75,7 +79,7 @@ def build_initial_venue(payload):
     }
     errors = validate_venue(venue)
     if errors:
-        raise ValueError("；".join(errors))
+        raise SetupRejected("；".join(errors))
     return venue
 
 
@@ -107,8 +111,17 @@ def write_initial_config(path, venue):
         raise
 
 
-def _html(token):
+def _html(token, default_model="", ffmpeg_missing=False):
     token_js = json.dumps(token)
+    model_value_js = json.dumps(default_model or "")
+    model_hint = ("发行包已随附已核验的检测模型（默认填入，可直接使用）；也可改填本机 "
+                  "ONNX 文件路径；若要预览模式，请清空本字段并勾选下方勾选框。"
+                  if default_model else
+                  "请填写本机 ONNX 文件路径（例如 person-detector.onnx）；没有模型文件时，"
+                  "必须勾选下方的“仅预览、不告警”。")
+    ffmpeg_note = ("<p class=\"error\">录像/片段导出不可用：未找到 ffmpeg。"
+                   "预览与管理员规则告警不受影响，录像保持关闭。</p>"
+                   if ffmpeg_missing else "")
     return f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>语义摄像头 · 首次接入</title><style>
@@ -129,9 +142,11 @@ border:0;border-radius:10px;background:var(--accent);color:#06130f;font-weight:8
 <label>来源类型<select id="source-kind"><option value="rtsp">RTSP 摄像头</option><option value="camera">本机摄像头</option><option value="file">本地视频文件</option></select></label>
 <label class="wide">来源地址<input id="source" placeholder="rtsp://用户名:密码@相机地址:554/..."></label>
 <label class="wide">人物检测模型路径（ONNX）<input id="model" placeholder="例如 D:\\models\\person-detector.onnx"></label>
+<p id="model-hint">{model_hint}</p>{ffmpeg_note}
 <label class="wide check"><input id="monitor-only" type="checkbox"><span>我确认暂时只预览画面、不产生目标告警（未配置检测模型时必须勾选）</span></label></div>
 <button id="save">保存并启动值守</button><p id="message" role="status"></p></main><script>
 const token={token_js};const message=document.getElementById('message');
+document.getElementById('model').value={model_value_js};
 document.getElementById('save').onclick=async()=>{{message.className='';message.textContent='正在校验并保存…';
 const body={{camera_id:document.getElementById('camera-id').value,source_kind:document.getElementById('source-kind').value,
 source:document.getElementById('source').value,detector_model:document.getElementById('model').value,
@@ -143,9 +158,12 @@ document.getElementById('save').disabled=true}}catch(error){{message.className='
 
 
 class SetupState:
-    def __init__(self, config_path, token):
+    def __init__(self, config_path, token, *, default_model_path=None,
+                 ffmpeg_available=True):
         self.config_path = config_path
         self.token = token
+        self.default_model_path = default_model_path
+        self.ffmpeg_available = ffmpeg_available
         self.saved = threading.Event()
 
 
@@ -175,7 +193,10 @@ class SetupHandler(BaseHTTPRequestHandler):
         if self.path != "/":
             self._json({"error": "not found"}, 404)
             return
-        body = _html(self.server.state.token).encode("utf-8")
+        state = self.server.state
+        body = _html(state.token,
+                     default_model=state.default_model_path or "",
+                     ffmpeg_missing=not state.ffmpeg_available).encode("utf-8")
         self._headers(200, "text/html; charset=utf-8", len(body))
         self.wfile.write(body)
 
@@ -206,7 +227,13 @@ class SetupHandler(BaseHTTPRequestHandler):
             self._json({"error": "配置已经存在，未做覆盖"}, 409)
             return
         except (ValueError, OSError, json.JSONDecodeError) as error:
-            self._json({"error": str(error)}, 400)
+            if isinstance(error, SetupRejected):
+                # 校验文案由本模块自己产出（固定中文），不含外部输入原文
+                self._json({"error": str(error)}, 400)
+            else:
+                # 其它异常原文（可能夹带路径/凭据）不得进入浏览器
+                self._json({"error": "保存失败（错误码 E-W11-003）："
+                                    "请重试，或改用本机已有模型 / 勾选“仅预览、不告警”"}, 400)
             return
         self.server.state.saved.set()
         self._json({"ok": True})
@@ -220,17 +247,31 @@ class SetupServer(ThreadingHTTPServer):
         self.daemon_threads = True
 
 
-def run_first_use_setup(config_path, browser_opener=open_browser):
-    """运行一次本机设置会话；保存成功返回 True，中断/失败返回 False。"""
+def run_first_use_setup(config_path, browser_opener=open_browser, *,
+                        default_model_path=None, ffmpeg_available=None):
+    """运行一次本机设置会话；保存成功返回 True，中断/失败返回 False。
+
+    default_model_path：发行包随附模型的绝对路径（预填；用户仍可清空改用预览模式）。
+    ffmpeg_available：显式告知录像能力，None 时按本机探测；缺失不阻断预览与告警。
+    """
+    if ffmpeg_available is None:
+        from .platform import find_ffmpeg
+        ffmpeg_available = find_ffmpeg() is not None
     token = secrets.token_urlsafe(32)
-    state = SetupState(os.path.abspath(config_path), token)
+    state = SetupState(os.path.abspath(config_path), token,
+                       default_model_path=default_model_path,
+                       ffmpeg_available=ffmpeg_available)
     try:
         server = SetupServer(state)
     except OSError as error:
-        print(f"[Win11] 首次接入向导启动失败: {error}")
+        # 异常原文可能夹带路径或端口细节：只报固定错误码。
+        from .win11_launcher import report_error
+        report_error("E-W11-002")
         return False
     url = f"http://127.0.0.1:{server.server_port}/"
     print(f"[Win11] 首次接入向导: {url}")
+    if not ffmpeg_available:
+        print("[Win11] 录像/片段导出不可用：未找到 ffmpeg（预览与告警不受影响）")
     try:
         browser_opener(url)
         server.serve_forever()

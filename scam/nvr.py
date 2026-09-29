@@ -20,7 +20,8 @@ import time
 
 from .config import validate_venue
 from .models import build_provider
-from .db import (connect, finalize_snapshot_records, init_schema,
+from .db import (backfill_initial_fact_pairs, connect,
+                 finalize_snapshot_records, init_schema,
                   recover_stale_records, snapshot_pending_recovery)
 from .monitor import Monitor, to_gray
 from .editions import get_edition
@@ -69,7 +70,8 @@ def _recover_event_truth(conn, *, now=None, stale_after_s=30.0):
         print("[NVR] 已恢复上次异常退出遗留记录: "
               f"对象 {counts['tracked_objects']}，"
               f"审查段 {counts['review_segments']}，"
-              f"语义事件 {counts['semantic_events']}")
+              f"语义事件 {counts['semantic_events']}，"
+              f"事件 {counts['event_facts']}")
     return counts
 
 
@@ -182,6 +184,7 @@ def _run_camera(cam_cfg, zones, db_path, stop_event, state, watchdog=None):
                   else "source_read_failed")
     if watchdog is not None:
         watchdog.started()
+    persistence_reported = None
     had_open_failure = False
     while not stop_event.is_set() and not source.open():
         had_open_failure = True
@@ -202,6 +205,7 @@ def _run_camera(cam_cfg, zones, db_path, stop_event, state, watchdog=None):
     if watchdog is not None:
         watchdog.opened(reconnect=had_open_failure)
 
+    monitor = None
     try:
         det, capability, det_issue = _make_detector(det_cfg)
         if runtime is not None:
@@ -228,18 +232,22 @@ def _run_camera(cam_cfg, zones, db_path, stop_event, state, watchdog=None):
                     watchdog.failure("read", "source read failed")
                 if runtime is not None:
                     runtime.degraded(camera_id, read_issue)
+                # 断流登记：宽限内保留开放事件，超宽限由 Monitor 按合同收口
+                monitor.on_stream_lost(time.time() * 1000.0)
                 stop_event.wait(0.5)
                 continue
             # 真实源时间戳贯穿：仅当源显式证明 source_capture 才采用采集时间；
             # host_receive 含解码等待、unknown 无法溯源——都不能冒充采集时刻
             # （L4 验收口径），此时退回墙钟处理时间。
             kind = (source.stats or {}).get("timestamp_kind")
+            monitor.timestamp_kind = kind
             if recovering:
                 # 恢复与看门狗无关：无 watchdog 时也必须把状态收回 online。
                 if watchdog is not None:
                     watchdog.opened(reconnect=True)
                 if runtime is not None:
                     runtime.online(camera_id)
+                monitor.on_stream_recovered()
                 recovering = False
             if watchdog is not None:
                 watchdog.frame(source_ts=ts, timestamp_kind=kind)
@@ -249,14 +257,49 @@ def _run_camera(cam_cfg, zones, db_path, stop_event, state, watchdog=None):
                 monitor.step(frame, to_gray(frame, Monitor.GRAY_W), now)
             except Exception as e:
                 print(f"[NVR] {camera_id} 单帧处理异常: {e}")
+            # 数据面故障（审查段/告警写不进库）必须在健康面可见，不能只留在
+            # 监控线程的内部计数里；只在状态变化时写，避免逐帧刷注册表。
+            if runtime is not None:
+                degraded = monitor.persistence_state()["degraded"]
+                code = "persistence_degraded" if degraded else None
+                if code != persistence_reported:
+                    runtime.persistence(camera_id, code)
+                    persistence_reported = code
     finally:
-        source.close()
+        # 边界3：退出收口的每一项各自得到执行机会——source.close() 抛错不得
+        # 跳过事件收口/看门狗/运行状态清理；清理异常逐项记录，绝不掩盖 try 内
+        # 更早的主异常；无主异常时上抛第一条清理异常，不静默吞掉。
+        in_flight = sys.exc_info()[0] is not None
+        cleanup_errors = []
+
+        def _cleanup(label, action):
+            try:
+                action()
+            except Exception as exc:
+                cleanup_errors.append((label, exc))
+
+        _cleanup("source-close", source.close)
+
+        def _event_closeout():
+            pending = monitor.close_all_event_facts()
+            if pending:
+                # 边界1：退出前仍未能落库的事件必须如实报"未保存"，
+                # 绝不宣称已保存；进程结束后内存快照消失，这是真实丢失。
+                print(f"[NVR] {camera_id} 事件收口未完成：{pending} 条事件"
+                      "未能写入数据库（未保存）")
+
+        if monitor is not None:
+            _cleanup("event-closeout", _event_closeout)
         if watchdog is not None:
-            watchdog.stopped()
+            _cleanup("watchdog-stop", watchdog.stopped)
         if runtime is not None:
-            runtime.stopped(camera_id)
+            _cleanup("runtime-stop", lambda: runtime.stopped(camera_id))
         if state is not None:
-            state.monitors.pop(camera_id, None)
+            _cleanup("registry-pop", lambda: state.monitors.pop(camera_id, None))
+        for label, exc in cleanup_errors:
+            print(f"[NVR] {camera_id} 退出清理异常（{label}）: {exc}")
+        if cleanup_errors and not in_flight:
+            raise cleanup_errors[0][1]
         print(f"[NVR] {camera_id} 值守结束")
 
 
@@ -329,6 +372,27 @@ def main(argv=None, *, edition=None):
     # 等宽限窗结束后做一次性 CAS 复核（Linux 零宽限时快照必为空，行为不变）。
     pending_recovery = snapshot_pending_recovery(
         conn, now=time.time(), stale_after_s=startup_grace_s)
+    # 崩溃窗口补账：只找缺描述 v1 / 缺 initial_fact 的事件，稳定键分批、
+    # 有界执行（UNIQUE 兜底恰一次）；未补完由后台周期续跑，待补数如实显示
+    # ——"值守已启动"绝不写成"积压已清零"。
+    backfill_pending = 0
+    backfill_stats = None
+    try:
+        backfilled = backfill_initial_fact_pairs(conn, created_at=time.time())
+        backfill_pending = backfilled["remaining"]
+        backfill_stats = backfilled
+        if backfilled["descriptions"] or backfilled["notifications"]                 or backfilled["failed"]:
+            print("[NVR] 启动补账：事件描述 v1 ×"
+                  f"{backfilled['descriptions']}，初始事实提醒 ×"
+                  f"{backfilled['notifications']}，失败 ×"
+                  f"{backfilled['failed']}（恰一次）")
+        if backfill_pending:
+            print(f"[NVR] 补账未完：剩余待补 {backfill_pending} 条，"
+                  "后台周期继续补齐")
+    except Exception as exc:
+        # 补账失败不阻断值守：缺失项仍由后台/下次启动继续；固定摘要不给原文。
+        print(f"[NVR] 启动补账未完成（{type(exc).__name__}），后台重试")
+        backfill_pending = -1
     _seed_zones(conn, cams)
     zones_by_cam = {c["id"]: _zones_of(conn, c["id"], c.get("zones") or [])
                     for c in cams}
@@ -402,6 +466,67 @@ def main(argv=None, *, edition=None):
             print("[警告] ffmpeg 缺失——事件片段导出不可用（告警不受影响）")
 
     stop_event = threading.Event()
+
+    # Win11「进行中事件的语义更新」后台链（第一切片，Win11 专属接线）：
+    # 独立守护线程、限并发限队列、可停止；快路径零同步等待模型；
+    # 模型失败/超时/不可用只记状态，v1 提醒与事件记录照常工作。
+    semantic_updater = None
+    if product.key == "win11" and state is not None:
+        try:
+            from .semantic_updater import SemanticUpdater
+            semantic_updater = SemanticUpdater(
+                args.db,
+                build_provider(cfg.get("models") or {"channel": "local"}),
+                stop_event=stop_event)
+            state.semantic = semantic_updater
+            semantic_updater.start()
+            print("[NVR] 语义更新后台链已启动（进行中事件 · 增量理解 · "
+                  "真实模型，质量未验证）")
+        except Exception as exc:
+            print(f"[NVR] 语义更新后台链未启动（{type(exc).__name__}）；"
+                  "v1 提醒与事件记录照常工作")
+            semantic_updater = None
+
+    # 补账后台续跑（工作包 B）：有界批次 + 周期机会，直到积压清零；
+    # 待补数写入 state.backfill 供工作台健康面如实显示。
+    if state is not None:
+        state.backfill = {"pending": backfill_pending,
+                          "failed": (backfill_stats or {}).get("failed", 0),
+                          "scanned": (backfill_stats or {}).get("scanned", 0),
+                          "wrapped": (backfill_stats or {}).get("wrapped", False)}
+
+    def _backfill_worker():
+        nonlocal backfill_pending
+        while not stop_event.is_set():
+            if stop_event.wait(60.0):
+                return
+            try:
+                bconn = connect(args.db)
+                try:
+                    stats = backfill_initial_fact_pairs(
+                        bconn, created_at=time.time())
+                finally:
+                    bconn.close()
+                backfill_pending = stats["remaining"]
+                if state is not None:
+                    state.backfill = {"pending": stats["remaining"],
+                                      "descriptions": stats["descriptions"],
+                                      "notifications": stats["notifications"],
+                                      "failed": stats["failed"],
+                                      "scanned": stats["scanned"],
+                                      "wrapped": stats["wrapped"]}
+                if stats["remaining"] == 0 and not stats["failed"]:
+                    return
+            except Exception:
+                # 持续失败绝不显示成"已清零"：pending 保留真值并标记运行错误
+                if state is not None:
+                    state.backfill = {"pending": backfill_pending,
+                                      "failed": state.backfill.get("failed", 0),
+                                      "error": "backfill_run_failed"}
+
+    if backfill_pending:
+        threading.Thread(target=_backfill_worker, name="notify-backfill",
+                         daemon=True).start()
 
     def _export_loop():
         """闭合审查段 → 事件片段导出（at-least-once，失败下轮重试）。"""
@@ -511,6 +636,8 @@ def main(argv=None, *, edition=None):
         notify_hub.stop(timeout=5.0)
     for t in threads:
         t.join(timeout=5)
+    if semantic_updater is not None:
+        semantic_updater.stop(timeout=5)
     print("[NVR] 已停机")
     return 0
 

@@ -172,6 +172,101 @@ class EvidenceStore:
         """
         return self._resolve_within_root(relative_path)
 
+    def save_scene_frame(self, *, camera, frame_bytes, established_at):
+        """环境基线原始画面落盘：每次尝试独立文件身份 + 不覆盖发布。
+
+        碰撞防护（A-R2）：文件名含**本次尝试令牌**（12 位 hex nonce），同一
+        相机、相同 JPEG、同一秒的两次尝试也各得独立路径，绝不共用待清理
+        目标。发布走硬链接原子上位：目标已存在即明确失败（FileExistsError
+        → ValueError），文件系统不支持该安全操作也明确失败——两种情况都
+        **绝不回退到可能覆盖目标的 os.replace**。
+        返回相对路径、sha256/字节数与 owner_token（清理所有权凭据）。
+        """
+        if not isinstance(camera, str) or not re.fullmatch(
+                r"[A-Za-z0-9_\-]+", camera):
+            raise ValueError("相机标识仅限字母数字与 - _")
+        if not isinstance(frame_bytes, (bytes, bytearray)) or \
+                not bytes(frame_bytes).startswith(b"\xff\xd8"):
+            raise ValueError("基线画面必须是 JPEG 字节")
+        content = bytes(frame_bytes)
+        digest = hashlib.sha256(content).hexdigest()
+        # 相机标识折叠为哈希目录键：用户输入不进入文件路径，杜绝穿越面
+        camera_key = hashlib.sha256(camera.encode("utf-8")).hexdigest()[:16]
+        if not re.fullmatch(r"[0-9a-f]{16}", camera_key):
+            raise ValueError(
+                "Evidence directory key must be a 16-character hex digest")
+        # 尝试令牌：随机 nonce，只有本次调用持有；文件身份不可由
+        # 内容/相机/时间推导（杜绝"同秒同画面"撞名）
+        owner_token = uuid.uuid4().hex[:12]
+        if not re.fullmatch(r"[0-9a-f]{12}", owner_token):
+            raise ValueError("Evidence attempt token must be hex")
+        filename = (f"{int(established_at):013d}-{digest[:12]}-"
+                    f"{owner_token}.jpg")
+        final_rel = camera_key + "/baseline/" + filename
+        final_path = self._resolve_within_root(final_rel)
+        os.makedirs(os.path.dirname(final_path), exist_ok=True)
+        # 临时文件路径派生自已通过围栏校验的 final_path（同目录、无外源输入）
+        temp_path = final_path + "." + uuid.uuid4().hex + ".tmp"
+        try:
+            with Path(temp_path).open("wb") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                # 原子"不覆盖上位"：目标已存在 → OSError（EEXIST）；
+                # 文件系统不支持硬链接 → OSError（EPERM/ENOSYS 等）。
+                # 二者都必须显式失败，绝不回退 os.replace 覆盖。
+                os.link(temp_path, final_path)
+            except FileExistsError:
+                raise ValueError("基线画面目标已存在，拒绝覆盖")
+            except OSError:
+                raise ValueError(
+                    "基线画面发布失败：文件系统不支持安全发布操作")
+        finally:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+        return {"path": final_rel,
+                "sha256": digest, "size_bytes": len(content),
+                "owner_token": owner_token}
+
+    def discard_attempt_file(self, relative_path, owner_token):
+        """删除**本次尝试新建**的画面文件；所有权双查（A-R2）。
+
+        - 令牌必须是 12 位 hex 且真实出现在文件名尾段：文件身份由本次调用
+          的 nonce 铸造，不能仅凭"计算出的文件名等于本次路径"认定所有权；
+        - 路径仍走证据根围栏。任一条件不满足即拒绝删除（ValueError）。
+        注意：调用方还须自行核验"库内零引用"后才可调用本方法。
+        """
+        if not isinstance(owner_token, str) or \
+                not re.fullmatch(r"[0-9a-f]{12}", owner_token):
+            raise ValueError("清理令牌非法（无法证明文件属于本次尝试）")
+        full = self.resolve(relative_path)
+        name = full.replace("\\", "/").rsplit("/", 1)[-1]
+        if not name.endswith("-" + owner_token + ".jpg"):
+            raise ValueError("文件不属于本次尝试（令牌不匹配），拒绝删除")
+        os.remove(full)
+
+    def read_scene_frame(self, relative_path, *, sha256=None, size_bytes=None):
+        """按完整性复核读取基线原始画面；缺失/损坏抛 ValueError，绝不外泄路径。"""
+        try:
+            full = self.resolve(relative_path)
+        except ValueError:
+            raise ValueError("基线画面引用非法")
+        try:
+            with Path(full).open("rb") as handle:
+                content = handle.read()
+        except OSError:
+            raise ValueError("基线画面缺失")
+        if sha256 and hashlib.sha256(content).hexdigest() != sha256:
+            raise ValueError("基线画面哈希不符")
+        if size_bytes is not None and len(content) != int(size_bytes):
+            raise ValueError("基线画面大小不符")
+        if not content.startswith(b"\xff\xd8"):
+            raise ValueError("基线画面非 JPEG")
+        return content
+
     def link_object_frame_to_event(self, conn, *, object_id, event_id,
                                    camera):
         """把对象最佳帧登记为事件证据，不复制文件；无可用帧时返回 None。"""

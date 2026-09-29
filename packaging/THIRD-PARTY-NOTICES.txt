@@ -1,0 +1,45 @@
+语义摄像头 Win11 发行包 · 第三方声明
+====================================
+
+本发行包内嵌以下第三方运行库（均为官方发布版本，不含源码修改）。
+各项目版权归其作者所有，按各自许可分发；完整许可文本见各项目官方仓库。
+
+1. numpy
+   - 许可：BSD 3-Clause
+   - 项目：https://numpy.org
+
+2. OpenCV（opencv-python 轮子内的 OpenCV 库）
+   - 许可：Apache License 2.0
+   - 项目：https://opencv.org
+
+3. ONNX Runtime
+   - 许可：MIT License
+   - 项目：https://onnxruntime.ai
+
+4. Pillow
+   - 许可：MIT-CMU License
+   - 项目：https://python-pillow.org
+
+可选组件（默认**不随包**）
+--------------------------
+
+人物检测模型（NanoDet-Plus，`nanodet-plus-m_416.onnx`）
+   - 上游：https://github.com/RangiLyu/nanodet（发布资产 v1.0.0-alpha-1）
+   - 上游仓库声明许可：Apache License 2.0（以你取得该文件时上游展示的许可为准，
+     请自行核对；本发行包不代替你完成许可核对）
+   - 校验值（SHA-256，与上游发布资产一致）：
+     59d2f166088889c902f523bf08079391993491324f0d84847e3c4016a8f7cc3d
+   - 本包**不分发**该权重：请自行下载后在首次向导中选择本机文件路径，
+     或明确选择“仅预览、不告警”。
+   - 若将来的构建启用 `--with-model` 随包模式，会在 win11-manifest.json 的
+     `model` 段声明名称、版本、来源 URL、许可与 SHA-256。
+
+不含以下内容
+------------
+- 任何录像、测试视频或帧样本
+- 任何摄像头地址、账号或凭据
+- 任何用户配置、数据库或日志
+
+隐私说明
+--------
+默认仅监听 127.0.0.1，录像默认关闭，不向外部服务上传画面、日志或配置。

@@ -1,6 +1,6 @@
 """scam.environment —— R3 环境档案核心（先识别、后圈选）。
 
-硬红线（ZCODE-WIN11-CONTEXT ZW-001 / 设计稿 §8）：
+硬红线（首次环境基线合同）：
 - 环境识别只由管理员显式触发，绝不自动后台调用；
 - 云端 provider 必须逐次显式 cloud_confirmed=True，否则零调用；
 - 模型输出视为不可信数据：字段/类型/长度全量校验，非法即 invalid；
@@ -11,6 +11,7 @@
 
 import base64
 import hashlib
+import unicodedata
 import json
 import re
 import sqlite3
@@ -22,6 +23,33 @@ _MAX = {"scene_type": 64, "lighting": 64, "risk_notes": 500,
         "elements": 32, "element_len": 64, "suggested_zones": 64,
         "suggested_zone_len": 200, "provider": 32}
 _STATUS_OK = "ok"
+
+# 提示词字段说明的特征片段：模型直接复述说明文字时按占位输出拒收
+# （保守方向：误拒只导致重试，绝不把占位文本写成有效基线）。
+_PROMPT_DOC_FRAGMENTS = (
+    "场景类型", "画面要素", "照明情况", "风险提示", "重点关注的区域",
+    "仅建议", "不得虚构", "分析员", "JSON 对象",
+    "scene_type", "elements", "lighting", "risk_notes", "suggested_zones",
+    "≤64", "≤500",
+)
+
+
+def _is_placeholder(text):
+    """占位输出识别：省略号/空白/纯标点/复述提示词字段说明一律视为无效。"""
+    stripped = str(text).strip()
+    if not stripped:
+        return True
+    if stripped in ("...", "…", "..", "．．．"):
+        return True
+    # 纯标点/符号/空白（无任何 Unicode 字母或数字）：～·— 等同样拒收
+    if not any(ch.isalnum() or unicodedata.category(ch).startswith("L")
+               for ch in stripped):
+        return True
+    lowered = stripped.lower()
+    for fragment in _PROMPT_DOC_FRAGMENTS:
+        if fragment.lower() in lowered:
+            return True
+    return False
 
 
 def validate_camera_id(camera_id):
@@ -51,7 +79,9 @@ def _extract_json(raw):
 
 
 def _check_text(value, limit):
-    return isinstance(value, str) and 0 < len(value) <= limit
+    """非空、不超限、且不是占位输出（省略号/纯标点/复述字段说明）。"""
+    return (isinstance(value, str) and 0 < len(value) <= limit
+            and not _is_placeholder(value))
 
 
 def _validate_profile(raw):
@@ -92,7 +122,9 @@ def build_prompt():
         '"lighting": "照明情况，≤64字", '
         '"risk_notes": "风险提示，≤500字", '
         '"suggested_zones": ["建议重点关注的区域描述（仅建议）"]}\n'
-        "所有内容必须来自画面本身，不得虚构。"
+        "所有内容必须来自画面本身，不得虚构。\n"
+        "每个字段必须给出具体观察到的内容；禁止省略号、空白、占位符；"
+        "禁止复述本说明文字；画面无法判断时用简短的中文描述该字段未知。"
     )
 
 
@@ -170,6 +202,18 @@ class EnvironmentStore:
         if raw is None:
             return "unavailable", None
         profile = _validate_profile(_extract_json(raw))
+        if profile is None:
+            # 解析层受限重试（校验绝不放宽）：小模型偶发输出占位内容时，
+            # 立即重问一次；仍不合格就如实判 invalid，交管理员重试。
+            try:
+                raw = provider.understand(
+                    build_prompt(),
+                    [base64.b64encode(jpeg).decode("ascii")],
+                    context={"camera_id": camera_id})
+            except Exception:
+                raw = None
+            if raw is not None:
+                profile = _validate_profile(_extract_json(raw))
         if profile is None:
             return "invalid", None
 
