@@ -8,7 +8,7 @@
 
 [![CI](https://github.com/CommitStrip/semantic-camera/actions/workflows/ci.yml/badge.svg)](https://github.com/CommitStrip/semantic-camera/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-1109%20passed%2C%2016%20skipped-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-1379%20passed%2C%2016%20skipped-brightgreen)](tests/)
 
 [**English**](README.md) · [**简体中文**](README-CN.md)
 
@@ -18,26 +18,26 @@
 
 A surveillance camera is just "eyes" — it sees but doesn't understand. We give it a brain, but that brain must meet three harsh conditions at once: **fast** (alarm ≤ 1s), **cheap** (nearly zero long-term cost), and **obedient** (every rule is defined by the admin; the system never decides on its own).
 
-Core idea: **wrap uncertain models with deterministic engineering**. The fast system (frame-difference gating + NanoDet detection + grid rules) guards every frame with millisecond response; the slow system (VLM naming + V-JEPA embedding comparison) engages only for genuinely new events, and its call volume decays as patterns become familiar.
+Core idea: **events are first-class; uncertain models are wrapped in deterministic engineering**. The fast system (frame-difference gating + NanoDet detection) discovers and records events with or without any admin rule; admin rules only decide what earns extra attention and alarms. The slow system (local VLM) appends clearly-labeled supplementary descriptions to in-progress events — it can never mutate recorded facts, suppress notifications, or lift alarms.
 
 ## ✨ Core features
 
-- **Fast/slow layering** — T0 gating 0.4ms per frame → T1 detection on motion → structural verdict alarms ≤ 1s → T2 understanding under budget → T3 habituation batching
-- **Zero slow-layer on the alarm path** — alarm = detection + admin rules, with no model in front of it
+- **Rule-free event discovery** — every appearance becomes a traceable event fact (start / end / reason / immutable initial observation), even with zero zones and zero rules configured
+- **Factual notifications first** — every event creates one factual notification; the workbench separates "client displayed" (auto receipt) from "user confirmed" (explicit click), both persisted and restart-safe
+- **In-progress semantic updates, safely labeled** — a local VLM appends versioned descriptions (v2, v3, …) with observed/inference split; every model version is presented as "model supplement, may be wrong, verify against evidence" and can never cancel events or alarms
+- **Fast/slow layering** — T0 gating 0.4ms per frame → T1 detection on motion → the alarm path has zero model latency; the slow system works within a bounded budget
 - **Grid zone selection** — the admin paints cells on the frame to define managed areas
-- **Custom alarm templates** — structural conditions evaluated in real time, semantic descriptions as backup
-- **Habituation saves tokens** — a V-JEPA embedding hit lets a known pattern name itself with zero VLM calls; repeated scenes trend to zero
-- **Dual model channels** — local ollama (data never leaves the NVR) or a cloud OpenAI-compatible API, switchable in the workbench
-- **Events archived as they happen** — every event has its own bounded context; SQLite stays fully auditable and never accumulates
-- **One slow-system execution core** — CAS-based claim mutual exclusion, single-transaction terminal writes, one authoritative backlog entry point; corrupt or unknown state is never touched (fail-closed) yet stays honestly visible as pending work
-- **No special setup** — auto-discovery plus a single command to start; the workbench is just a browser tab
+- **Custom alarm templates** — structural conditions evaluated in real time
+- **Dual model channels** — local ollama (data never leaves the machine) or a cloud OpenAI-compatible API, each call explicitly confirmed
+- **First-use environment baseline (Win11)** — a guided, versioned scene baseline with hash-verified raw frames; recognition never auto-runs and never becomes a rule
+- **Events archived as they happen** — SQLite stays fully auditable; the workbench is loopback-only
 
 ## 🧭 Product editions
 
 | Edition | Dedicated entry point | Product focus | Release gate |
 |---|---|---|---|
 | Linux NVR | `python -m scam.linux_nvr` | Always-on service, multi-camera, recording, remote operations, 24h soak | Linux CI + systemd + on-device soak |
-| Windows 11 Workstation | `python -m scam.win11` | Local interactive use, desktop startup, Windows data paths, recovery | Windows CI + native Windows 11 acceptance |
+| Windows 11 Workstation | `python -m scam.win11` | Local interactive use, first-use baseline, event/confirmation chain, delivery packaging | Windows CI + native Windows 11 acceptance (file-source closed loop passed; real RTSP pending) |
 
 Both editions share the `scam` domain core, while entry points, defaults, deployment chains and acceptance reports are maintained separately. `python -m scam.nvr` is kept for legacy deployments only.
 
@@ -120,10 +120,13 @@ SQLite, fully auditable
 
 | Metric | Value | Basis and conditions |
 |---|---|---|
-| Tests | **1109 passed / 16 skipped** (1125 collected) | Full suite on this Windows machine (2026-09-23); CI additionally runs Linux 3.10 / 3.12 and Windows jobs |
+| Tests | **1379 passed / 16 skipped** | Full suite on this Windows 11 machine (2026-09-29); CI additionally runs Linux 3.10 / 3.12 and Windows jobs |
 | Alarm latency (structural trigger) | **≤ 1s** | End-to-end assertion in `tests/test_monitor.py`: an alarm must fire within one second of the target entering a managed cell (synthetic frames, detection verdict path) |
-| T0 frame gating | **0.39ms per frame** (P95 0.43ms) | 1080p → 96×54 grayscale → gate decision, pure Python; re-measured locally over 199 frames |
-| T1 detection | NanoDet-Plus ONNX, 416×416 input | Weights are not distributed; per-inference latency depends on the host CPU — an earlier local measurement gave 23–24ms, not re-measured this round |
+| T0 frame gating | **0.39ms per frame** (P95 0.43ms) | 1080p → 96×54 grayscale → gate decision, pure Python; measured over 199 frames |
+| T1 detection | NanoDet-Plus ONNX, 416×416 input | Weights are not distributed; an earlier local measurement gave 23–24ms per inference, not re-measured since |
+| Win11 file-source closed loop | **79 events / 79 notifications / 79 displayed receipts / 1 user confirmation**; events, versions, receipts and confirmations all survived a real process restart | Native Windows 11 run on a recorded clip with real NanoDet ONNX + real local VLM; **file source only — not real-camera evidence** |
+| Client display latency (exploratory) | 5 samples: 2.4–9.5s | Only measured while a browser tab was actively polling (3s cadence); sample size too small for percentiles — exploratory, not a steady-state claim |
+| Semantic description quality | **Not verified — risk samples recorded** | Human frame-level review of 5 model outputs: 1 faithful, 4 with errors (scene misidentification, fabricated timestamps, overconfident labels). The UI therefore labels all model output as an unverified supplement |
 
 ## ✅ Quality gates
 
@@ -132,7 +135,8 @@ CI runs three jobs ([workflow](.github/workflows/ci.yml)):
 - **test (Linux, Python 3.10 and 3.12)** — deploy script syntax (`bash -n`), single-source systemd unit rendering + `systemd-analyze verify`, full test suite (including Linux service-level smoke), Linux NVR edition contract, release packaging gate (sensitive-surface double gate + reproducible packaging self-check)
 - **test-windows** — full test suite (service-level smoke skips automatically), release packaging dry-run, platform-layer smoke (UTF-8 output and data directory), Win11 entry smoke, deploy scripts parsed by both PowerShell 5.1 and 7
 
-Most recent run (#61, 2026-09-23): all three jobs green.
+Most recent CI run on `main`: #61 (2026-09-23), all three jobs green; this
+release commit re-runs the same workflows.
 
 ## 📁 Repository layout
 
@@ -146,30 +150,35 @@ scam/                    domain core (pure Python)
   verdict.py             four-state verdict
   monitor.py             fast-system monitoring loop
   source.py              camera source (VUS first, cv2 fallback)
-  slow_core.py           the single slow-system execution core (claim CAS / whole-snapshot CAS / one backlog truth)
-  slow_worker.py         bounded background worker for the slow system
-  linux_slow_path.py     thin compatibility adapter for the legacy Linux entry (no write state machine)
-  segments.py            event segmentation and signatures
-  patterns.py            habituation pattern library
-  naming.py              dual-lane naming
-  embed.py               V-JEPA segment embeddings
+  db.py                  SQLite persistence (events / facts / descriptions /
+                         notifications / escalations / baselines / zones)
+  event facts layer      rule-free event discovery, immutable v1 observation,
+                         factual notifications, crash-window backfill
+  semantic_updater.py    in-progress semantic updates (versioned, safely
+                         labeled, cannot mutate facts or alarms)
+  environment.py         first-use environment baseline (Win11)
   evidence.py            evidence index and path fencing
-  quality_gate.py        annotation-alignment quality gate
-  db.py                  SQLite persistence (events / segments / patterns / zones)
   server.py              workbench HTTP (loopback only)
-  sinks.py               alarm sinks
-  notify.py              notification outlets (webhook / MQTT, optional)
+  sinks.py notify.py     alarm sinks and outlets (webhook / MQTT, optional)
   recording.py recorder.py   recording and clip export
-  health.py              health water level
-  nvr.py linux_nvr.py    always-on entry points
-  win11*.py              Windows 11 entry, setup and on-device acceptance
-  linux_*.py             operations line: host probe, backup, upgrade contract, replay, soak, unit rendering
+  slow_core.py           single slow-system execution core
+  health.py nvr.py       health water level; always-on entry
+  win11*.py              Windows 11 entry, launcher, setup, baseline and
+                         on-device acceptance
+  linux_*.py             operations line: host probe, backup, upgrade, replay,
+                         soak, unit rendering
   models.py              dual VLM channels (local / cloud, explicit opt-in)
-deploy/                  NVR (install.sh + systemd unit) and Windows 11 (install-win11.ps1 / start-win11.bat)
-scripts/                 acceptance, model fetch and verification, release packaging
-tests/                   pytest (1125 test cases)
-docs/                    roadmaps, benchmark analyses, operations runbook
+packaging/               Windows delivery: single-instance launcher, build
+                         script, forbidden-content gate, third-party notices
+scripts/                 acceptance, model fetch and verification, offline
+                         measurement report, resource snapshot
+tests/                   pytest (1400+ test cases)
+docs/                    operations runbook
 ```
+
+`scripts/measure_report.py` additionally turns any event database into a
+read-only latency/fact measurement report (clock-source aware, integrity
+checked, rebuildable).
 
 ## 📖 Documentation
 
@@ -177,20 +186,27 @@ docs/                    roadmaps, benchmark analyses, operations runbook
 |---|---|
 | [Operations runbook](docs/linux-operations-runbook.md) | Install / upgrade / rollback / backup and restore, with human confirmation points |
 
-## ⚠️ Known limitations (honest list)
+## ⚠️ Known limitations (honest list — v0.1.0-beta)
 
-- All current evidence is **Windows-local synthetic automation**: real RTSP, real
-  detection and embedding inference, the native Linux operations chain, a 24-hour
-  soak, and real P95/P99 and privacy network audits are **not verified**;
+- **Real RTSP cameras are not yet verified.** All Win11 closed-loop evidence
+  (the 79-event chain above) was produced on recorded clips replayed as a
+  camera stream. Real-camera acceptance needs an authorized RTSP source and is
+  the next milestone.
+- **Semantic description quality is not verified.** In a 5-sample frame-level
+  human review, 1 output was faithful and 4 contained errors (scene
+  misidentification, fabricated timestamps, overconfident labels). The UI
+  therefore presents every model version as an unverified supplement; model
+  text can never close events, suppress notifications or lift alarms.
+- The Linux native operations chain, a 24-hour soak, and privacy network
+  audits are **not verified**; dual-camera and long-run evidence is pending.
+- Recording is **off by default**; enable it per camera if you want clip
+  evidence.
 - Detection and embedding weights are not distributed (`scripts/fetch_models.py`);
-  automatic download is refused fail-closed until the hash is frozen;
-- The slow-system VLM channel is not wired by default: new events are marked
-  `pending_naming`, and repeated scenes fall back to pure structural matching plus
-  profile reuse;
-- The workbench is a single-admin loopback form: no authentication, no multi-user;
-  remote access goes through an SSH tunnel;
-- For the Windows 11 edition, Windows CI only proves automated compatibility;
-  native on-device acceptance is tracked separately.
+  automatic download is refused fail-closed until the hash is frozen.
+- The workbench is a single-admin loopback form: no authentication, no
+  multi-user; remote access goes through an SSH tunnel.
+- Windows CI proves automated compatibility; the delivery zip must be built
+  and accepted on a real Windows 11 machine.
 
 ## 🙏 Acknowledgements
 

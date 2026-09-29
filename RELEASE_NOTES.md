@@ -1,44 +1,71 @@
-# 发布说明 / RELEASE NOTES
+# 发布说明 / RELEASE NOTES · v0.1.0-beta
 
+> 首个公开测试版本（first public test release）。
 > 本文件面向发布产物使用者；内部记录本不随包分发。
 > 打包：`python scripts/package_release.py`（可复现 tar.gz，含敏感面双闸）。
 
-## 版本
+## 这是一个什么版本
 
-- 见 `pyproject.toml` 的 `version`（打包产物名 `scam-<version>.tar.gz`）。
+语义摄像头的第一个公开测试版：摄像头不再只是"看见"，而是按**事件**记录与
+解释正在发生的事——无规则也建立可追溯的事件事实，先给事实性提醒，再由本地
+模型为进行中的事件追加**明确标注为"可能有误"的补充描述**。管理员规则只决定
+什么值得额外关注与告警，永远不是事件存在的前提。
 
-## 已知限制（诚实清单）
+两个产品版本共享同一领域核心：
 
-- 全部证据等级为 **Windows 本机合成自动化**：真实 RTSP、真实检测模型推理、
-  原生 Linux 主机十步运维、24 小时浸泡、真实 P95/P99 与隐私网络审计
-  **均未验证**；
-- 检测模型（NanoDet）与 V-JEPA 嵌入权重不随包分发：用
-  `scripts/fetch_models.py` 下载校验（哈希未冻结前 fail-closed 拒绝自动
-  下载）或自行导出后 `--verify-local` 就位；
-- 通知出口 MQTT 依赖可选 extras：`pip install scam[mqtt]`；
-- 慢系统 VLM 通道默认关闭（provider 未接线）：重复场景为纯结构匹配 +
-  档案复用，新异段标记 `pending_naming`；
-- 工作台为单管理员回环形态：无认证、无多用户；远程访问走 SSH 隧道。
+| 版本 | 入口 | 适用 |
+|---|---|---|
+| Linux NVR | `python -m scam.linux_nvr` | 常驻值守主机（systemd 部署） |
+| Win11 值守工作站 | `python -m scam.win11` | 本机交互（首次使用向导 + 环境基线） |
+
+## 本版本包含
+
+- **无规则事件发现**：事件事实（开始/结束/原因）、不可变 v1 初始观察、
+  事实性工作台提醒；崩溃窗口由启动补账收口，恰一次；
+- **提醒双事实**：客户端已显示（自动回执）与用户已确认（主动点击）分离，
+  均持久化、幂等、重启保持；
+- **进行中语义更新**：本地 VLM 为进行中事件追加版本化描述（观察/推断分栏、
+  证据摘要绑定），界面一律标注"模型补充描述，可能有误，待结合证据核对"；
+  模型文本**不能**关闭事件、压制提醒或解除告警；
+- **快路径告警**：帧差门控 + NanoDet 检测 + 网格规则，结构条件触发 ≤ 1s，
+  告警路径零模型；
+- **首次环境基线（Win11）**：向导式版本化场景基线，原始画面哈希核验；
+- **测量与运维工具**：只读事件库测量报告（时钟来源感知、完整性核对）、
+  只读资源快照、模型权重获取与校验、发布打包（违禁内容双闸）。
+
+## 已知限制（务必阅读）
+
+- **真实 RTSP 摄像头尚未验证**：本版本全部 Win11 闭环证据来自录像素材回放
+  （文件源）。实机摄像头验收是下一里程碑；
+- **语义描述质量未验证**：5 条模型输出的人工帧级比对中仅 1 条忠实（其余含
+  场景误识别、时间戳编造、过度自信标注）。请把模型描述当作待核对线索，
+  不要当作事实；界面已按此原则标注；
+- 事件落库时间无独立时钟列，测量报告中的该字段为上界代理；文件源
+  （host_receive）不提供可信采集时间，端到端采集时延不可测；
+- Linux 原生运维链路、24 小时浸泡、双相机与隐私网络审计未验证；
+- 录像默认关闭；按相机显式开启后才产生片段证据；
+- 检测权重不随包分发（`scripts/fetch_models.py`，哈希冻结前拒绝自动下载）；
+- 工作台为单管理员回环形态（仅 127.0.0.1，无认证）；远程访问走 SSH 隧道。
 
 ## 安装
 
-- Linux NVR：`bash deploy/install.sh`（venv + 依赖 + 项目本身 +
-  systemd unit 由 `scam.linux_unit` 渲染单一真值）；
-- Win11：`deploy/install-win11.ps1`（PS 5.1/7，venv + 逐步退出码 +
-  导入自检）。
+- 通用：`pip install -e ".[detect,vision]"`，权重用
+  `python scripts/fetch_models.py` 取得；
+- Linux NVR：`bash deploy/install.sh`；
+- Win11：`powershell -ExecutionPolicy Bypass -File deploy\install-win11.ps1`
+  后运行 `deploy\start-win11.bat`（或 `python -m scam.win11`）。
+
+快速开始、架构与实测数据见 [README.md](README.md) / [README-CN.md](README-CN.md)。
 
 ## 升级 / 回滚
 
-- 升级：解包新版本覆盖安装目录 → `bash deploy/install.sh` 重装 venv 内
-  依赖 → 重启服务；SQLite schema 迁移幂等（`PRAGMA user_version` 前向，
-  拒绝降级写入）；
-- 回滚：回到旧版目录/包重启即可——数据库不回写（高版本 schema 打开时
-  明确拒绝而非静默降级）；升级前备份按运维 runbook（O 线备份工具）执行；
-- 配置（cameras.json）与数据（SQLite/证据目录）与代码解耦，升级/回滚
-  不触碰。
+- SQLite schema 迁移幂等（`PRAGMA user_version` 前向迁移，拒绝降级写入）；
+- 回滚 = 回到旧版目录/包重启；数据库不回写；
+- 配置（cameras.json）与数据（SQLite/证据目录）与代码解耦，升级/回滚不触碰。
 
 ## 隐私边界
 
 - 默认数据不出本机：SQLite/证据/录像/模式档案全部本机；
-- 云端 VLM 为显式 opt-in 且逐次确认；通知出口（MQTT/webhook）仅在管理员
-  配置 notify 段后启动，载荷为最小化固定 schema（无凭据/路径）。
+- 云端 VLM 为显式 opt-in 且逐次确认；本地 ollama 通道数据不出本机；
+- 工作台仅监听 127.0.0.1；通知出口（MQTT/webhook）仅在管理员显式配置后
+  启动，载荷为最小化固定 schema（无凭据/路径）。
