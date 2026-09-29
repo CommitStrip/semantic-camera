@@ -11,6 +11,8 @@ import threading
 import time
 from types import SimpleNamespace
 
+import pytest
+
 import scam.db as db
 from scam.nvr import _recover_event_truth
 from scam import detect as detect_mod
@@ -23,14 +25,19 @@ def test_startup_reports_recovered_event_truth(tmp_path, capsys):
     db.init_schema(conn)
     db.open_tracked_object(
         conn, object_id="obj-1", camera="front", t_start=1.0, cls="person")
+    db.open_event_fact(conn, event_id="front:run1:event:1", camera="front",
+                       object_id="obj-1", t_start=1.0, cls="person")
+    db.update_event_fact(conn, "front:run1:event:1", t_last=2.0)
 
     counts = _recover_event_truth(conn, now=100.0, stale_after_s=30.0)
 
     assert counts["tracked_objects"] == 1
+    assert counts["event_facts"] == 1
     output = capsys.readouterr().out
     assert "对象 1" in output
     assert "审查段 0" in output
     assert "语义事件 0" in output
+    assert "事件 1" in output
 
 
 def test_startup_stays_quiet_when_no_recovery_is_needed(tmp_path, capsys):
@@ -69,12 +76,17 @@ class _FastStop(threading.Event):
         return super().wait(0.01 if timeout else timeout)
 
 
-def _patch_runtime(monkeypatch, source_cls, on_step=None, on_init=None):
+def _patch_runtime(monkeypatch, source_cls, on_step=None, on_init=None,
+                   persistence_degraded=False):
     class _Monitor:
         GRAY_W = 8
+        # 由 _patch_runtime 注入：新用例可驱动数据面故障
+        persistence_degraded = False
+        timestamp_kind = None
 
         def __init__(self, *args, **kwargs):
             self.frames = []
+            self.stream_lost = False
             if on_init is not None:
                 on_init()
 
@@ -83,6 +95,23 @@ def _patch_runtime(monkeypatch, source_cls, on_step=None, on_init=None):
             if on_step is not None:
                 on_step()
 
+        def persistence_state(self):
+            degraded = bool(self.persistence_degraded)
+            return {"review_open_failures": int(degraded),
+                    "review_unpersisted": degraded, "deferred_alarms": 0,
+                    "event_open_failures": 0, "event_facts_unpersisted": 0,
+                    "sink_failures": 0, "degraded": degraded}
+
+        def on_stream_lost(self, now):
+            self.stream_lost = True
+
+        def on_stream_recovered(self):
+            self.stream_lost = False
+
+        def close_all_event_facts(self, reason="camera-stopped"):
+            pass
+
+    _Monitor.persistence_degraded = bool(persistence_degraded)
     monkeypatch.setattr(nvr_mod, "CameraSource", source_cls)
     monkeypatch.setattr(nvr_mod, "Monitor", _Monitor)
     monkeypatch.setattr(nvr_mod, "build_sinks", lambda *a, **k: [])
@@ -527,9 +556,12 @@ def _seed_open_three_layers(db_path, t_last):
     db.open_semantic_event(conn, semantic_event_id="sem-x", camera="front",
                            review_id="rev-x", object_id="obj-x", t_start=2.0,
                            template="enter-and-dwell", zone_id="yard")
+    db.open_event_fact(conn, event_id="front:run-x:event:1", camera="front",
+                       object_id="obj-x", t_start=1.0, cls="person")
     db.update_tracked_object(conn, "obj-x", t_last=t_last)
     db.update_review_segment(conn, "rev-x", t_last=t_last)
     db.update_semantic_event(conn, "sem-x", t_last=t_last)
+    db.update_event_fact(conn, "front:run-x:event:1", t_last=t_last)
     snapshot = db.snapshot_pending_recovery(conn, now=100.0, stale_after_s=30.0)
     conn.close()
     return snapshot
@@ -541,10 +573,10 @@ def test_pending_recovery_scheduler_noop_without_snapshot():
 
 
 def test_pending_recovery_scheduler_closes_snapshot_once(tmp_path):
-    """一次性复核：按快照把宽限窗内遗留的三层记录收口，且线程是守护线程。"""
+    """一次性复核：按快照把宽限窗内遗留的四层记录收口，且线程是守护线程。"""
     db_path = str(tmp_path / "pending.db")
     snapshot = _seed_open_three_layers(db_path, t_last=95.0)
-    assert len(snapshot) == 3
+    assert len(snapshot) == 4
     done = []
     thread = nvr_mod._schedule_pending_recovery(
         db_path, snapshot, delay_s=0.0, on_done=done.append)
@@ -552,12 +584,13 @@ def test_pending_recovery_scheduler_closes_snapshot_once(tmp_path):
     assert thread is not None and thread.daemon is True, "退出不得被定时器阻塞"
     thread.join(5.0)
     assert not thread.is_alive()
-    assert done and sum(done[0].values()) == 3
+    assert done and sum(done[0].values()) == 4
 
     conn = db.connect(db_path)
     for table, key in (("tracked_objects", "obj-x"),
                        ("review_segments", "rev-x"),
-                       ("semantic_events", "sem-x")):
+                       ("semantic_events", "sem-x"),
+                       ("event_facts", "front:run-x:event:1")):
         row = conn.execute(
             f"SELECT t_end,end_reason FROM {table}"            # noqa: S608
             f" WHERE t_end IS NOT NULL").fetchone()
@@ -585,3 +618,225 @@ def test_pending_recovery_scheduler_exits_early_on_stop(tmp_path):
         "SELECT COUNT(*) FROM tracked_objects WHERE t_end IS NOT NULL"
     ).fetchone()[0] == 0, "停机路径不得写库"
     conn.close()
+
+def test_camera_reports_persistence_degraded_then_clears(monkeypatch):
+    """F9：审查段/告警写不进库必须在健康面可见，恢复后自动清除。
+
+    源可以在线出图，同时数据面写不进去——两者必须能同时表达，不能被源侧
+    提示遮住。
+    """
+    stop = _FastStop()
+    seen = []
+    registry = CameraRuntimeRegistry(["cam"])
+    state = SimpleNamespace(monitors={}, runtime=registry)
+
+    def record_step():
+        # on_step 在 monitor.step 内部触发，早于本帧的数据面上报，
+        # 所以第 0 帧采样看不到当帧上报结果——从第 1 帧起断言。
+        seen.append(_camera_state(registry, "cam"))
+        if len(seen) >= 3:
+            stop.set()
+
+    class Source:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def open(self):
+            return True
+
+        def read(self):
+            return True, "frame", 2000.0
+
+        @property
+        def stats(self):
+            return {"timestamp_kind": "host_receive", "eof_reopens": 0}
+
+        def close(self):
+            pass
+
+    _patch_runtime(monkeypatch, Source, on_step=record_step,
+                   persistence_degraded=True)
+    nvr_mod._run_camera(
+        {"id": "cam", "source": "clip.mp4", "source_kind": "file",
+         "detector": {"engine": "none"}},
+        [], "events.db", stop, state)
+
+    # 第 1 帧起健康面应稳定携带数据面故障，且状态不被改成 degraded（源是好的）
+    assert len(seen) == 3
+    for snapshot in seen[1:]:
+        assert snapshot["state"] == "online", "数据面故障不得改写源状态"
+        assert snapshot["persistence_issue"] == {
+            "code": "persistence_degraded",
+            "action": "审查段或告警未能写入本机数据库；检查磁盘空间与数据库可写性"}
+        assert "未能写入本机数据库" in snapshot["hint"]
+
+
+# ---------- 复验边界3：退出收口不被 source.close() 异常跳过 ----------
+
+def _patch_exit_fixtures(monkeypatch, *, source_close_error=None,
+                         frame_error=None, closeout_error=None,
+                         closeout_pending=0):
+    """局部替身：Source.close / 看门狗主链路 / 事件收口均可注入失败。
+
+    主异常用 watchdog.frame 注入——monitor.step 的单帧异常按既有纪律被
+    帧级守卫吞掉（不杀线程），不适合充当主异常。
+    """
+    calls = []
+    stop = _FastStop()
+    registry = CameraRuntimeRegistry(["cam"])
+    state = SimpleNamespace(monitors={}, runtime=registry)
+
+    class Source:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def open(self):
+            return True
+
+        def read(self):
+            if "frame" not in calls:
+                calls.append("frame")
+                return True, "frame", 2000.0
+            stop.set()
+            return False, None, None
+
+        @property
+        def stats(self):
+            return {"timestamp_kind": "host_receive"}
+
+        def close(self):
+            calls.append("source-close")
+            if source_close_error is not None:
+                raise source_close_error
+
+    class MonitorDouble:
+        GRAY_W = 8
+        timestamp_kind = None
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def step(self, frame, gray, now):
+            pass
+
+        def on_stream_lost(self, now):
+            pass
+
+        def on_stream_recovered(self):
+            pass
+
+        def persistence_state(self):
+            return {"review_open_failures": 0, "review_unpersisted": False,
+                    "deferred_alarms": 0, "event_open_failures": 0,
+                    "event_facts_unpersisted": 0, "sink_failures": 0,
+                    "degraded": False}
+
+        def close_all_event_facts(self, reason="camera-stopped"):
+            calls.append("event-closeout")
+            if closeout_error is not None:
+                raise closeout_error
+            return closeout_pending
+
+    def _watchdog_frame(**kwargs):
+        if frame_error is not None:
+            raise frame_error
+
+    watchdog = SimpleNamespace(
+        started=lambda: calls.append("watchdog-start"),
+        failure=lambda *a, **k: None,
+        opened=lambda **k: None,
+        frame=_watchdog_frame,
+        stopped=lambda: calls.append("watchdog-stop"))
+
+    monkeypatch.setattr(nvr_mod, "CameraSource", Source)
+    monkeypatch.setattr(nvr_mod, "Monitor", MonitorDouble)
+    monkeypatch.setattr(nvr_mod, "build_sinks", lambda *a, **k: [])
+    monkeypatch.setattr(nvr_mod, "to_gray", lambda frame, width: None)
+    return calls, stop, state, registry, watchdog
+
+
+def _run_exit_camera(calls, stop, state, watchdog):
+    nvr_mod._run_camera(
+        {"id": "cam", "source": "clip.mp4", "source_kind": "file",
+         "detector": {"engine": "none"}},
+        [], "events.db", stop, state, watchdog=watchdog)
+
+
+def test_source_close_failure_does_not_skip_event_closeout(
+        monkeypatch, capsys):
+    """source.close() 抛错：事件收口/看门狗/运行状态清理仍各自执行；
+    主异常（step 内）原样上抛，不被清理异常掩盖。"""
+    calls, stop, state, registry, watchdog = _patch_exit_fixtures(
+        monkeypatch, source_close_error=RuntimeError("disk gone"),
+        frame_error=RuntimeError("boom"))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        _run_exit_camera(calls, stop, state, watchdog)
+
+    assert "source-close" in calls and "event-closeout" in calls
+    assert "watchdog-stop" in calls, "看门狗清理必须得到执行机会"
+    cam_state = registry.snapshot()["cameras"][0]
+    assert cam_state["state"] == "stopped", "运行状态清理必须执行"
+    out = capsys.readouterr().out
+    assert "退出清理异常（source-close）" in out
+    assert "退出清理异常（event-closeout）" not in out
+    assert "值守结束" in out, "收尾日志必须完整"
+
+
+def test_closeout_failure_recorded_and_does_not_mask_primary(
+        monkeypatch, capsys):
+    """事件收口抛错：异常被记录，主异常原样上抛，其余清理照常执行。"""
+    calls, stop, state, registry, watchdog = _patch_exit_fixtures(
+        monkeypatch, frame_error=RuntimeError("boom"),
+        closeout_error=RuntimeError("event db locked"))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        _run_exit_camera(calls, stop, state, watchdog)
+
+    assert "event-closeout" in calls and "watchdog-stop" in calls
+    out = capsys.readouterr().out
+    assert "退出清理异常（event-closeout）" in out
+    assert "值守结束" in out
+
+
+def test_both_closeout_and_source_close_failures_all_executed(
+        monkeypatch, capsys):
+    """两者同时失败：两项清理都执行、都记录，主异常仍原样上抛。"""
+    calls, stop, state, registry, watchdog = _patch_exit_fixtures(
+        monkeypatch, source_close_error=RuntimeError("disk gone"),
+        frame_error=RuntimeError("boom"),
+        closeout_error=RuntimeError("event db locked"))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        _run_exit_camera(calls, stop, state, watchdog)
+
+    assert "source-close" in calls and "event-closeout" in calls
+    out = capsys.readouterr().out
+    assert "退出清理异常（source-close）" in out
+    assert "退出清理异常（event-closeout）" in out
+
+
+def test_exit_reports_unpersisted_event_count(monkeypatch, capsys):
+    """退出前仍有事件没写进去：必须如实报"未保存"，绝不宣称已保存。"""
+    calls, stop, state, registry, watchdog = _patch_exit_fixtures(
+        monkeypatch, closeout_pending=2)
+
+    _run_exit_camera(calls, stop, state, watchdog)   # 无主异常，正常返回
+
+    out = capsys.readouterr().out
+    assert "2 条事件未能写入数据库（未保存）" in out
+    assert "值守结束" in out
+
+
+def test_cleanup_error_without_primary_exception_is_reraised(
+        monkeypatch, capsys):
+    """无主异常时清理失败不得静默吞掉：第一条清理异常原样上抛。"""
+    calls, stop, state, registry, watchdog = _patch_exit_fixtures(
+        monkeypatch, source_close_error=RuntimeError("disk gone"))
+
+    with pytest.raises(RuntimeError, match="disk gone"):
+        _run_exit_camera(calls, stop, state, watchdog)
+
+    assert "event-closeout" in calls, "后续清理仍必须执行"
+    out = capsys.readouterr().out
+    assert "退出清理异常（source-close）" in out

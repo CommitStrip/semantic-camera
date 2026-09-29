@@ -1,8 +1,8 @@
-"""ZW-003 Win11 部署契约守卫：入口、配置落点、首次启动、缺模型预览、录像默认关。
+"""Win11 部署契约守卫：入口、配置落点、首次启动、缺模型预览、录像默认关。
 
 以文本契约固化部署脚本与 pyproject 入口声明，以行为契约固化 win11 入口与
 首次接入向导；只读产品代码与脚本，不修改任何脚本、产品代码或上下文。
-合成证据，非真实安装器/实机证据；发现契约破坏时只报告，由 Codex 修复。
+合成证据，非真实安装器/实机证据；发现契约破坏时只报告，交由维护者修复。
 """
 
 import os
@@ -58,8 +58,8 @@ def test_first_run_missing_config_opens_wizard_then_runtime(
         tmp_path, monkeypatch):
     calls = {}
 
-    def _fake_wizard(config_path):
-        calls["wizard"] = config_path
+    def _fake_wizard(config_path, *, default_model_path=None):
+        calls["wizard"] = (config_path, default_model_path)
         return True
 
     def _fake_runtime(args, edition=None):
@@ -73,7 +73,9 @@ def test_first_run_missing_config_opens_wizard_then_runtime(
     assert win11_entry.main([]) == 0
 
     default_config = WIN11_WORKSTATION.default_config()
-    assert calls["wizard"] == default_config  # 缺配置 → 向导，落点为用户目录
+    wizard_path, wizard_model = calls["wizard"]
+    assert wizard_path == default_config          # 缺配置 → 向导，落点为用户目录
+    assert wizard_model is None or wizard_model.endswith(".onnx"),         "预填模型只能是发行包内的 ONNX 路径或 None，不得凭空造路径"
     args, edition = calls["runtime"]
     assert args[:2] == ["--config", default_config]
     assert edition == "win11"
@@ -81,7 +83,7 @@ def test_first_run_missing_config_opens_wizard_then_runtime(
     # 向导未完成 → 退出码 1，值守绝不启动
     calls.clear()
     monkeypatch.setattr(win11_entry, "run_first_use_setup",
-                        lambda config_path: False)
+                        lambda config_path, **kwargs: False)
     assert win11_entry.main([]) == 1
     assert "runtime" not in calls
 

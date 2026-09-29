@@ -1,0 +1,391 @@
+{
+ "version": 1,
+ "status_note": "单评审员风险样本集：仅记录质量风险，不称准确率；未评审条目仅存哈希与原文待扩展。场景多样性受限（资源耗尽停止条款生效，未新增运行）。",
+ "taxonomy": [
+  "scene_misidentification",
+  "number_time_fabrication",
+  "overconfidence",
+  "danger_underreporting"
+ ],
+ "reviewed_count": 5,
+ "unjudged_count": 43,
+ "category_counts_reviewed": {
+  "scene_misidentification": 2,
+  "number_time_fabrication": 4,
+  "overconfidence": 3,
+  "danger_underreporting": 2
+ },
+ "samples": [
+  {
+   "id": "ar2d:front-door:02077ff495c1:event:3:v2",
+   "evidence_sha256": null,
+   "model_uncertainty": "confirmed",
+   "model_raw": "观察到（画面可直接确认）：画面中可见一扇黄色的门。；画面中可见一辆蓝色汽车停在路边。；画面中可见一扇打开的门。；画面中可见一名女性在靠近门处。；画面中可见一扇关闭的门。；画面中可见一人正在关门。；画面中可见一个婴儿站着。；画面中可见一扇蓝色的门。；画面中可见一辆红色汽车。；画面中可见一个小孩。；画面中可见一扇玻璃门。；画面中可见一名成年男子。；画面中可见一扇门；画面中可见另一人正在门边行走。；画面中可见一扇黄色的门。模型推断（低不确定性，非人工确认）：基于画面，可见多人在门口活动，疑似正在进出建筑物。。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:02077ff495c1:event:10:v2",
+   "evidence_sha256": "5fd98a01de2958daea4c5eb158cc5462be6ec80919f627bf61365a81ed5fe502",
+   "model_uncertainty": "low",
+   "model_raw": "观察到（画面可直接确认）：画面中可见一扇门被打开；画面中有一个穿深色衣服的人站在门边。模型推断（存在不确定性，非人工确认）：有人正在开门。",
+   "human": {
+    "judgment": "基本忠实：观察与帧一致，推断克制（好样本）",
+    "categories": [],
+    "frame_actual": "登记室；黄门开启状；深色衣服人立于门边；DVR 19:40:53"
+   }
+  },
+  {
+   "id": "ar2d:front-door:02077ff495c1:event:12:v2",
+   "evidence_sha256": "c90dadf6303489e357fdd05202f05c7faf74e023aaa57cc5335a4a4c8a0da4f7",
+   "model_uncertainty": "high",
+   "model_raw": "观察到（画面可直接确认）：门打开；时间下午；门口有个人；车辆经过；门金属；灯光；车痕；地面；无其他。模型推断（高不确定性，非人工确认）：基于画面，事件为正常开门，可能有人进出，车辆正常行驶。但具体细节需确认。。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:02077ff495c1:event:14:v2",
+   "evidence_sha256": "d990195ddeabec8671675eefa6e5bb4dd8a2120a44b4b6292ed1e8b2641879ee",
+   "model_uncertainty": "high",
+   "model_raw": "观察到（画面可直接确认）：画面显示前门敞开；门上有一个黄色警示灯；门外可见一个人影；背景中有一棵树。模型推断（高不确定性，非人工确认）：基于画面，推断有人正进入前门，因为门敞开且有警示灯。。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:02077ff495c1:event:11:v2",
+   "evidence_sha256": "33a102d0aeef8587e596deb5b31122d1bc7e25f67815e92888447cb6122b7ae2",
+   "model_uncertainty": "low",
+   "model_raw": "观察到（画面可直接确认）：画面中可见前门区域；门处于打开状态；该人位于前门台阶上；该人穿着蓝色上衣；该人右手握着手机；该人左手拿着一张纸；该人在查看手机；周围无其他行人；地面有小石子；摄像头位于正前方。模型推断（存在不确定性，非人工确认）：该人可能在阅读手机，处于正常活动状态。。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:02077ff495c1:event:20:v2",
+   "evidence_sha256": "7117e3cd75c4c6ccaf507c3ccacbec510077b78400230b9439edded17d4aae60",
+   "model_uncertainty": "high",
+   "model_raw": "观察到（画面可直接确认）：list。模型推断（高不确定性，非人工确认）：text。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:02077ff495c1:event:23:v2",
+   "evidence_sha256": null,
+   "model_uncertainty": "confirmed",
+   "model_raw": "观察到（画面可直接确认）：门是关闭的；有一个人站在门口；有车辆停在路边；背景有一栋建筑物；有台阶通向门；天气晴朗；日期: 2023年7月21日。模型推断（低不确定性，非人工确认）：基于画面，观察到门关闭，有人站在门口附近，背景有建筑物和车辆。推断可能有人正在进入或离开该区域。。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:02077ff495c1:event:23:v3",
+   "evidence_sha256": "a27b962a8c6ad50cdd7f5c435cad64b90d2e8ff579aa26d56632c6e8efe76fe8",
+   "model_uncertainty": "confirmed",
+   "model_raw": "观察到（画面可直接确认）：前门开启，门外有一个人正在行走；画面中的人穿着蓝色上衣和黑色裤子；门外地面有清晰的脚印痕迹；门上方有监控摄像头；门口周围有绿色植物；建筑物背景有办公区域标识；画面显示时间戳为2023-10-05 08:20:13；门左侧有一扇窗户。模型推断（低不确定性，非人工确认）：基于画面可见，有人正从门外进入办公区域，推测可能存在正常入内的行为，无异常情况发生。。",
+   "human": {
+    "judgment": "严重幻觉：场景误识别+编造细节+时间戳错值+confirmed 过度自信",
+    "categories": [
+     "scene_misidentification",
+     "number_time_fabrication",
+     "overconfidence",
+     "danger_underreporting"
+    ],
+    "frame_actual": "室内安检/登记室（X光行李机+显示器+黄门）；底部 DVR 叠加字幕「Booking Scan room S-105, 19-Dec-2014 19:35:53」；三人，中间两人呈肢体冲突/押解状"
+   }
+  },
+  {
+   "id": "ar2d:front-door:02077ff495c1:event:24:v2",
+   "evidence_sha256": null,
+   "model_uncertainty": "confirmed",
+   "model_raw": "观察到（画面可直接确认）：画面中可见前门；门是关闭的；时间显示为下午3:00；前景有草地；有一个人站在门附近；门的颜色为银色；没有车在附近；有门铃，但未响；有猫在周围；画面中无其他异常；门是自动的；有树在门附近；画面中无异常；有一个人的影子在门上；前景有植物；时间显示为下午3:00。模型推断（低不确定性，非人工确认）：基于观察，推断有异常活动，如有人站在门口，可能表示观察或访问。。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:02077ff495c1:event:24:v3",
+   "evidence_sha256": null,
+   "model_uncertainty": "confirmed",
+   "model_raw": "观察到（画面可直接确认）：画面中前门处于开启状态；画面中一辆蓝色轿车停在右侧；画面中左侧有个人站立；画面中地面有红色痕迹；画面中门内有灯光；画面中远处有行人走动；画面中门上可见白色文字标识；画面中右侧有车轮痕迹。模型推断（低不确定性，非人工确认）：基于画面，推测有人正在通过门，车辆停在门口，地面上有红色痕迹，可能是事故现场，门上标识为住宅区入口。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:02077ff495c1:event:26:v2",
+   "evidence_sha256": "c4f63772e34a160fa02cab1613f0a56a2fc147afea79beca1003a4737562c47c",
+   "model_uncertainty": "confirmed",
+   "model_raw": "观察到（画面可直接确认）：门关闭；门上有锁；门把手为金属；门内有橱柜；地面有脚印；门框有反光；无其他异常现象。模型推断（低不确定性，非人工确认）：推断人员可能进入门内，但无法确认具体行为。。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:02077ff495c1:event:24:v4",
+   "evidence_sha256": null,
+   "model_uncertainty": "low",
+   "model_raw": "观察到（画面可直接确认）：门在关闭状态；门框清晰可见；门把手可见；时间是10:00；无人在场；室内光线充足；周围环境无特殊事件。模型推断（存在不确定性，非人工确认）：基于画面的推断，门在关闭状态，可能正在打开，但需要确认。。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:02077ff495c1:event:31:v2",
+   "evidence_sha256": null,
+   "model_uncertainty": "confirmed",
+   "model_raw": "观察到（画面可直接确认）：画面显示前门，门是关闭的；门口有一个人，穿着蓝色衣服；门旁有自行车停在草地上；门边有垃圾；画面右上角有时间戳；有树木在背景中；光线照在门上，显示白色；门口有一个人正在进入；门是金属材质的；有风，门在轻微摆动；画面边缘有模糊的物体；有一个人在门外；一个黄色的物体在画面中；门边有绿色植物；画面左下角有日期。模型推断（低不确定性，非人工确认）：基于画面，有人正在进入前门，可能是访客或顾客。。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:02077ff495c1:event:32:v2",
+   "evidence_sha256": "a4b8603a945fcd83bad02b6e80d6593bdddbf7b1350f690791c302f2c3469949",
+   "model_uncertainty": "low",
+   "model_raw": "观察到（画面可直接确认）：list。模型推断（存在不确定性，非人工确认）：text。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:02077ff495c1:event:40:v2",
+   "evidence_sha256": "1854ae37df4323942930694ffcebc8dc4813422be99153716cfcf27d1c5fd815",
+   "model_uncertainty": "high",
+   "model_raw": "观察到（画面可直接确认）：画面内容无法直接确认。模型推断（高不确定性，非人工确认）：无法根据画面推断任何内容。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:02077ff495c1:event:38:v2",
+   "evidence_sha256": "009857e4b38278a0388ac8f7f9cbfbcb755113b7beadd8aab3d4eb60928d3165",
+   "model_uncertainty": "low",
+   "model_raw": "观察到（画面可直接确认）：list。模型推断（存在不确定性，非人工确认）：text。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:02077ff495c1:event:51:v2",
+   "evidence_sha256": "33fc1fad9e95752ee587fb45c7f84ed0af65d341314e7fe8f42cbb02ed1511a2",
+   "model_uncertainty": "confirmed",
+   "model_raw": "观察到（画面可直接确认）：1；2；3。模型推断（低不确定性，非人工确认）：inference。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:02077ff495c1:event:54:v2",
+   "evidence_sha256": "502589bf51483835087e6ea244b265d6f250a647fb25ccde88d97e15fd9d4a4b",
+   "model_uncertainty": "low",
+   "model_raw": "观察到（画面可直接确认）：front door is closed；no people visible；no motion detected；no vehicles；no animals；no smoke；no fire；no suspicious activities；the scene is daylight。模型推断（存在不确定性，非人工确认）：based on the observed facts, it is likely a normal occurrence with no incident.。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:02077ff495c1:event:48:v2",
+   "evidence_sha256": "a1858f1a729578eccf701977dc1a72b3cfd024d5b8e73f1070f5a5d4431d2d66",
+   "model_uncertainty": "confirmed",
+   "model_raw": "观察到（画面可直接确认）：门处于开启状态，可见门框。；有一个人站在门旁边。；地面有脚印。；环境光线正常，无异常声音。；门是金属材质。。模型推断（低不确定性，非人工确认）：基于画面，可推断有人员通过门进入建筑物，且脚印可能由行人留下的。。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:2e76f1ca51a3:event:1:v2",
+   "evidence_sha256": "c54672c8911f976716990f736058dc67cafb3fd5fdbab444fac11824bf8a7be4",
+   "model_uncertainty": "confirmed",
+   "model_raw": "观察到（画面可直接确认）：画面中可见一个固定摄像头；摄像头位于社区入口附近；路边停有一辆蓝色汽车；有行人正在步行。模型推断（低不确定性，非人工确认）：此处固定摄像头监控社区入口，车辆停靠路面，行人活动，可能为日常交通场景，未涉及危险活动。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:2e76f1ca51a3:event:5:v2",
+   "evidence_sha256": null,
+   "model_uncertainty": "low",
+   "model_raw": "观察到（画面可直接确认）：门处于开启状态；门上有一个金属门锁；门外站着一个女性；背景为街道。模型推断（存在不确定性，非人工确认）：基于画面，推断有人正在进入前门。。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:2e76f1ca51a3:event:6:v2",
+   "evidence_sha256": null,
+   "model_uncertainty": "low",
+   "model_raw": "观察到（画面可直接确认）：画面中无直接观察到的元素；无直接观察到的活动；无直接观察到的人员。模型推断（存在不确定性，非人工确认）：基于画面的推断。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:2e76f1ca51a3:event:5:v3",
+   "evidence_sha256": "e389cd684f862aeb90d2146652f0c19dddfd49a11c71da3722a1cdad1c14a675",
+   "model_uncertainty": "confirmed",
+   "model_raw": "观察到（画面可直接确认）：列表。模型推断（低不确定性，非人工确认）：string。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:2e76f1ca51a3:event:10:v2",
+   "evidence_sha256": "628ee4d74739ad9042990704b78990386f51230906dff6fadb003a00eca0a335",
+   "model_uncertainty": "confirmed",
+   "model_raw": "观察到（画面可直接确认）：门框部分可见，门被打开；门外有一个人影站立；地面为水泥材质；门把手清晰可见；门锁部分可见，未打开；画面中未见其他人员。模型推断（低不确定性，非人工确认）：画面显示门外有人影站立于被打开的门前，推测可能是正常活动或等待进入室内。门锁状态未打开，无异常迹象。。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:2e76f1ca51a3:event:11:v2",
+   "evidence_sha256": "df941176323b7395d15393c80125db633c5bd45e8a724ac5a4f63e4c9bc41217",
+   "model_uncertainty": "low",
+   "model_raw": "观察到（画面可直接确认）：画面显示前门开启，门为金属材质。；门口有一个人站在那里，穿着深色衣服。；地面是水泥地，相对干净。；附近有一辆红色汽车停在门前。；无其他人物或车辆在门口。；摄像头固定位置，无其他障碍物。。模型推断（存在不确定性，非人工确认）：基于画面，可能有人员在门口逗留，车辆停靠附近。。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:b1dcca2eaea4:event:1:v2",
+   "evidence_sha256": "c54672c8911f976716990f736058dc67cafb3fd5fdbab444fac11824bf8a7be4",
+   "model_uncertainty": "high",
+   "model_raw": "观察到（画面可直接确认）：门处于打开状态；有一个人影在门附近；环境光线充足；门上有金属门锁。模型推断（高不确定性，非人工确认）：基于画面，可能有人闯入建筑物。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:b1dcca2eaea4:event:3:v2",
+   "evidence_sha256": "4e681cec0ac8a9591f748256b0d2c6594d6bf108924a8cddb48c095bd9352aac",
+   "model_uncertainty": "confirmed",
+   "model_raw": "观察到（画面可直接确认）：门处于敞开状态；门外有个人站在门口；门边有一辆小型汽车停靠；背景中有一栋建筑物；建筑物周围有绿色植被；门上挂有钥匙；地面有台阶；门口有路灯；有远处的行人；天空晴朗；门内空间可见；有车辆停靠在附近；建筑物旁边有其他树木；门开启状态；有一个人站在门口；附近有另一栋建筑物。模型推断（低不确定性，非人工确认）：基于画面直接可见，推断有人可能正在进入建筑物，门处于开启状态，周围有车辆停放，环境明亮。。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:b1dcca2eaea4:event:12:v2",
+   "evidence_sha256": "f8792914c30cbaae4cc43bde611229f52c0a2f414103b212d0d627376137feca",
+   "model_uncertainty": "confirmed",
+   "model_raw": "观察到（画面可直接确认）：门是关闭的；门口有一个男人；门上有一个锁；光线明亮；时间是下午；地面有灰尘；门上有一个小孔；一个模糊的人影。模型推断（低不确定性，非人工确认）：基于画面，推断有人试图进入前门，但门被阻拦。。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:b1dcca2eaea4:event:14:v2",
+   "evidence_sha256": "237172b8970ea67f3239da3fd25f455d5b79745c0688a1b38cf2a4b40a666da0",
+   "model_uncertainty": "high",
+   "model_raw": "观察到（画面可直接确认）：画面中可见前门区域；有一个人在门口；画面中可见时间戳为14:30；有车辆停在附近；画面中可见部分建筑。模型推断（高不确定性，非人工确认）：基于画面观察，有一个人在门口活动，可能在开门或离开；有车辆停在附近，可能表示访客；时间显示为14:30，表明白天。。",
+   "human": {
+    "judgment": "部分正确+时间戳幻觉+车辆幻觉（不确定性=high 尚算诚实）",
+    "categories": [
+     "number_time_fabrication"
+    ],
+    "frame_actual": "同一登记室；DVR 字幕 19-Dec-2014 19:39:53；一人立于黄门旁"
+   }
+  },
+  {
+   "id": "ar2d:front-door:b1dcca2eaea4:event:14:v3",
+   "evidence_sha256": null,
+   "model_uncertainty": "confirmed",
+   "model_raw": "观察到（画面可直接确认）：画面中可见有人站在门口；有蓝色轿车停靠在门口；门处于开启状态；摄像头位于建筑物外侧；显示时间为下午；无异常物体出现。模型推断（低不确定性，非人工确认）：基于观察到的车辆停靠和人员进出情况，可推断为正常通行场景。无异常行为。。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:b1dcca2eaea4:event:19:v2",
+   "evidence_sha256": "4c64fa22d5a79be32deb77738f3e50d9408a8018f015a47fd81bc545bb5dab35",
+   "model_uncertainty": "confirmed",
+   "model_raw": "观察到（画面可直接确认）：门处于关闭状态；门框为金属材质，表面光滑；门上有黄色电子门禁系统；门内侧可见一个人影；画面中无其他异常物体。模型推断（低不确定性，非人工确认）：基于门锁状态及门内侧人影，推断有人试图进入门。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:b1dcca2eaea4:event:14:v4",
+   "evidence_sha256": "6a9ed3c1c8c82aa6a3630918ebc12d39734c80b4958d5388e3491273951bbd8b",
+   "model_uncertainty": "confirmed",
+   "model_raw": "观察到（画面可直接确认）：门正在被打开。；门外站着一个人。；门是木质的。；有灯光亮起。；画面是白天。。模型推断（低不确定性，非人工确认）：有人在门口，门打开，可能有人进入。。",
+   "human": {
+    "judgment": "confirmed 态多条幻觉（门态/位置/昼夜）",
+    "categories": [
+     "scene_misidentification",
+     "number_time_fabrication",
+     "overconfidence"
+    ],
+    "frame_actual": "登记室；一人立于室内；黄门关闭；DVR 19:41:34（晚间）"
+   }
+  },
+  {
+   "id": "ar2d:front-door:b1dcca2eaea4:event:19:v3",
+   "evidence_sha256": "c77a76c7b00ccc1213d656bc36ad4a67097fa6497580a43fca96208f7e042027",
+   "model_uncertainty": "confirmed",
+   "model_raw": "观察到（画面可直接确认）：画面显示固定的前门摄像头；门处于开启状态；门口有一名男性人物；该人手中握着一个物品；画面上方无其他车辆；摄像头位置固定；环境光线良好；无其他异常。模型推断（低不确定性，非人工确认）：基于画面中门开启和该人手持物品在门口，推断该人员可能在进入该区域。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:b1dcca2eaea4:event:25:v2",
+   "evidence_sha256": "b9b3d75113ce6f74802c290144e14dc51f3f27e141d6771bded4dbcb01ceedf7",
+   "model_uncertainty": "high",
+   "model_raw": "观察到（画面可直接确认）：画面显示前门区域；门位于门框上，是关闭的；画面中有监控摄像头；有一个人在门口。模型推断（高不确定性，非人工确认）：基于画面，推断有人未授权进入前门，但无法确认是否触发警报。。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:38dc802535ff:event:1:v2",
+   "evidence_sha256": "d486c02d1a4b90e18c7912c66177992fbe4e6a172cd0fdc45a4eb5c7a64c86ac",
+   "model_uncertainty": "low",
+   "model_raw": "观察到（画面可直接确认）：画面可直接确认的事实，每条≤64字，最多16条。模型推断（存在不确定性，非人工确认）：基于画面的模型推断，≤300字。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:38dc802535ff:event:10:v2",
+   "evidence_sha256": "35932aaf9bbbbab4d2a615aa07684a48ed9420b9d666fed79441dc5778ef96f3",
+   "model_uncertainty": "confirmed",
+   "model_raw": "观察到（画面可直接确认）：条目1；条目2；条目3；条目4；条目5；条目6；条目7；条目8；条目9；条目10。模型推断（低不确定性，非人工确认）：推断文字。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:38dc802535ff:event:11:v2",
+   "evidence_sha256": "c90dadf6303489e357fdd05202f05c7faf74e023aaa57cc5335a4a4c8a0da4f7",
+   "model_uncertainty": "high",
+   "model_raw": "观察到（画面可直接确认）：画面显示前门，包含门把手；门把手上有锁；门关闭状态；时间是白天；摄像头在位置；无可见人物；室内有灯光。模型推断（高不确定性，非人工确认）：基于画面，推断可能发生人员活动，但无明确证据确认，因此模型推断可能是正常场景。。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:38dc802535ff:event:18:v2",
+   "evidence_sha256": null,
+   "model_uncertainty": "low",
+   "model_raw": "观察到（画面可直接确认）：画面中可见前门处于开启状态；有一个人站在门框右侧，身穿蓝色上衣；画面中可见一辆红色汽车停在门前；有一个人正在离开；门框右侧有一个黄色标识；有一个人站在门前。模型推断（存在不确定性，非人工确认）：有一个人正在进入建筑物。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:38dc802535ff:event:22:v2",
+   "evidence_sha256": null,
+   "model_uncertainty": "high",
+   "model_raw": "观察到（画面可直接确认）：画面中显示一个男性站在门边，正在尝试开门。；门是关闭的。；画面中显示时间是下午3:45。；画面中显示有小孩在门附近。。模型推断（高不确定性，非人工确认）：基于画面，推断有人员企图进入住宅，可能存在安全风险。。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:38dc802535ff:event:28:v2",
+   "evidence_sha256": null,
+   "model_uncertainty": "confirmed",
+   "model_raw": "观察到（画面可直接确认）：画面中显示一扇自动门正在被打开；门的左侧有一人在注视；时间显示为2023年10月22日下午4点；门的右侧有车辆停放；门外有草坪；画面中没有其他行人；门上有标识文字；光线从左侧照射。模型推断（低不确定性，非人工确认）：有人在门口，可能为访客或顾客进入。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:38dc802535ff:event:42:v2",
+   "evidence_sha256": "e0a7db55b43d3af51641dded3de63aa623c285a8c144f514b65d7b5b741d1ca8",
+   "model_uncertainty": "low",
+   "model_raw": "观察到（画面可直接确认）：条1；条2；条3。模型推断（存在不确定性，非人工确认）：推断。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:38dc802535ff:event:52:v2",
+   "evidence_sha256": "8bb45cc1d936f35e1b94e161938b9c669407ee4ab1f358e26c8e21d4c3877321",
+   "model_uncertainty": "confirmed",
+   "model_raw": "观察到（画面可直接确认）：画面显示前门；有一个人正在开门；门是敞开的；摄像头固定在前门；背景为室内环境；没有其他明显物体；时间约为凌晨。模型推断（低不确定性，非人工确认）：基于画面，推断为一个人可能正在尝试进入房屋，但无法确认具体行为。时间可能在凌晨。。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:38dc802535ff:event:55:v2",
+   "evidence_sha256": "86937e4b99409b2eae1c625eeb471105f720aa3bd3188278230331cd09f2273d",
+   "model_uncertainty": "low",
+   "model_raw": "观察到（画面可直接确认）：画面中可见前门打开；门边有个人影；远处有背景噪音；门锁指示灯亮；画面中可见电子门禁系统；门后有小动物。模型推断（存在不确定性，非人工确认）：基于画面，推断这可能是一个入侵事件，但无法确认细节和人员身份。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:0e6539eca80e:event:1:v2",
+   "evidence_sha256": "119e2bcc22eb11a34e8adcd6cd6dfe0772a08ed347bf0a69aaf3e21a93ebdfaf",
+   "model_uncertainty": "confirmed",
+   "model_raw": "观察到（画面可直接确认）：画面显示前门关闭状态。；门上有一个金属门把手。；门外有一个人。；该人穿着蓝色衣服。；该人站在门外。；周围环境安静。；没有其他车辆在附近。；门上有'STOP'标签。；短暂的阴影。；前门是玻璃门。。模型推断（低不确定性，非人工确认）：基于画面观察，前门关闭，门外有一个人，穿着蓝色衣服，正在站立。门上有'STOP'标签，周围环境安静无异常。推断可能事件为行人活动，但无明确事件发生。。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:0e6539eca80e:event:7:v2",
+   "evidence_sha256": "69144482928569d0532ba236dba0750ef529d266bb09c727278bedec25b14ae5",
+   "model_uncertainty": "low",
+   "model_raw": "观察到（画面可直接确认）：画面中可见前门；门是关闭的；有一个人站在门口；地面有台阶；周围有房屋建筑；时间是晚上；事件可能与人员活动相关。模型推断（存在不确定性，非人工确认）：基于观察，推断可能有人员进入建筑物。。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:0e6539eca80e:event:8:v2",
+   "evidence_sha256": "93ba040ea25505a87fbb53972e6347297f557d32bcf4439bae71232da6cfc678",
+   "model_uncertainty": "confirmed",
+   "model_raw": "观察到（画面可直接确认）：门是打开的；有人站在门边；时间: 14:30；天气: 多云；摄像头: 前门；门上无标识。模型推断（低不确定性，非人工确认）：基于画面，推断有人可能正在进入，但门是打开的，因此可能有人在尝试进入。。",
+   "human": null
+  },
+  {
+   "id": "ar2d:front-door:0e6539eca80e:event:10:v2",
+   "evidence_sha256": "c90dadf6303489e357fdd05202f05c7faf74e023aaa57cc5335a4a4c8a0da4f7",
+   "model_uncertainty": "confirmed",
+   "model_raw": "观察到（画面可直接确认）：画面显示前门区域，天花板有照明灯；一辆红色汽车停在门前，车头朝向门；门是开着的，有门锁装置；有一个人站在门附近；摄像头是固定的，位于前门位置；门前地面是混凝土；时间显示为下午3:00 PM。模型推断（低不确定性，非人工确认）：基于画面，推断：该汽车可能正在驶入建筑物，但无明显动作；该人可能在等待进入。。",
+   "human": null
+  },
+  {
+   "id": "ar2g:front-door:324e3b7d1568:event:32:v2",
+   "evidence_sha256": "515754e48ceb84d3ac7e758a83403c1121640d8f82032b2a40393855b0a662e7",
+   "model_uncertainty": "confirmed",
+   "model_raw": "观察到（画面可直接确认）：门正在打开；有一个人站在门附近；周围有墙壁；地面有地毯。模型推断（低不确定性，非人工确认）：有人正在进入房间。",
+   "human": {
+    "judgment": "confirmed 态：人数错+地面编造+严重性漏识别",
+    "categories": [
+     "number_time_fabrication",
+     "overconfidence",
+     "danger_underreporting"
+    ],
+    "frame_actual": "登记室；四名深色制服人员立于室内（脚边似有警犬）；黄门关闭；瓷砖地面"
+   }
+  }
+ ]
+}

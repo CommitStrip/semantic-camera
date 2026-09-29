@@ -364,6 +364,15 @@ def test_run_camera_uses_attested_source_timestamp(tmp_path, monkeypatch):
         def step(self, frame, gray, now):
             captured["now"] = now
 
+        def on_stream_lost(self, now):
+            pass
+
+        def on_stream_recovered(self):
+            pass
+
+        def close_all_event_facts(self, reason="camera-stopped"):
+            pass
+
     class Src:
         stats = {"timestamp_kind": "source_capture"}
 
@@ -407,6 +416,15 @@ def test_run_camera_falls_back_to_wallclock_without_attestation(
 
         def step(self, frame, gray, now):
             captured["now"] = now
+
+        def on_stream_lost(self, now):
+            pass
+
+        def on_stream_recovered(self):
+            pass
+
+        def close_all_event_facts(self, reason="camera-stopped"):
+            pass
 
     class Src:
         stats = {"timestamp_kind": "host_receive"}

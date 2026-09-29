@@ -176,7 +176,7 @@ def test_linux_startup_recovery_closes_without_deleting(tmp_path):
     review = conn.execute("SELECT t_end,end_reason FROM review_segments").fetchone()
     conn.close()
     assert counts == {"tracked_objects": 1, "review_segments": 1,
-                      "semantic_events": 1}
+                      "semantic_events": 1, "event_facts": 1}
     assert event["state"] == "closed"
     assert event["end_reason"] == "recovered_after_restart"
     assert review["t_end"] is not None

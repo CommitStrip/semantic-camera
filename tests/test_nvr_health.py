@@ -15,6 +15,15 @@ class _Monitor:
     def step(self, frame, gray, now):
         self.frames.append((frame, now))
 
+    def on_stream_lost(self, now):
+        pass
+
+    def on_stream_recovered(self):
+        pass
+
+    def close_all_event_facts(self, reason="camera-stopped"):
+        pass
+
 
 class _State:
     def __init__(self):

@@ -36,8 +36,10 @@ def test_schema_tables_exist(tmp_path):
     assert {
         "events", "tracked_objects", "review_segments", "semantic_events",
         "segments", "patterns", "pattern_embeddings", "meta",
+        "event_facts", "event_descriptions", "event_notifications",
+        "event_escalations",
     } <= names
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
 
 
 def test_schema_migrates_legacy_database_without_losing_events(tmp_path):
@@ -61,7 +63,7 @@ def test_schema_migrates_legacy_database_without_losing_events(tmp_path):
     ).fetchone()[0] == "front"
     assert conn.execute(
         "SELECT COUNT(*) FROM tracked_objects").fetchone()[0] == 0
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
 
 
 def test_schema_rejects_database_from_newer_program(tmp_path):
@@ -200,12 +202,14 @@ def test_recovery_closes_only_stale_open_records_and_is_idempotent(tmp_path):
             "tracked_objects": 1,
             "review_segments": 1,
             "semantic_events": 1,
+            "event_facts": 0,
         }
     assert db.recover_stale_records(
         conn, now=100.0, stale_after_s=30.0) == {
             "tracked_objects": 0,
             "review_segments": 0,
             "semantic_events": 0,
+            "event_facts": 0,
         }
     assert conn.execute(
         "SELECT end_reason FROM tracked_objects WHERE object_id='stale'"
@@ -233,9 +237,12 @@ def _open_three_layers(conn, suffix, t_last, *, camera=None):
     db.open_semantic_event(conn, semantic_event_id=sid, camera=cam,
                            review_id=rid, object_id=oid, t_start=2.0,
                            template="enter-and-dwell", zone_id="yard")
+    db.open_event_fact(conn, event_id=f"evt-{suffix}", camera=cam,
+                       object_id=oid, t_start=2.0, cls="person")
     db.update_tracked_object(conn, oid, t_last=t_last)
     db.update_review_segment(conn, rid, t_last=t_last)
     db.update_semantic_event(conn, sid, t_last=t_last)
+    db.update_event_fact(conn, f"evt-{suffix}", t_last=t_last)
     return oid, rid, sid
 
 
@@ -261,15 +268,17 @@ def test_grace_window_records_are_snapshotted_then_closed_by_delayed_pass(
 
     # 启动收口（宽限窗 30s、now=100 → 只关 t_last<=70 的记录）不动新鲜记录
     assert db.recover_stale_records(conn, now=100.0, stale_after_s=30.0) == {
-        "tracked_objects": 0, "review_segments": 0, "semantic_events": 0}
+        "tracked_objects": 0, "review_segments": 0, "semantic_events": 0,
+        "event_facts": 0}
 
     snapshot = db.snapshot_pending_recovery(conn, now=100.0, stale_after_s=30.0)
-    assert len(snapshot) == 3, "三层都要进快照"
+    assert len(snapshot) == 4, "四层都要进快照"
     assert {item["layer"] for item in snapshot} == set(db.RECOVERY_LAYERS)
 
     # 宽限窗过后一次性复核：三层全部闭合，t_end=t_last、固定原因
     assert db.finalize_snapshot_records(conn, snapshot) == {
-        "tracked_objects": 1, "review_segments": 1, "semantic_events": 1}
+        "tracked_objects": 1, "review_segments": 1, "semantic_events": 1,
+        "event_facts": 1}
     obj, rev, sem = _row_state(conn, "fresh")
     assert obj == [95.0, "recovered_after_restart"]
     assert rev == [95.0, "recovered_after_restart"]
@@ -306,11 +315,21 @@ def test_records_closed_by_admin_keep_their_reason(tmp_path):
     db.close_tracked_object(conn, oid, t_end=96.0, reason="tracker_lost")
     db.close_review_segment(conn, rid, t_end=97.0, reason="quiet")
     db.close_semantic_event(conn, sid, t_end=98.0, reason="rule_cleared")
+    db.close_event_fact(conn, "evt-admin", reason="admin_closed")
+    assert db.close_event_fact(
+        conn, "evt-admin", reason="second_call") is False
 
     assert db.finalize_snapshot_records(conn, snapshot) == {
-        "tracked_objects": 0, "review_segments": 0, "semantic_events": 0}
+        "tracked_objects": 0, "review_segments": 0, "semantic_events": 0,
+        "event_facts": 0}
     assert list(_row_state(conn, "admin")) == [
         [96.0, "tracker_lost"], [97.0, "quiet"], [98.0, "rule_cleared", "closed"]]
+    evt = conn.execute(
+        "SELECT t_end,end_reason FROM event_facts WHERE event_id='evt-admin'"
+    ).fetchone()
+    # 合同边界3：close 不接受外部 t_end——t_end 固定为记录自身 t_last（95.0），
+    # 管理员传入的 98.0 不会冒充观察时间；end_reason 如实保留。
+    assert evt["t_end"] == 95.0 and evt["end_reason"] == "admin_closed"
 
 
 def test_records_created_after_snapshot_are_not_touched(tmp_path):
@@ -324,7 +343,8 @@ def test_records_created_after_snapshot_are_not_touched(tmp_path):
     _open_three_layers(conn, "new", t_last=101.0, camera="cam-front-new")
 
     assert db.finalize_snapshot_records(conn, snapshot) == {
-        "tracked_objects": 1, "review_segments": 1, "semantic_events": 1}
+        "tracked_objects": 1, "review_segments": 1, "semantic_events": 1,
+        "event_facts": 1}
     for row in _row_state(conn, "new"):
         assert row[0] is None and row[1] is None
     assert conn.execute(
@@ -344,9 +364,9 @@ def test_snapshot_finalize_is_idempotent(tmp_path):
     second = db.finalize_snapshot_records(conn, snapshot)
 
     assert first == {"tracked_objects": 1, "review_segments": 1,
-                     "semantic_events": 1}
+                     "semantic_events": 1, "event_facts": 1}
     assert second == {"tracked_objects": 0, "review_segments": 0,
-                      "semantic_events": 0}
+                      "semantic_events": 0, "event_facts": 0}
     assert _row_state(conn, "idem") == after_first
 
 
@@ -358,13 +378,48 @@ def test_outside_grace_window_closes_immediately_and_leaves_empty_snapshot(
     _open_three_layers(conn, "stale", t_last=10.0)
 
     assert db.recover_stale_records(conn, now=100.0, stale_after_s=30.0) == {
-        "tracked_objects": 1, "review_segments": 1, "semantic_events": 1}
+        "tracked_objects": 1, "review_segments": 1, "semantic_events": 1,
+        "event_facts": 1}
     assert db.snapshot_pending_recovery(
         conn, now=100.0, stale_after_s=30.0) == []
 
     # 零宽限（Linux）：任何开放记录都立即闭合，快照因此必为空
     _open_three_layers(conn, "linux", t_last=100.0, camera="cam-linux")
     assert db.recover_stale_records(conn, now=100.0, stale_after_s=0.0) == {
-        "tracked_objects": 1, "review_segments": 1, "semantic_events": 1}
+        "tracked_objects": 1, "review_segments": 1, "semantic_events": 1,
+        "event_facts": 1}
     assert db.snapshot_pending_recovery(
         conn, now=100.0, stale_after_s=0.0) == []
+
+# ---------- F9：语义事件依赖已落库的审查段（外键契约） ----------
+
+def test_semantic_event_requires_persisted_review_segment(tmp_path):
+    """审查段没落库时，语义事件必须被外键拒绝（不静默丢真值）。"""
+    conn = db.connect(str(tmp_path / "f9-fk.db"))
+    db.init_schema(conn)
+    db.open_tracked_object(conn, object_id="obj-1", camera="front",
+                           t_start=1.0, cls="person")
+
+    with pytest.raises(sqlite3.IntegrityError):
+        db.open_semantic_event(
+            conn, semantic_event_id="sem-1", camera="front",
+            review_id="front:MISSING:review:1", object_id="obj-1",
+            t_start=2.0, template="immediate", zone_id="z1")
+
+    # 审查段落库后同一写入成立，且同 id 重放幂等（补写路径依赖这一点）
+    db.open_review_segment(conn, review_id="front:PROC:review:1",
+                           camera="front", t_start=1.0)
+    db.open_semantic_event(
+        conn, semantic_event_id="sem-1", camera="front",
+        review_id="front:PROC:review:1", object_id="obj-1",
+        t_start=2.0, template="immediate", zone_id="z1")
+    db.open_semantic_event(
+        conn, semantic_event_id="sem-1", camera="front",
+        review_id="front:PROC:review:1", object_id="obj-1",
+        t_start=2.0, template="immediate", zone_id="z1")
+    assert conn.execute("SELECT COUNT(*) FROM semantic_events"
+                        " WHERE semantic_event_id='sem-1'").fetchone()[0] == 1
+    row = conn.execute("SELECT review_id, object_id FROM semantic_events"
+                       " WHERE semantic_event_id='sem-1'").fetchone()
+    assert row["review_id"] == "front:PROC:review:1"
+    assert row["object_id"] == "obj-1"

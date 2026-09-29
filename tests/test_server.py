@@ -265,15 +265,26 @@ def test_index_exposes_admin_zone_editor_contract(state):
     assert handler.response_headers["X-Content-Type-Options"] == "nosniff"
     for marker in (
             'id="camera-select"', 'id="zone-frame"', 'id="zone-grid"',
-            'id="environment-gate"', 'id="analyze-environment"',
+            'id="analyze-environment"', 'id="baseline-establish"',
+            'id="baseline-retry"', 'id="gate-message"',
             'id="zone-id"', 'id="rule-template"', 'id="save-zone"',
             'id="delete-zone"', "'/api/frame/'", "'/api/zones/'",
             "'/api/zones/save'", "'/api/environment/'",
-            "'/api/environment/analyze'", "onpointerenter"):
+            "'/api/environment/baseline'", "+'/baselines'",
+            "onpointerenter",
+            "'/api/v2/events'", "'/api/v2/notifications",
+            "初始事实提醒", "暂无可回看画面"):
         assert marker in html
     assert "保存并应用管理员规则" in html
     assert "模型建议不会自动成为告警" in html
-    assert "必须完成" in html and "不会自动成为报警规则" in html
+    # 工作包 A（产品合同三条同时成立）：磨砂引导恢复为按相机的首次基线前置；
+    # 事件不以圈选或规则为前提；错误"可选识别"文案不得残留。
+    assert 'id="environment-gate"' in html, "首次基线磨砂引导必须恢复"
+    assert "先建立环境基线，再进入值守" in html
+    assert "事件的发现与记录不以圈选或规则为前提" in html
+    assert "不会自动成为报警规则" in html
+    assert "可选增强" not in html, "基线不是可选增强（纠偏后）"
+    assert "不识别也可直接值守" not in html, "错误文案必须清除"
     assert "window.confirm" in html, "删除现有管理员区域必须有明确确认"
 
 
@@ -702,3 +713,44 @@ def test_index_renders_multi_camera_guard_grid_contract(state):
         assert marker in html, marker
     # 告警计数来自语义事件表（前端聚合），不得引入新的后端面
     assert "guardEvents[e.camera]" in html
+
+# ---------- F9：数据面故障必须在健康面可见 ----------
+
+def test_persistence_issue_is_visible_and_clears():
+    """审查段/告警写不进库：状态保持在线，但载荷与提示必须带出数据面故障。"""
+    registry = CameraRuntimeRegistry(["front-door"])
+    registry.online("front-door")
+
+    assert registry.snapshot()["cameras"][0]["persistence_issue"] is None
+
+    registry.persistence("front-door", "persistence_degraded")
+    camera = registry.snapshot()["cameras"][0]
+    assert camera["state"] == "online", "数据面故障不得改写源状态"
+    assert camera["persistence_issue"]["code"] == "persistence_degraded"
+    assert "未能写入本机数据库" in camera["persistence_issue"]["action"]
+    assert "未能写入本机数据库" in camera["hint"]
+
+    registry.persistence("front-door", None)
+    cleared = registry.snapshot()["cameras"][0]
+    assert cleared["persistence_issue"] is None
+    assert "未能写入本机数据库" not in cleared["hint"]
+
+
+def test_persistence_unknown_code_is_rejected():
+    """未知 code 拒绝写入：健康面只出固定词表，不臆造文案。"""
+    registry = CameraRuntimeRegistry(["front-door"])
+    with pytest.raises(ValueError):
+        registry.persistence("front-door", "not-a-code")
+
+
+def test_persistence_issue_coexists_with_source_degradation():
+    """源故障与数据面故障可同时存在，提示里两者都要看得见。"""
+    registry = CameraRuntimeRegistry(["front-door"])
+    registry.degraded("front-door", "source_read_failed")
+    registry.persistence("front-door", "persistence_degraded")
+
+    camera = registry.snapshot()["cameras"][0]
+    assert camera["issue"]["code"] == "source_read_failed"
+    assert camera["persistence_issue"]["code"] == "persistence_degraded"
+    assert "相机供电" in camera["hint"]
+    assert "未能写入本机数据库" in camera["hint"]

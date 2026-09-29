@@ -39,3 +39,9 @@ docs/linux-frigate-adoption.md
 docs/linux-nvr-roadmap.md
 docs/linux-release-plan.md
 docs/win11-roadmap.md
+
+# Win11 发行包构建产物（可再生，绝不入库；zip 由构建脚本产出）
+build/
+dist/
+*.spec
+tests/test_win11_delivery.py
