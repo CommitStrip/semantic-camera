@@ -18,7 +18,8 @@ jobs:
       - name: Install project itself (不把源码目录当可导入路径)
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[detect,vision]" pytest
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[detect,vision]" pytest transformers tokenizers safetensors
       - name: Deploy script syntax (bash -n)
         run: bash -n deploy/install.sh
       - name: systemd unit 单一真值渲染 + systemd-analyze verify
@@ -54,7 +55,7 @@ jobs:
       - name: Install project itself
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[detect,vision]" pytest
+          pip install -e ".[detect,vision]" pytest transformers tokenizers safetensors
       - name: Run tests (服务级 smoke 在 Windows 自动跳过)
         run: python -m pytest tests/ -v
       - name: Release packaging dry-run (敏感面闸跨平台)

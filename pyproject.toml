@@ -14,6 +14,8 @@ dependencies = [
 [project.optional-dependencies]
 detect = ["onnxruntime"]
 vision = ["opencv-python-headless", "pillow"]
+# 可选本地语义模型栈（L3 视觉语言模型运行所需；权重仍然由使用者自备）
+local-model = ["torch", "transformers", "tokenizers", "safetensors"]
 discover = ["wsdiscovery"]
 mqtt = ["paho-mqtt"]
 dev = ["pytest"]
