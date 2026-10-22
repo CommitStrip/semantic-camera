@@ -52,3 +52,22 @@ class ZoneRuntime:
 
     def leave(self, track_id, zone_id):
         self._enter.pop((track_id, zone_id), None)
+
+    def pause_open(self, now):
+        """消费点快照（合同 C133 T1）：返回全部在区 (tid,zid) 的当前滞留毫秒。
+
+        纯读取：不改任何状态。滞留按观察钟 now 计算（F1：事实时间绝不取
+        墙钟），返回值供下一次 ok 消费点 restore_pair 回填 enter=now-dwell：
+        连续性判定为不连续（间隙超限/有 empty·失败介入）时，ok 之间的未知
+        间隙不补算。值为毫秒，与 now 同刻度（即合同公式
+        ``_enter = now - dwell_s`` 的量纲）。
+        """
+        return {key: now - enter for key, enter in self._enter.items()}
+
+    def restore_pair(self, track_id, zone_id, dwell_s, now):
+        """平移恢复配对（合同 C133 T1）：``_enter[(tid,zid)] = now - dwell_s``。
+
+        dwell_s：上次 ok 消费点快照里的配对滞留（毫秒，与 now 同刻度）；
+        已累计滞留保留，ok 之间的未知间隙不计入滞留。
+        """
+        self._enter[(track_id, zone_id)] = now - dwell_s

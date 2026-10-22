@@ -38,7 +38,7 @@ if [ ! -f cameras.json ]; then
     {
       "id": "front-door",
       "enabled": true,
-      "source": "rtsp://admin:PASSWORD@192.168.1.64:554/Streaming/Channels/102",
+      "source": "rtsp://user:password@camera.example:554/Streaming/Channels/102",
       "detector": {"engine": "onnx", "model": "models/person-detector.onnx",
                    "classes": ["person"], "conf": 0.4},
       "grid": {"rows": 18, "cols": 22},

@@ -44,8 +44,25 @@ class Monitor:
     # 断流宽限：短暂断流保留开放事件；超过即收口（end_reason=stream-lost），
     # 不允许事件无限期保持 open（合同 v1.1 边界3）
     STREAM_LOST_GRACE_S = 30.0
+    # ---- L1 异步检测消费（合同 C132 F4/F6 + C133 T1/T2；仅 detection_mode=
+    # "async" 参与，sync 路径一个字节的行为都不碰）----
+    DETECTION_LOST_MS = 8000.0     # 距最后 ok/empty 结果超过即满足失联持续条件
+    DETECTION_MAX_AGE_MS = 2500.0  # 结果相对当前帧时间超龄即拒收（不消费）
+    RESULT_WAIT_MS = 3500.0        # 管道最老未完结任务无进展阈值（探针口径，
+                                   # 管道 TTL 2000+1500 余量）
+    CONTINUITY_MAX_GAP_MS = 6000.0  # ok 结果连续性上限（≥巡检1500+双相机共享
+                                    # worker 的健康滞后上限）：ok 消费点间隙
+                                    # 超限即未知间隙，滞留不补算（C133 T1）
+    MATERIAL_LATEST_MS = 400.0     # motion 中 latest 材料节奏
+    MATERIAL_PATROL_MS = 1500.0    # 静止中 patrol 材料节奏（< tracker MAX_AGE
+                                   # 2000：未确认轨迹能两次巡检完成确认，F6）
 
-    def __init__(self, camera_cfg, detect_fn, sinks, seq=0, run_id=None):
+    def __init__(self, camera_cfg, detect_fn, sinks, seq=0, run_id=None,
+                 detection_mode="sync",
+                 continuity_max_gap_ms=CONTINUITY_MAX_GAP_MS,
+                 detection_lost_ms=DETECTION_LOST_MS,
+                 detection_max_age_ms=DETECTION_MAX_AGE_MS,
+                 result_wait_ms=RESULT_WAIT_MS):
         self.camera_id = camera_cfg["id"]
         self.detect_fn = detect_fn
         self.sinks = sinks
@@ -95,19 +112,54 @@ class Monitor:
         # 源时间可信度由 nvr 逐帧标注；不可信源的时间退回处理时间并在
         # 事件 payload 里如实记录（不产出虚假延迟指标）。
         self.timestamp_kind = None
+        # ---- L1 异步检测消费（合同 C132 F4/F6 + C133 T1/T2）：sync 模式下全部惰性 ----
+        self.detection_mode = detection_mode
+        self.continuity_max_gap_ms = float(continuity_max_gap_ms)
+        self.detection_lost_ms = float(detection_lost_ms)
+        self.detection_max_age_ms = float(detection_max_age_ms)
+        self.result_wait_ms = float(result_wait_ms)
+        self._material_sink = None   # 快系统材料出口（set_material_sink 接线）
+        self._progress_probe = None  # 管道进展探针（set_progress_probe 接线，T2）
+        self._pending_result = None  # apply 已验身份、待 step 消费的结果
+        self._conclusion = None      # R1 统一消费结论
+        self._conclusion_delivered = False  # C-134 一次性语义：已下行即不再消费
+        self._last_result_ms = None  # 最近一次 ok/empty 结果的采集时间
+        self._last_applied_capture_ms = None  # 乱序/迟到拒收基准
+        self._last_material_ms = None  # 最近一次材料提交尝试时刻
+        self._last_consumed_frame_id = None  # 上一消费帧 frame_id（F4 顺序基准）
+        self._dwell_snapshot = None  # T1 上次 ok 消费点的在区配对滞留快照
+        self._dwell_interrupted = False  # 上次 ok 消费后有无 empty/失败介入
+        self._material_in_motion = False  # 材料侧运动锁存（静→动边沿检测）
+        self.l1_health = None           # {"state","code","at"} 最近 L1 健康
+        self.results_applied = 0        # 已消费（含失败态）的结果数
+        self.results_rejected_expired = 0
+        self.results_rejected_future = 0
+        self.results_rejected_order = 0
+        self.results_rejected_identity = 0
+        self.results_invalidated_config = 0
+        self.results_superseded = 0
+        self.detection_lost_closes = 0
+        self.material_rejected = 0
 
     def step(self, frame_bgr, gray, now):
         """推进一帧；返回本步产生的告警列表。"""
-        self._apply_pending_zones(now)
+        zone_switched = self._apply_pending_zones(now)
         self._retry_pending_event_closes(now)
         # 仅原子替换引用；JPEG缩放/编码由工作台请求线程按需完成，不占报警快路径。
         self.latest_frame_bgr = frame_bgr
         self.frames += 1
         gw = self.GRAY_W
         gh = max(1, round(len(gray) / gw))
-        self.gate.detect(gray, gw, gh)
+        if self.detection_mode == "async":
+            # prev_available 必须取本帧处理前的门控状态（detect 会覆盖 prev）
+            had_prev = self.gate.prev is not None
+        boxes = self.gate.detect(gray, gw, gh)
         if self.gate.last_ratio > 0:
             self.motion_frames += 1
+        if self.detection_mode == "async":
+            # async：材料选择 + 消费 L1 结果；上方共用流程与 sync 逐字节同效
+            return self._step_async(frame_bgr, boxes, gray, now, gh,
+                                    had_prev, zone_switched)
         interval = (self.MOTION_DET_INTERVAL if self.gate.last_ratio > 0
                     else self.PATROL_INTERVAL)
         observed_ids = None
@@ -120,6 +172,338 @@ class Monitor:
             observed_ids = {track["id"] for track in observed
                             if track.get("confirmed")}
 
+        return self._post_detection(observed_ids, now, frame_bgr)
+
+    # ---- L1 异步检测结果消费（合同 C131 §2；sync 路径不进） --------------
+
+    def set_material_sink(self, fn):
+        """接线快系统材料出口（async 模式）；None=关闭。
+
+        fn(material_dict) 在相机线程内同步调用，必须非阻塞；返回 False
+        表示未受理（计 material_rejected，材料机会不重置门控背景）。
+        """
+        self._material_sink = fn
+
+    def set_progress_probe(self, fn):
+        """接线管道进展探针（合同 C133 T2，async 模式）；None=关闭。
+
+        fn() 由管道侧提供、经 nvr 注入：返回该相机**最老未完结任务**的年龄
+        毫秒（槽内或推理中；合并/替换/过期任务已出槽不算；无任务返回
+        None）。每帧至多调用一次、必须廉价；monitor 不 import 管道模块。
+        看门狗以此为准：卡住任务的年龄持续增长，新提交再多也不重置。
+        """
+        self._progress_probe = fn
+
+    def apply_detection_result(self, result, now):
+        """帧循环逐帧调用（非阻塞）：核验结果身份后存入待消费槽。
+
+        apply 只验"是谁的、是不是旧"：相机/运行不匹配、旧配置版本、
+        乱序/迟到（采集时间早于已受理基准）一律计 results_rejected_identity
+        并返回 False；通过后占据待消费槽（顶掉未消费旧结果计
+        results_superseded）并返回 True。消费时的新鲜度校验在 step() 内。
+        每个被判定的结果都产生统一消费结论（R1），供生产侧如实关联材料——
+        被拒结果只作诊断，绝不冒充有效检测。
+        """
+        t_capture = getattr(result, "t_capture_ms", None)
+        if (getattr(result, "camera_id", None) != self.camera_id
+                or getattr(result, "run_id", None) != self.run_id
+                or getattr(result, "config_version", None)
+                != self.zone_revision
+                or t_capture is None
+                or (self._last_applied_capture_ms is not None
+                    and t_capture < self._last_applied_capture_ms)):
+            self.results_rejected_identity += 1
+            self._record_conclusion(result, False, "identity")
+            return False
+        self._last_applied_capture_ms = t_capture
+        if self._pending_result is not None:
+            self.results_superseded += 1
+        self._pending_result = result
+        return True
+
+    def _record_conclusion(self, result, accepted, reason):
+        self._conclusion = self._make_conclusion(result, accepted, reason)
+        self._conclusion_delivered = False
+
+    @staticmethod
+    def _make_conclusion(result, accepted, reason):
+        """R1 统一消费结论：模型原始输出与 Monitor 裁决的唯一下行通道。"""
+        return {"camera_id": getattr(result, "camera_id", None),
+                "run_id": getattr(result, "run_id", None),
+                "config_version": getattr(result, "config_version", None),
+                "frame_id": getattr(result, "frame_id", None),
+                "status": getattr(result, "status", None),
+                "error_code": getattr(result, "error_code", None),
+                "detections": (list(getattr(result, "detections", None) or [])
+                               if accepted else []),
+                "accepted": bool(accepted),
+                "reason": reason}
+
+    def consume_conclusion(self):
+        """取走最近一次结果判定的统一结论（C-134：一次性语义）。
+
+        同一真实结果的接受/拒收结论只下行关联一次：consume 返回该结论并
+        标记已消费，再次调用返回 None——后续普通帧绝不重放历史结论（修复
+        C-133 复现的"每帧重复 attach/attach_missed 虚增"）。最近结论仍可经
+        last_conclusion() 作诊断展示，但不再作为新结果消费。
+        """
+        if self._conclusion is None or self._conclusion_delivered:
+            return None
+        self._conclusion_delivered = True
+        return self._conclusion
+
+    def last_conclusion(self):
+        """诊断视图：最近一次结论原样可读（不改变消费状态）。"""
+        return self._conclusion
+
+    def _step_async(self, frame_bgr, boxes, gray, now, gh, prev_available,
+                    zone_switched=False):
+        """async 模式一帧：材料选择 → 消费就绪 L1 结果（五重复核）→ 共用裁决。
+
+        快系统永不等待模型：本路径绝不调用 detect_fn，检测结果只经
+        apply_detection_result 进入。事实工作（滞留/对象事实/事件/审查活跃）
+        只发生在 ok/empty 消费点，且按结果帧的 t_capture 推进（F1/F4）；
+        非消费帧零事实工作（_idle_step），绝不拿缓存轨迹冒充新观察——
+        不存在"非消费帧即冻结"的语义，滞留按 T1 连续性只在 ok 消费点推进。
+        消费帧的时间线与证据帧都取自结果本身（同画面绑定，不拿新帧配旧框）。
+        """
+        self._select_material(frame_bgr, boxes, gray, now, gh,
+                              prev_available)
+        result = self._pending_result
+        self._pending_result = None
+        if result is not None:
+            if zone_switched:
+                # F4：apply 后区域已切换——待消费结果直接失效（旧配置的框
+                # 对新区域不再可信），不得消费。
+                self.results_invalidated_config += 1
+                self._record_conclusion(result, False,
+                                        "invalidated_config")
+                result = None
+            else:
+                checked = self._recheck_result(result, now)
+                if checked is None:
+                    # 复核拒收：_recheck_result 内已记结论与计数
+                    result = None
+                else:
+                    result = checked
+        if result is not None:
+            self.results_applied += 1   # 已消费（含失败态）
+            frame_id = getattr(result, "frame_id", None)
+            if frame_id is not None:
+                self._last_consumed_frame_id = frame_id
+            # R1：消费成立（ok/empty 事实推进、失败态作进展），结论如实下行
+            self._record_conclusion(result, True, None)
+        if result is not None and result.status in ("ok", "empty"):
+            # 消费帧：区域/审查时间线与证据帧都用结果帧（同画面）
+            t_capture = result.t_capture_ms
+            continuous = (
+                self._last_result_ms is not None
+                and t_capture - self._last_result_ms
+                <= self.continuity_max_gap_ms
+                and not self._dwell_interrupted)
+            self._last_result_ms = t_capture
+            self.l1_health = {"state": "ready", "code": None, "at": now}
+            observed = self.tracker.update(result.detections or [],
+                                           t_capture)
+            observed_ids = {track["id"] for track in observed
+                            if track.get("confirmed")}
+            if result.status == "ok":
+                # T1：滞留只在 ok 消费点推进——连续则 enter 不动自然增长；
+                # 未知间隙（超限或有 empty/失败介入）平移 enter 不补算
+                self._advance_dwell_continuity(observed_ids, t_capture,
+                                               continuous)
+                self._dwell_interrupted = False
+            else:
+                # empty：本帧无观察——只标记间隙不连续；轨迹离区/消亡仍按
+                # 既有路径复位滞留
+                self._dwell_interrupted = True
+            alarms = self._post_detection(observed_ids, t_capture,
+                                          result.frame_bgr)
+            if result.status == "ok":
+                # T1：消费点快照全部在区配对滞留（含本帧新进区配对），供
+                # 下一次 ok 消费做连续性判定
+                self._dwell_snapshot = self.zone_rt.pause_open(t_capture)
+            return alarms
+        if result is not None:
+            # 模型失败：不碰 tracker、不伪造观察；健康面如实记录失败态；
+            # 间隙按不连续处理（滞留不跨失败窗口累计）
+            self.l1_health = {"state": result.status,
+                              "code": result.error_code, "at": now}
+            self._dwell_interrupted = True
+        return self._idle_step(now)
+
+    def _recheck_result(self, result, now):
+        """F4 消费阶段复核：身份/未来/超龄/顺序四验，失败按原因计数拒收。
+
+        apply 阶段验过一次（当时的 zone_revision）；apply 与 step 之间配置、
+        时钟与帧序都可能变化，消费前必须再验。拒收的结果不消费、不触碰
+        tracker、不续失联计时基准（_last_result_ms），也不得冒充一次"本轮
+        无对象"的观察。
+        """
+        t_capture = getattr(result, "t_capture_ms", None)
+        if (getattr(result, "camera_id", None) != self.camera_id
+                or getattr(result, "run_id", None) != self.run_id
+                or getattr(result, "config_version", None)
+                != self.zone_revision):
+            self.results_rejected_identity += 1
+            self._record_conclusion(result, False, "identity")
+            return None
+        if t_capture is None or t_capture > now + 100.0:
+            # 未来异常时间：观察时间不得来自未来（F1）
+            self.results_rejected_future += 1
+            self._record_conclusion(result, False, "future")
+            return None
+        if now - t_capture > self.detection_max_age_ms:
+            # 过期结果拒收不消费（帧时间只前进，留着只会反复过期）
+            self.results_rejected_expired += 1
+            self._record_conclusion(result, False, "expired")
+            return None
+        frame_id = getattr(result, "frame_id", None)
+        if (frame_id is not None
+                and self._last_consumed_frame_id is not None
+                and frame_id <= self._last_consumed_frame_id):
+            # 重复/乱序拒；同时间戳不同 frame_id（严格递增）视为正常顺序
+            self.results_rejected_order += 1
+            self._record_conclusion(result, False, "order")
+            return None
+        return result
+
+    def _advance_dwell_continuity(self, observed_ids, t_capture, continuous):
+        """T1 连续性推进（只在 ok 消费点调用）：自然增长或平移，不补算。
+
+        连续（gap ≤ CONTINUITY_MAX_GAP_MS 且期间无 empty/失败介入）：enter
+        从未被非消费帧触碰，dwell = t_capture − enter 自然增长，无需动作。
+        不连续（间隙超限或有 empty/失败介入）：未知间隙不补算——按上次 ok
+        消费点快照把仍在原区的配对 enter 平移为 t_capture − 快照滞留（已
+        累计部分保留，间隙不记）；已离区/轨迹已亡的配对交给本帧区域判定
+        与消亡路径复位。快照一次性：无论是否平移都清空。
+        """
+        pairs = self._dwell_snapshot
+        self._dwell_snapshot = None
+        if not pairs or continuous:
+            return
+        for (tid, zid), dwell in pairs.items():
+            track = self.tracker.tracks.get(tid)
+            if track is None or not track.get("confirmed") \
+                    or tid not in observed_ids:
+                continue
+            cx = track.get("cx", track["bbox"][0] + track["bbox"][2] / 2.0)
+            cy = track.get("cy", track["bbox"][1] + track["bbox"][3] / 2.0)
+            cell = self.grid.cell_of(cx, cy)
+            for zone in self.zones:
+                if zone["id"] == zid and cell in zone["cells"]:
+                    self.zone_rt.restore_pair(tid, zid, dwell, t_capture)
+                    break
+
+    def _idle_step(self, now):
+        """非消费帧：零事实工作（合同 T1）。
+
+        不更新对象事实、不推进事件 t_last、不累计滞留、不延展审查段活跃、
+        不产告警、不产证据——既无暂停也无平移，更没有任何快照动作。仅允许：
+        审查段空闲收口、待写收口重试（step 顶部已做）、失联看门狗（T2 探针
+        口径）。绝不拿处理帧时间推进对象存在时间，也绝不凭空续命。
+        """
+        self._detection_lost_watchdog(now)
+        self._review_step(now, set(), {}, [], None, frame_evidence=False)
+        return []
+
+    def _detection_lost_watchdog(self, now):
+        """T2 失联看门狗 v3：双条件 + 开放轨迹全满足才诚实收口。
+
+        条件1（无进展）：管道探针报最老未完结任务年龄 > RESULT_WAIT_MS——
+        卡住任务的年龄持续增长，新提交再多也不重置计时；或 l1_health 处于
+        失败态（model_unavailable/infer_failed）。
+        条件2（持续）：距最后 ok/empty 结果 > DETECTION_LOST_MS。
+        两条件同时成立才 detection-lost 诚实收口（对象/语义事件/事件事实），
+        随后清空 tracker。正常等待（任务已完结、仅预览/无任务 probe=None、
+        l1 健康）永不触发；"正常未安排检测"≠失联。
+        """
+        if not self.tracker.tracks or self._last_result_ms is None:
+            return
+        if now - self._last_result_ms <= self.detection_lost_ms:
+            return
+        l1_failed = (self.l1_health or {}).get("state") in (
+            "model_unavailable", "infer_failed")
+        stalled = False
+        if not l1_failed and self._progress_probe is not None:
+            oldest = self._progress_probe()
+            stalled = oldest is not None and oldest > self.result_wait_ms
+        if not (l1_failed or stalled):
+            return
+        for tid in list(self.tracker.tracks):
+            # 滞留表一并清理：track id 单调递增，残留会慢泄漏（同 sync）
+            for zone in self.zones:
+                self.zone_rt.leave(tid, zone["id"])
+            self._release(tid, None, now, "detection-lost")
+            self._call_sinks(
+                "close_object", self._object_id(tid),
+                t_end=now / 1000.0, reason="detection-lost")
+            self._close_event_fact(tid, "detection-lost", now)
+        self.tracker.tracks.clear()
+        self._prev_live = set()
+        self._dwell_snapshot = None
+        self.detection_lost_closes += 1
+
+    def _select_material(self, frame_bgr, boxes, gray, now, gh,
+                         prev_available):
+        """快系统材料出口（合同 §2.2）：变化边沿 / 最新画面 / 巡检三理由。
+
+        frame_bgr 按引用交出（sink 侧负责 copy，monitor 不复制）；材料被
+        受理后才以当前帧重置门控背景（与 sync 检测帧同节奏；被拒收不重置，
+        保留运动信号等下一节奏重试）。材料机会绝不阻塞帧循环：失败只计数。
+        """
+        if self._material_sink is None:
+            return
+        motion = bool(boxes)
+        reason = None
+        if motion and not self._material_in_motion:
+            reason = "change_start"    # 静→动边沿：变化开始帧最优先
+        elif motion:
+            if (self._last_material_ms is None
+                    or now - self._last_material_ms
+                    >= self.MATERIAL_LATEST_MS):
+                reason = "latest"
+        elif (self._last_material_ms is None
+                or now - self._last_material_ms >= self.MATERIAL_PATROL_MS):
+            reason = "patrol"
+        self._material_in_motion = motion
+        if reason is None:
+            return
+        material = {
+            "camera_id": self.camera_id,
+            "run_id": self.run_id,
+            "frame_id": self.frames,
+            "t_capture_ms": now,
+            "frame_bgr": frame_bgr,    # 引用语义；sink 侧负责 copy
+            "reason": reason,
+            "change_boxes": [] if reason == "patrol" else list(boxes),
+            "gate_w": self.GRAY_W,
+            "gate_h": gh,
+            "config_version": self.zone_revision,
+            "prev_available": prev_available,
+        }
+        self._last_material_ms = now
+        try:
+            accepted = self._material_sink(material)
+        except Exception as exc:
+            self.material_rejected += 1
+            self._record_sink_error(self._material_sink, "material", exc)
+            return
+        if accepted is False:
+            self.material_rejected += 1
+        else:
+            # 材料受理只重置门控背景（与 sync 检测帧同节奏）；看门狗进展
+            # 基准是管道任务年龄（T2 探针），提交受理不重置任何失联计时。
+            self.gate.reset_background(gray)
+
+    def _post_detection(self, observed_ids, now, frame_bgr,
+                        frame_evidence=True):
+        """检测已产生（或明确本轮无观察）后的共用裁决：区域/事件/审查段。
+
+        sync 检测帧、async 消费帧、async 新鲜非消费帧共用本段；差别只在
+        observed_ids（None=沿用既有轨迹）与 frame_evidence（False=本轮
+        不携带证据帧：observe_object 与告警缩略图都不拿新帧配旧框）。
+        """
         alarms = []
         live_ids = set()
         activity_ids = set()
@@ -147,8 +531,9 @@ class Monitor:
                             continue
                         if rule_fires(r, t["cls"], True, dwell):
                             self._alarm_fired.add(skey)
-                            alarm = self._alarm(t, r, dwell, now,
-                                                zid, frame_bgr)
+                            alarm = self._alarm(
+                                t, r, dwell, now, zid,
+                                frame_bgr if frame_evidence else None)
                             self._open_events[skey] = alarm["event_id"]
                             alarms.append(alarm)
                             break
@@ -169,7 +554,8 @@ class Monitor:
         self._prev_live = live_ids
 
         review_id = self._review_step(
-            now, activity_ids, active_zones, alarms, frame_bgr)
+            now, activity_ids, active_zones, alarms, frame_bgr,
+            frame_evidence=frame_evidence)
         for alarm in alarms:
             alarm["review_id"] = review_id
             alarm["object_id"] = self._object_id(alarm["track_id"])
@@ -225,6 +611,20 @@ class Monitor:
             "last_sink_error": self.last_sink_error,
             "zone_revision": self.zone_revision,
             "zone_update_pending": self._pending_zones is not None,
+            # L1 异步检测消费（合同 C131 §2 末）；sync 模式下恒为默认值
+            "detection_mode": self.detection_mode,
+            "l1_state": (self.l1_health or {}).get("state"),
+            "l1_last_result_age_ms": (
+                None if self._last_result_ms is None else
+                max(0.0, time.time() * 1000.0 - self._last_result_ms)),
+            "results_applied": self.results_applied,
+            "results_rejected_expired": self.results_rejected_expired,
+            "results_rejected_future": self.results_rejected_future,
+            "results_rejected_order": self.results_rejected_order,
+            "results_rejected_identity": self.results_rejected_identity,
+            "results_invalidated_config": self.results_invalidated_config,
+            "results_superseded": self.results_superseded,
+            "detection_lost_closes": self.detection_lost_closes,
         }
 
     @staticmethod
@@ -257,6 +657,8 @@ class Monitor:
         self._alarm_fired.clear()
         self._open_events.clear()
         self.zone_rt = ZoneRuntime()
+        # 旧配置的消费点滞留快照一并作废：配对引用旧 zone 身份，不得恢复进新配置
+        self._dwell_snapshot = None
         self.zones = zones
         self.zone_revision = revision
         return True
@@ -279,8 +681,13 @@ class Monitor:
                 "close_semantic_events", event_ids,
                 t_end=now / 1000.0, reason=reason)
 
-    def _review_step(self, now, live_ids, active_zones, alarms, frame_bgr):
-        """每相机聚合一个活动段；检测开段，管理员规则告警只负责升级。"""
+    def _review_step(self, now, live_ids, active_zones, alarms, frame_bgr,
+                     frame_evidence=True):
+        """每相机聚合一个活动段；检测开段，管理员规则告警只负责升级。
+
+        frame_evidence=False（async 非消费帧）时 observe_object 不带证据帧：
+        绝不拿新帧给旧检测结果配图（同画面绑定，合同 C131 §0）。
+        """
         if live_ids:
             if self._review is None:
                 self._review_seq += 1
@@ -327,6 +734,9 @@ class Monitor:
                 review["objects"].add(object_id)
                 review["zones"].update(zones)
                 review["detections"][object_id] = track.get("cls", "")
+                # 证据帧只在消费帧携带（False=本轮没有同画面帧，宁缺勿假）
+                evidence = ({"frame_bgr": frame_bgr}
+                            if frame_evidence else {})
                 object_ok = self._call_sinks(
                     "observe_object", object_id=object_id,
                     camera=self.camera_id,
@@ -334,8 +744,8 @@ class Monitor:
                     t_last=now / 1000.0, cls=track.get("cls", ""),
                     conf=track.get("conf"), zones=zones,
                     review_id=review["review_id"],
-                    payload={"track_id": track_id}, frame_bgr=frame_bgr,
-                    bbox=track.get("bbox"))
+                    payload={"track_id": track_id},
+                    bbox=track.get("bbox"), **evidence)
                 # 边界2（存储顺序）：对象事实先可靠落库，事件事实才允许建立；
                 # 对象写入失败时事件保持待写（pending-object），对象恢复后补建。
                 self._event_fact_step(track_id, track, now, object_ok=object_ok,
@@ -447,7 +857,21 @@ class Monitor:
                     conf=t.get("conf"), bbox_first=bbox, bbox_last=bbox,
                     review_id=(review_id if review_persisted else None),
                     payload=payload):
-                entry["state"] = "open"
+                # open initializes t_last at the object's first appearance.
+                # The confirmation frame may be later: persist that actual
+                # observation before claiming an open, current event. Otherwise
+                # an immediate close loses the confirmation time and an L4
+                # source frame is outside the stored fact interval.
+                if self._call_sinks(
+                        "update_event_fact", entry["event_id"],
+                        t_last=entry["last"]["t_last"],
+                        conf=entry["last"].get("conf"),
+                        bbox_last=entry["last"].get("bbox_last"),
+                        payload=payload):
+                    entry["state"] = "open"
+                else:
+                    entry["state"] = "pending-open"
+                    self.event_open_failures += 1
             else:
                 self.event_open_failures += 1
         elif entry["state"] == "open":
@@ -630,6 +1054,8 @@ class Monitor:
         self._event_close_pending = [
             item for item in self._event_close_pending
             if not self._retry_one_event_close(item, now, force=True)]
+        # 待消费的 L1 结果随之作废：相机停止后不得再消费旧检测结果
+        self._pending_result = None
         return len(self._event_close_pending)
 
     def _flush_deferred_truth(self):

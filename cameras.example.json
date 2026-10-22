@@ -1,0 +1,31 @@
+{
+  "venue": {
+    "name": "示例站点（请改成你的场所名）"
+  },
+  "cameras": [
+    {
+      "id": "front-door",
+      "name": "前门",
+      "source": "rtsp://user:password@camera.example:554/Streaming/Channels/102",
+      "source_kind": "rtsp",
+      "grid": {
+        "rows": 18,
+        "cols": 22
+      },
+      "zones": [],
+      "detector": {
+        "engine": "onnx",
+        "model": "models/person-detector.onnx",
+        "classes": [
+          "person"
+        ],
+        "conf": 0.4
+      }
+    }
+  ],
+  "semantic_models": {
+    "channel": "local",
+    "model_path": "",
+    "timeout": 90
+  }
+}

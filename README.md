@@ -8,7 +8,7 @@
 
 [![CI](https://github.com/CommitStrip/semantic-camera/actions/workflows/ci.yml/badge.svg)](https://github.com/CommitStrip/semantic-camera/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-1379%20passed%2C%2016%20skipped-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-2507%20passed%2C%2019%20skipped-brightgreen)](tests/)
 
 [**English**](README.md) · [**简体中文**](README-CN.md)
 
@@ -64,6 +64,16 @@ python scripts/fetch_models.py --list                              # manifest an
 python scripts/fetch_models.py --model nanodet                     # download + verify once the hash is frozen
 python scripts/fetch_models.py --verify-local <path> --expect <sha256>   # verify your own export
 ```
+
+Optional local semantic models (relation model for L2, vision-language model for
+L3) are **not distributed with this repository**. You supply them yourself and
+are bound by their upstream licenses: InternVL3.5 (Apache-2.0) and
+RelateAnything (AGPL-3.0 plus its own model terms). Paths are configured
+explicitly; there is no built-in default path.
+
+Camera configuration starts from [`cameras.example.json`](cameras.example.json)
+— copy it to `cameras.json` and replace the placeholder source. Real
+`cameras.json` is ignored by Git and must never be committed.
 
 ### Linux NVR
 
@@ -197,8 +207,9 @@ checked, rebuildable).
   misidentification, fabricated timestamps, overconfident labels). The UI
   therefore presents every model version as an unverified supplement; model
   text can never close events, suppress notifications or lift alarms.
-- The Linux native operations chain, a 24-hour soak, and privacy network
-  audits are **not verified**; dual-camera and long-run evidence is pending.
+- Linux deploy scripts and unit rendering are covered by CI, but on-host
+  operation with real cameras, a 24-hour soak, dual-camera and privacy
+  network audits are **not verified**;
 - Recording is **off by default**; enable it per camera if you want clip
   evidence.
 - Detection and embedding weights are not distributed (`scripts/fetch_models.py`);

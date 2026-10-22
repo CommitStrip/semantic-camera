@@ -1,47 +1,58 @@
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
 .pytest_cache/
-storage/
-*.db
-*.onnx
-events.jsonl
-.mimosa/
-设计稿*.md
-实施计划.md
-nul
-完善计划.md
+.venv/
+venv/
 
-# Local-only project context notebooks (never publish to GitHub)
-AGENTS.md
-PROJECT_CONTEXT.md
-LINUX-CONTEXT.md
-WIN11-CONTEXT.md
-ZCODE-CONTEXT.md
-ZCODE-COORDINATION.md
-ZCODE-LINUX-CONTEXT.md
-ZCODE-WIN11-CONTEXT.md
-docs/context/
-tests/test_context_ledger.py
-tests/test_linux_context_ledger.py
-
-# 内部审查与工具本地目录（不入公开仓）
-审查*.md
-.codex/
-.pytest-*/
-.test-tmp-*/
-方案-*.md
-
-# 内部开发规划文档（路线图 / 对标分析 / 借鉴边界 / 发布计划）——本地私有，永不入公开仓
-docs/frigate-alignment.md
-docs/frigate-gap-analysis.md
-docs/frigate-parity-roadmap.md
-docs/linux-frigate-adoption.md
-docs/linux-nvr-roadmap.md
-docs/linux-release-plan.md
-docs/win11-roadmap.md
-
-# Win11 发行包构建产物（可再生，绝不入库；zip 由构建脚本产出）
+# 构建产物（可再生，不入库）
 build/
 dist/
+bin/
+obj/
 *.spec
-tests/test_win11_delivery.py
+*.pdb
+*.exe
+*.dll
+
+# WebView2 用户数据/缓存（含 Cookies、Local Storage，绝不入库）
+*.WebView2/
+EBWebView/
+
+# 助手/工具本地状态
+.mimosa/
+.codex/
+
+# 运行时数据：真实配置、数据库、日志、录像与证据
+/cameras.json
+storage/
+*.db
+*.db-wal
+*.db-shm
+events.jsonl
+*.log
+recordings/
+data/
+
+# 本机凭据与私钥
+.env
+.env.*
+auto.key
+auto.crt
+*.pem
+*.p12
+*.pfx
+
+# 模型权重（按许可单独分发，不随源码）
+*.onnx
+*.safetensors
+*.bin
+*.gguf
+
+# 编辑器与系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+nul

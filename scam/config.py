@@ -8,6 +8,11 @@
 """
 
 import json
+import copy
+from pathlib import Path, PureWindowsPath
+import re
+import sys
+from urllib.parse import urlsplit
 
 TIME_RE = __import__("re").compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 PRESET_TEMPLATES = ("enter-dwell", "loiter", "immediate")
@@ -148,7 +153,70 @@ def validate_venue(v):
 
     errs.extend(_validate_models(v))
     errs.extend(_validate_notify(v))
+    if "l3" in v:
+        errs.extend(validate_l3_config(v["l3"]))
+    if "asset_paths" in v:
+        errs.extend(_validate_asset_paths(v["asset_paths"]))
     return errs
+
+
+def validate_l3_config(value):
+    """离线配置合同；只校验字面值，不查询DNS或验证远端模型能力。"""
+    if not isinstance(value, dict):
+        return ["l3 必须为对象"]
+    errors = []
+    if "enabled" in value and type(value["enabled"]) is not bool:
+        errors.append("l3.enabled 必须为布尔")
+    provider = value.get("provider", "local")
+    if provider not in ("local", "cloud"):
+        errors.append("l3.provider 必须为 local|cloud")
+        return errors
+    # 禁止在任意L3配置内保存密钥字面值，连禁用配置也不能携带。
+    pending = [value]
+    secret_literal = False
+    while pending:
+        entry = pending.pop()
+        if isinstance(entry, dict):
+            secret_literal |= any(str(key).casefold() in
+                                  ("api_key", "token", "password") for key in entry)
+            pending.extend(entry.values())
+        elif isinstance(entry, list):
+            pending.extend(entry)
+    if secret_literal:
+        errors.append("l3 不接受密钥字面值，请仅填写 key_env 环境变量名")
+    if provider == "local":
+        if value.get("enabled") is True:
+            path = value.get("model_path")
+            if not isinstance(path, str) or not path.strip() or len(path) > 4096:
+                errors.append("启用本地 L3 时必须填写 model_path")
+        return errors
+    if value.get("image_upload_consent") is not True:
+        errors.append("使用云端理解前必须明确同意外发图片")
+    if value.get("vision_capable") is not True:
+        errors.append("必须明确声明所选云模型支持图片；此声明不是能力验证")
+    base = value.get("base_url")
+    try:
+        valid = isinstance(base, str) and 0 < len(base) <= 2048
+        valid = valid and not any(c.isspace() or ord(c) < 32 for c in base)
+        parsed = urlsplit(base) if valid else None
+        valid = valid and parsed.scheme == "https" and bool(parsed.hostname)
+        valid = valid and not parsed.username and not parsed.password and "@" not in parsed.netloc
+        valid = valid and "?" not in base and "#" not in base and "\\" not in base
+        if valid:
+            port = parsed.port  # 坏端口/IPv6结构在保存前拒绝；不访问网络。
+            valid = port is None or 1 <= port <= 65535
+    except ValueError:
+        valid = False
+    if not valid:
+        errors.append("l3.base_url 必须为无凭据、查询或片段的 HTTPS API 前缀")
+    model = value.get("model")
+    if (not isinstance(model, str) or not model.strip() or len(model) > 256
+            or any(ord(c) < 32 for c in model)):
+        errors.append("l3.model 必须为非空云模型名称")
+    env = value.get("key_env")
+    if not isinstance(env, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", env):
+        errors.append("l3.key_env 必须为合法环境变量名，不是密钥内容")
+    return errors
 
 
 def _validate_models(v):
@@ -207,4 +275,80 @@ def load_venue(path):
     """读取场所档案 JSON；解析失败抛 ValueError（调用方拒绝布防）。"""
     import io
     with io.open(path, encoding="utf-8") as f:
-        return json.load(f)
+        value = json.load(f)
+    return resolve_venue_asset_paths(value, path)
+
+
+def _validate_asset_paths(value):
+    if (not isinstance(value, dict)
+            or value.get("schema") != "scam.package-assets/v1"
+            or value.get("root") not in ("config", "install")
+            or set(value) - {"schema", "root"}):
+        return ["asset_paths 必须声明 scam.package-assets/v1 与 config|install 根"]
+    return []
+
+
+def _frozen_install_root():
+    """仅识别正式 backend 子目录布局；不依赖cwd或向任意父目录搜索。"""
+    if not getattr(sys, "frozen", False):
+        raise ValueError("源码运行的 install 资产模式需要显式 install_root")
+    executable = Path(sys.executable).resolve()
+    if (not executable.is_file()
+            or executable.name.casefold() != "semantic-camera-backend.exe"
+            or executable.parent.name.casefold() != "backend"
+            or not (executable.parent.parent / "SemanticCamera.Desktop.dll").is_file()):
+        raise ValueError("install 资产根不符合桌面壳/backend 安装布局")
+    return executable.parent.parent
+
+
+def resolve_venue_asset_paths(value, path, install_root=None):
+    """仅显式打包配置解析模型资产；无marker和用户绝对路径原样保留。
+
+    config根为配置父目录；install根为显式绝对根或严格冻结桌面布局。
+    不修改输入、不chdir、不检查/载入模型，不触碰相机source和凭据。
+    """
+    if not isinstance(value, dict) or "asset_paths" not in value:
+        return value
+    marker = value["asset_paths"]
+    errors = _validate_asset_paths(marker)
+    if errors:
+        raise ValueError(errors[0])
+    if marker["root"] == "config":
+        root = Path(path).resolve().parent
+    elif install_root is not None:
+        root = Path(install_root)
+        if not root.is_absolute():
+            raise ValueError("install_root 必须为显式绝对路径")
+        root = root.resolve()
+    else:
+        root = _frozen_install_root()
+    result = copy.deepcopy(value)
+
+    def rewrite(container, key):
+        if not isinstance(container, dict) or key not in container:
+            return
+        text = container[key]
+        if text is None or text == "":
+            return
+        if not isinstance(text, str) or any(ord(c) < 32 for c in text):
+            raise ValueError("打包模型资产路径必须为无控制字符的字符串")
+        windows = PureWindowsPath(text)
+        if windows.is_absolute() or Path(text).is_absolute():
+            return  # 显式用户绝对路径不改写、不访问。
+        if windows.drive or windows.root or ":" in text:
+            raise ValueError("打包模型资产路径不能为含糊的驱动器相对路径")
+        target = (root / text).resolve()
+        if not target.is_relative_to(root):
+            raise ValueError("打包模型资产相对路径越出已声明根")
+        container[key] = str(target)
+
+    cameras = result.get("cameras")
+    for camera in cameras if isinstance(cameras, list) else ():
+        if isinstance(camera, dict):
+            rewrite(camera.get("detector"), "model")
+    for key in ("repo_path", "checkpoint"):
+        rewrite(result.get("l2"), key)
+    local = result.get("l3")
+    if isinstance(local, dict) and local.get("provider", "local") == "local":
+        rewrite(local, "model_path")
+    return result

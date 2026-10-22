@@ -17,7 +17,7 @@ from scam.source import CameraSource
 
 
 def _venue(**extra):
-    cam = {"id": "c1", "source": "rtsp://u:p@192.168.1.64:554/x",
+    cam = {"id": "c1", "source": "rtsp://user:pass@camera.example:554/x",
            "detector": {"engine": "none"},
            "zones": [], "schedule": [{"from": "00:00", "to": "23:59"}]}
     cam.update(extra)
@@ -33,7 +33,7 @@ def test_legacy_source_only_config_still_valid():
 def test_role_overrides_and_kind_are_valid():
     errs = validate_venue(_venue(
         source_kind="file", detect_source="file:///a.avi",
-        record_source="rtsp://u:p@192.168.1.64:554/main",
+        record_source="rtsp://user:pass@camera.example:554/main",
         record_enabled=False))
     assert errs == []
 

@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- C152 桌面壳（WebView2 宿主）；C161：用户数据目录已迁至
+       %LOCALAPPDATA%\semantic-camera（UserPaths.cs），可在有官方
+       Microsoft.Web.WebView2 NuGet 缓存的机器编译。 -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AssemblyName>SemanticCamera.Desktop</AssemblyName>
+    <RootNamespace>SemanticCamera.Desktop</RootNamespace>
+    <Version>0.0.0</Version>
+    <!-- 版本号由构建期以 -p:Version=<pyproject version> 显式传入 -->
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2903.40" />
+  </ItemGroup>
+  <!-- C161-R2 干净 publish 闸门（两层）：RemoveDir 为纵深防御；
+       VerifyPublishPrivacyGate 用 Error 非静默——若 profile 仍在（含任意
+       层级 EBWebView 目录），publish **失败**而非带病产出。
+       最终新候选的独立 privacy gate 由验收方据此复核。 -->
+  <Target Name="StripWebView2ProfileFromPublish" AfterTargets="Publish">
+    <RemoveDir Directories="$(PublishDir)SemanticCamera.Desktop.exe.WebView2"
+               Condition="Exists('$(PublishDir)SemanticCamera.Desktop.exe.WebView2')" />
+    <RemoveDir Directories="$(PublishDir)webview2"
+               Condition="Exists('$(PublishDir)webview2')" />
+  </Target>
+  <Target Name="VerifyPublishPrivacyGate" AfterTargets="StripWebView2ProfileFromPublish">
+    <Error Condition="Exists('$(PublishDir)SemanticCamera.Desktop.exe.WebView2')"
+           Text="privacy-gate: publish 目录含 WebView2 用户数据 profile（SemanticCamera.Desktop.exe.WebView2）" />
+    <Error Condition="Exists('$(PublishDir)webview2')"
+           Text="privacy-gate: publish 目录含 webview2 用户数据目录" />
+    <ItemGroup>
+      <_PrivacyRiskFiles Include="$(PublishDir)**\EBWebView\**\*" />
+    </ItemGroup>
+    <Error Condition="'@(_PrivacyRiskFiles)' != ''"
+           Text="privacy-gate: publish 目录含 EBWebView profile 文件（@(_PrivacyRiskFiles)）" />
+  </Target>
+</Project>

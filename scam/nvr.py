@@ -31,12 +31,150 @@ from .server import (ISSUE_ACTIONS, CameraRuntimeRegistry, WorkbenchServer,
                      WorkbenchState)
 from .sinks import build_sinks
 from .source import CameraSource
+from .win11_materials import MaterialsStore
+from .win11_pipeline import L1Pipeline, L1Task
+
+
+# C-136：L2 生产运行面（窗口调度/闸门/兜底→L3/持久化/L4 链）移至独立模块
+from .win11_l2_runtime import L2Runtime
+
+
+def _build_l2_runtime(l2_cfg, store, camera_ids, *, l3_cfg=None,
+                      persist_dir=None, crop_worker=None, db_path=None):
+    """按显式开关构建 L2 运行面（C-136：唯一适配器+窗口调度+持久化）；
+    模型依赖缺失延迟到首次推理才失败，健康面以 stage 输出与 backend
+    diagnostic 如实呈现（不回退假模型）。l3.enabled 时构建 L3Stage（B 的
+    本地或显式云端适配器）；云端缺省启用 L4，显式 l4.enabled 可覆盖。
+    C-141：crop_worker 为原始裁图证据工作者（可选注入；None=仅内存，
+    裁图证据不落盘、重启不可回看）。"""
+    from .win11_l2_backend import RelateAnythingAdapter
+    from .win11_l2_contract import L2Budget, L2RelationStage
+    # 仅当 L2 启用时才要求显式 repo_path；未启用的运行面保持可构造
+    # （空路径不加载模型，若误调用则按模型不可用如实失败）。
+    repo_path = l2_cfg.get("repo_path") or ""
+    if l2_cfg.get("enabled") and not repo_path:
+        raise ValueError("l2.enabled 需要显式 repo_path（受控本地模型目录，"
+                         "不自动下载、不使用内置默认路径）")
+    adapter = RelateAnythingAdapter(
+        repo_path=repo_path,
+        checkpoint=l2_cfg.get("checkpoint") or "",
+        vocabulary=list(l2_cfg.get("vocabulary") or []),
+        infer_timeout_s=float(l2_cfg.get("infer_timeout_s") or 10.0))
+    budget = L2Budget(
+        max_candidates=int(l2_cfg.get("max_candidates") or 8),
+        max_crops=int(l2_cfg.get("max_crops") or 4))
+    stage = L2RelationStage(model=adapter, budget=budget)
+    l3_stage = None
+    l3_backend = None
+    if l3_cfg and l3_cfg.get("enabled"):
+        from .win11_l3 import L3Stage
+        provider = l3_cfg.get("provider", "local")
+        timing = dict(timeout_s=float(l3_cfg.get("timeout_s") or 180.0),
+                      infer_timeout_s=float(l3_cfg.get("infer_timeout_s") or 120.0),
+                      load_timeout_s=float(l3_cfg.get("load_timeout_s") or 60.0))
+        if provider == "cloud":
+            from .config import validate_l3_config
+            errors = validate_l3_config(l3_cfg)
+            if errors:
+                raise ValueError("; ".join(errors))
+            from .win11_l3_cloud import CloudOpenAICompatibleL3Backend
+            l3_model = CloudOpenAICompatibleL3Backend(
+                base_url=l3_cfg["base_url"], model=l3_cfg["model"],
+                key_env=l3_cfg["key_env"], consent=l3_cfg["image_upload_consent"],
+                **timing, **{key: l3_cfg[key] for key in (
+                    "request_timeout_s", "max_tokens", "max_frames",
+                    "jpeg_budget_bytes_per_frame") if key in l3_cfg})
+        elif provider == "local":
+            from .win11_l3_backend import LocalTransformersL3Backend
+            model_path = l3_cfg.get("model_path")
+            if not model_path:
+                raise ValueError("l3.enabled 需要显式 model_path（受控本地模型，"
+                                 "不自动下载）")
+            l3_model = LocalTransformersL3Backend(
+                model_path=model_path, **timing,
+                **{key: l3_cfg[key] for key in (
+                    "dtype", "precision_mode", "attention_implementation", "vision_chunk_size")
+                   if key in l3_cfg})
+        else:
+            raise ValueError("l3.provider 必须为 local|cloud")
+        l3_stage = L3Stage(model=l3_model, budget=None)
+        l3_backend = l3_model
+    l4_factory = None
+    l4_cfg = (l3_cfg or {}).get("l4") or {}
+    # 云向导的新路径默认保留渐进融合；显式关闭仍受尊重。
+    cloud_progress_default = bool(
+        l3_cfg and l3_cfg.get("enabled") is True
+        and l3_cfg.get("provider") == "cloud")
+    if l4_cfg.get("enabled", cloud_progress_default):
+        from .win11_l4 import L4Stage
+        l4_factory = L4Stage
+    event_progress = None
+    if l4_factory is not None and db_path is not None:
+        from .win11_event_progress import EventProgress
+        event_progress = EventProgress(db_path)
+    # C154 车道 G：同事件跨窗选材——生产默认启用（有界池 + 事实链只读绑定）。
+    # 绑定来源 = `event_progress`（事实链快照，先于选材点写入）；它只在
+    # l4.enabled 且有持久化库时才存在——不为此新建第二条事件桥。无来源时池
+    # 一律不聚合（如实记 `binding_source_missing`）并继续旧窗口路径，绝不猜
+    # 事件；共享预算仍归 L2Runtime 默认启用的 C153 账本，不申请第二份。
+    from .win11_event_materials import EventMaterialPool
+    # C155 最小一期（主协调批准 P0-1/P0-2/P0-3(a)）：Win11 **生产入口**显式开启
+    # 逐帧严格归属与主帧事件键查找；共享 EventMaterialPool 默认仍为关闭
+    # （其他调用方与既有行为不受影响）。两开关的实际取值经
+    # `runtime.snapshot()["event_materials"]`（即 /api/health 的 l2 段）可核，
+    # 不依赖实验驱动注入。
+    event_materials = EventMaterialPool(
+        binding_source=event_progress,
+        frame_level_binding=True,
+        primary_frame_binding=True)
+    return L2Runtime(camera_ids, store, stage, adapter=adapter,
+                     l3_backend=l3_backend,
+                     vocabulary_id=str(l2_cfg.get("vocabulary_id")
+                                       or "upstream-default"),
+                     vocabulary=tuple(l2_cfg.get("vocabulary") or ()),
+                     max_age_s=float(l2_cfg.get("max_age_s") or 30.0),
+                     poll_interval_s=float(l2_cfg.get("poll_interval_s")
+                                           or 0.5),
+                     l3_stage=l3_stage,
+                     l3_max_queue=int((l3_cfg or {}).get("max_queue") or 4),
+                     persist_dir=persist_dir,
+                     l4_factory=l4_factory,
+                     crop_worker=crop_worker,
+                     event_progress=event_progress,
+                     event_materials=event_materials)
+
+
+def _stop_l1_components(l1_groups, l1_store):
+    """停机收尾：先提交方已 join，再关管道与材料仓。
+
+    返回未完成组件标签列表：close() 返回 False（worker 超时仍活）或关闭
+    异常都如实入列；调用方据此决定打印"已停机"还是"停机未完成"，绝不
+    在线程仍运行时宣称资源已释放。逐项 try/except，互不掩盖。
+    """
+    incomplete = []
+    for group in l1_groups:
+        try:
+            if not group["pipeline"].close():
+                incomplete.append(f"检测管线（相机 {group['cameras']}）")
+        except Exception as exc:
+            incomplete.append(f"检测管线关闭异常（相机 {group['cameras']}，"
+                              f"{type(exc).__name__}）")
+    if l1_store is not None:
+        try:
+            l1_store.close()
+        except Exception as exc:
+            print(f"[NVR] 材料仓关闭异常: {type(exc).__name__}")
+    return incomplete
 
 
 def _load_json(path):
     # utf-8-sig：容忍 Windows 记事本保存时加的 BOM
     with open(path, encoding="utf-8-sig") as f:
-        return json.load(f)
+        value = json.load(f)
+    if isinstance(value, dict) and "asset_paths" in value:
+        from .config import resolve_venue_asset_paths
+        return resolve_venue_asset_paths(value, path)
+    return value
 
 
 def _seed_zones(conn, cams):
@@ -154,13 +292,35 @@ def _make_detector(det_cfg):
         return None, "detector_unavailable", "detector_load_failed"
 
 
-def _run_camera(cam_cfg, zones, db_path, stop_event, state, watchdog=None):
+def _l1_detector_factory(det_cfg):
+    """L1 worker 线程内的检测器懒加载工厂（合同 C-131 §1）。
+
+    复用 _make_detector 的加载路径与告警日志；与同步路径唯一的差别是失败
+    不被吞掉——工厂要么返回检测器，要么以异常上抛，让 L1Pipeline 产出
+    model_unavailable 结果并在退避后重试，绝不给 worker 一个假检测器。
+    """
+    def factory():
+        det, _capability, _issue = _make_detector(det_cfg)
+        if det is None:
+            raise RuntimeError("detector_load_failed")
+        return det
+
+    return factory
+
+
+def _run_camera(cam_cfg, zones, db_path, stop_event, state, watchdog=None,
+                pipeline=None, store=None, l2_runtime=None):
     """单相机值守线程：源 → Monitor.step（门控/检测/裁决/告警全在内）。
 
     值守消费 detect 角色（source_kind 决定源类型；detect_source 可覆盖 source）；
     record 角色与录像接线属 L2（Z3），配置缺省不开录像。
     运行/能力状态只写固定状态与固定issue code——source、凭据、模型路径与异常
     正文都不进工作台。
+    pipeline 或 store 非 None 时走 Win11 异步模式（合同 C-132）：快系统逐帧只做
+    轻量观察与材料选择，检测结果只经 apply_detection_result 进入。有管道的相机
+    材料同帧双投（L1 调度 + 材料留档，F8）；仅预览/缺模型相机只投材料仓（统一
+    轻量材料路径，不偷偷启动检测模型、不产生对象告警）。两者皆 None
+    （Linux）保持同步路径，逐字节不变。
     """
     camera_id = cam_cfg["id"]
     runtime = getattr(state, "runtime", None)
@@ -207,12 +367,68 @@ def _run_camera(cam_cfg, zones, db_path, stop_event, state, watchdog=None):
 
     monitor = None
     try:
-        det, capability, det_issue = _make_detector(det_cfg)
-        if runtime is not None:
-            runtime.detector(camera_id, capability, det_issue)
-        monitor = Monitor({**cam_cfg, "zones": zones},
-                          detect_fn=(det.detect if det else (lambda f: [])),
-                          sinks=build_sinks({"sqlite": db_path}))
+        if pipeline is not None or store is not None:
+            # Win11 异步模式（合同 C-132 F10）：检测器由管道 worker 线程懒加载
+            # 一次，快系统绝不等待模型；检测结果只经 apply_detection_result
+            # 进入（detect_fn=None），sync 分支不进此路径。仅预览/缺模型相机
+            # （store 有、pipeline 无）走同一条轻量材料路径。
+            monitor = Monitor({**cam_cfg, "zones": zones},
+                              detect_fn=None,
+                              sinks=build_sinks({"sqlite": db_path}),
+                              detection_mode="async")
+
+            def _material_sink(material):
+                # 快系统材料出口（合同 C-132 F3/F8）：同帧双投——L1 调度 +
+                # 材料留档；只做内存复制与组装，绝不阻塞、绝不 I/O。返回
+                # 真实受理布尔（两者都受理才算受理）；False 时由 monitor
+                # 计 material_rejected（原因由管道/材料仓各自计数，两层
+                # 各计一层不重复）。时间可信度标注取当帧已登记的
+                # monitor.timestamp_kind（nvr 逐帧写入）。
+                accepted = True
+                if pipeline is not None:
+                    task = L1Task(
+                        camera_id=material["camera_id"],
+                        run_id=material["run_id"],
+                        frame_id=material["frame_id"],
+                        t_capture_ms=material["t_capture_ms"],
+                        frame_bgr=material["frame_bgr"].copy(),
+                        reason=material["reason"],
+                        change_boxes=material["change_boxes"],
+                        gate_w=material["gate_w"],
+                        gate_h=material["gate_h"],
+                        config_version=material["config_version"],
+                        prev_available=material["prev_available"])
+                    accepted = pipeline.submit(task)
+                stored = store.ingest(
+                    camera_id=material["camera_id"],
+                    run_id=material["run_id"],
+                    config_version=material["config_version"],
+                    frame_id=material["frame_id"],
+                    frame_bgr=material["frame_bgr"],
+                    t_capture_ms=material["t_capture_ms"],
+                    timestamp_kind=monitor.timestamp_kind,
+                    change_boxes=material["change_boxes"],
+                    gate_w=material["gate_w"],
+                    gate_h=material["gate_h"],
+                    material_reason=material["reason"])
+                if not (accepted and stored):
+                    # 拒收计数唯一责任方=monitor（按 sink 返回值计一次，
+                    # C-133 R2）；原因明细由管道/材料仓各自计数，这里不重复
+                    pass
+                return accepted and stored
+
+            monitor.set_material_sink(_material_sink)
+            # T2 进展探针：管道最老未完结任务年龄（卡死时持续增长，新提交
+            # 不重置）；monitor 经此判失联，自己不感知管道内部。
+            monitor.set_progress_probe(
+                lambda: pipeline.oldest_unfinished_age_ms(camera_id))
+        else:
+            det, capability, det_issue = _make_detector(det_cfg)
+            if runtime is not None:
+                runtime.detector(camera_id, capability, det_issue)
+            monitor = Monitor({**cam_cfg, "zones": zones},
+                              detect_fn=(det.detect if det else (lambda f: [])),
+                              sinks=build_sinks({"sqlite": db_path}))
         if state is not None:
             state.monitors[camera_id] = monitor
         # 首次 online 必须推迟到检测器加载与 Monitor 构造都成功之后：源 open()
@@ -222,8 +438,13 @@ def _run_camera(cam_cfg, zones, db_path, stop_event, state, watchdog=None):
             runtime.online(camera_id)
 
         print(f"[NVR] {camera_id} 值守启动"
-              + ("" if det else "（无检测器：只跑门控，不产生检测告警）"))
+              + ("（L1 异步检测）" if pipeline is not None else "")
+              + ("（材料留档）" if store is not None else "")
+              + ("" if pipeline is not None or store is not None else
+                 ("" if det else "（无检测器：只跑门控，不产生检测告警）")))
         recovering = False
+        # L1 能力上报的去重缓存：只在 l1_health 状态变化时写注册表。
+        l1_reported = None
         while not stop_event.is_set():
             ok, frame, ts = source.read()
             if not ok:
@@ -253,10 +474,72 @@ def _run_camera(cam_cfg, zones, db_path, stop_event, state, watchdog=None):
                 watchdog.frame(source_ts=ts, timestamp_kind=kind)
             now = (ts * 1000.0) if (ts and kind == "source_capture") \
                 else time.time() * 1000.0
+            if l2_runtime is not None:
+                # C-137 §4：当前有效身份注册表推进（廉价；区域切换/重启
+                # 后 run 变化即生效，发布门禁据此拒收旧结果）
+                try:
+                    l2_runtime.update_camera_identity(
+                        camera_id, monitor.run_id, monitor.zone_revision)
+                except Exception:
+                    pass
+            if pipeline is not None:
+                # 消费就绪的 L1 结果（非阻塞，读帧成功后、step 之前）：
+                # 消费异常只记日志，绝不阻塞或杀死值守线程。结果的最终
+                # 关联在 step 之后按统一消费结论执行（R1）——step 的
+                # 配置/TTL/顺序复核此前不预写任何"有效ok"。
+                try:
+                    result = pipeline.take_result(camera_id)
+                    if result is not None:
+                        monitor.apply_detection_result(result, now)
+                except Exception as e:
+                    print(f"[NVR] {camera_id} L1 结果消费异常: {e}")
             try:
                 monitor.step(frame, to_gray(frame, Monitor.GRAY_W), now)
             except Exception as e:
                 print(f"[NVR] {camera_id} 单帧处理异常: {e}")
+            if pipeline is not None and store is not None:
+                # R1 统一消费结论（C-133）：step 复核后才允许关联——被拒
+                # 结果以 accepted=False+原因作诊断（四元校验由材料仓兜底），
+                # 绝不预写有效 ok，也不与 Monitor 各判一套身份规则。
+                conclusion = getattr(monitor, "consume_conclusion", lambda: None)()
+                if conclusion is not None:
+                    # A metadata adapter fault cannot suppress material delivery.
+                    progress = getattr(l2_runtime, "event_progress", None)
+                    if progress is not None:
+                        try:
+                            progress.record_conclusion(monitor, conclusion)
+                        except Exception as exc:
+                            print(f"[NVR] {camera_id} 事件身份快照失败: "
+                                  f"{type(exc).__name__}")
+                    try:
+                        store.attach_result(
+                            conclusion["camera_id"], conclusion["run_id"],
+                            conclusion["config_version"],
+                            conclusion["frame_id"], conclusion["status"],
+                            conclusion.get("error_code"),
+                            conclusion.get("detections") or [],
+                            accepted=conclusion["accepted"],
+                            reject_reason=conclusion.get("reason"))
+                    except Exception as e:
+                        print(f"[NVR] {camera_id} 材料关联异常: {e}")
+            # L1 能力上报（最小面，合同 C-131 §3）：只在 l1_health 状态变化
+            # 时写注册表——首次 ready 置检测可用，model_unavailable 置检测
+            # 不可用；复用既有 detector 能力与 issue code 词表，状态无变化
+            # 时零调用。其余状态（如 infer_failed）不改写能力事实。
+            if pipeline is not None and runtime is not None:
+                health = getattr(monitor, "l1_health", None)
+                l1_state = (health or {}).get("state")
+                if l1_state is not None and l1_state != l1_reported:
+                    if l1_state == "ready":
+                        runtime.detector(camera_id, "alerting", None)
+                        l1_reported = l1_state
+                    elif l1_state == "model_unavailable":
+                        code = (health or {}).get("code")
+                        runtime.detector(
+                            camera_id, "detector_unavailable",
+                            code if code in ISSUE_ACTIONS
+                            else "detector_load_failed")
+                        l1_reported = l1_state
             # 数据面故障（审查段/告警写不进库）必须在健康面可见，不能只留在
             # 监控线程的内部计数里；只在状态变化时写，避免逐帧刷注册表。
             if runtime is not None:
@@ -322,7 +605,8 @@ def _bind_failure_reason(exc):
     return "无法绑定工作台监听地址"
 
 
-def main(argv=None, *, edition=None):
+def main(argv=None, *, edition=None, stop_event=None,
+         lifecycle_hook=None):
     """启动共享运行时。
 
     edition 由平台入口显式传入；直接运行 ``scam.nvr`` 时仅作为兼容入口，
@@ -465,18 +749,38 @@ def main(argv=None, *, edition=None):
         if not ffmpeg_path:
             print("[警告] ffmpeg 缺失——事件片段导出不可用（告警不受影响）")
 
-    stop_event = threading.Event()
+    # C152 桌面壳注入点（默认 None → 行为与既有完全一致）：
+    # 外部 stop_event 让壳可直接请求正常停机；lifecycle_hook 上报事实性事件。
+    stop_event = stop_event if stop_event is not None else threading.Event()
+
+    def _lifecycle(event, **fields):
+        """生命周期钩子：只上报事实；钩子异常绝不改变生产停机语义。"""
+        if lifecycle_hook is None:
+            return
+        try:
+            lifecycle_hook(event, **fields)
+        except Exception:
+            pass
+
 
     # Win11「进行中事件的语义更新」后台链（第一切片，Win11 专属接线）：
     # 独立守护线程、限并发限队列、可停止；快路径零同步等待模型；
     # 模型失败/超时/不可用只记状态，v1 提醒与事件记录照常工作。
     semantic_updater = None
+    # 显式关闭新理解开关时，也不再偷偷启动旧的语义更新worker。
+    # 无l3段的旧配置仍保留既有更新链，不把它误报为理解已关闭。
+    understanding_configured = ("l3" not in cfg
+                                or (cfg.get("l3") or {}).get("enabled") is True)
     if product.key == "win11" and state is not None:
+        state.understanding_enabled = understanding_configured
+    if product.key == "win11" and state is not None and understanding_configured:
         try:
             from .semantic_updater import SemanticUpdater
             semantic_updater = SemanticUpdater(
                 args.db,
-                build_provider(cfg.get("models") or {"channel": "local"}),
+                build_provider(cfg.get("semantic_models")
+                               or cfg.get("models")
+                               or {"channel": "local"}),
                 stop_event=stop_event)
             state.semantic = semantic_updater
             semantic_updater.start()
@@ -486,6 +790,104 @@ def main(argv=None, *, edition=None):
             print(f"[NVR] 语义更新后台链未启动（{type(exc).__name__}）；"
                   "v1 提醒与事件记录照常工作")
             semantic_updater = None
+
+    # Win11 快系统→L1 中间层（合同 C-131 §3/§4）：edition==win11 且存在可用
+    # 检测配置（engine=onnx 且模型在位）时，按（model+classes+conf）规范键
+    # 分组建共享 L1Pipeline——同组相机共享一个 worker、一次模型加载；不同组
+    # 各自独立，仍比每相机一份检测器都不多建。Linux 与仅预览/模型缺失不建
+    # 管道、不挂 state.l1：既有路径零改动。/api/health 在请求时读 state，
+    # 此处挂载先于工作台服务线程启动。
+    l1_groups = []
+    camera_pipelines = {}
+    if product.key == "win11":
+        groups = {}
+        for cam in cams:
+            det_cfg = cam.get("detector") or {}
+            if _detector_plan(det_cfg)[0] != "alerting":
+                continue
+            key = (det_cfg["model"], tuple(det_cfg.get("classes", ["person"])),
+                   det_cfg.get("conf", 0.4))
+            group = groups.setdefault(key, {"det_cfg": det_cfg, "cameras": []})
+            group["cameras"].append(cam["id"])
+        for group in groups.values():
+            pipeline = L1Pipeline(
+                _l1_detector_factory(group["det_cfg"]), stop_event=stop_event,
+                model_name=os.path.basename(group["det_cfg"]["model"]),
+                # W1（主协调批准）：Win11 生产入口显式启用**一个受保护槽位**，使
+                # "静→动"边沿反复发出的 change_start 材料帧不再被合并丢弃
+                # （真实通路实测：L1 服务覆盖 58%→75%、带检出材料 30→44、
+                # 三帧全齐备 18→36；submit 增量 ≈0.42 µs/次，快路径仍非阻塞）。
+                # 共享 L1Pipeline 默认仍为 0，其他调用方与 Linux 不受影响。
+                latest_protected_slots=1)
+            l1_groups.append({"cameras": list(group["cameras"]),
+                              "pipeline": pipeline})
+            for camera_id in group["cameras"]:
+                camera_pipelines[camera_id] = pipeline
+        for group in l1_groups:
+            group["pipeline"].start()
+        if state is not None and l1_groups:
+            state.l1 = l1_groups
+            print(f"[NVR] L1 异步检测已启用（{len(l1_groups)} 组共享检测器，"
+                  f"覆盖 {sum(len(g['cameras']) for g in l1_groups)} 路相机）")
+
+    # 有界时序材料仓（合同 C-132 F7）：全部 Win11 相机统一轻量材料路径——
+    # 有检测器的相机与 L1 同帧双投；仅预览/缺模型相机只投材料仓（变化材料
+    # 不丢失，也绝不偷偷启动检测模型）。Linux 不建仓：既有路径零改动。
+    l1_store = None
+    if product.key == "win11":
+        l1_store = MaterialsStore()
+        if state is not None:
+            state.materials = l1_store
+        print(f"[NVR] 材料留档已启用（覆盖 {len(cams)} 路相机，"
+              "后续语义理解未接入）")
+
+    # L2 关系/互动裁图（C-134）：默认关闭；仅当配置显式 enabled 且材料仓
+    # 在位时才构建独立线程（不进入快系统/L1 线程）。未配置模型依赖时延迟
+    # 到首次推理才失败，健康面 model_unavailable 如实呈现，不回退假模型。
+    l2_runtime = None
+    l2_cfg = cfg.get("l2") or {}
+    l3_cfg = cfg.get("l3") or {}
+    # L3 使用同一有界调度面；显式启用理解无需重复开启 L2 配置。
+    semantic_runtime_enabled = product.key == "win11" and (
+        l2_cfg.get("enabled") is True or l3_cfg.get("enabled") is True)
+    # 原始裁图证据（C-141）：有界异步工作者+持久索引；存储根在每用户数据
+    # 目录（db 同目录 understanding/crops/）。构建失败→诚实仅内存（不落盘、
+    # 重启不可回看），其余链路照常；关停/重启不删库不误清证据。
+    crop_worker = None
+    if semantic_runtime_enabled:
+        try:
+            from .win11_crop_evidence import CropEvidenceStore
+            from .win11_crop_worker import CropWorker
+            crops_root = os.path.join(os.path.dirname(os.path.abspath(args.db)),
+                                      "understanding", "crops")
+            crop_worker = CropWorker(CropEvidenceStore(crops_root))
+            crop_worker.start()
+            print("[NVR] 原始裁图持久化已启用（原始 PNG+持久索引；"
+                  "重启后可回看）")
+        except Exception as exc:
+            crop_worker = None
+            print(f"[NVR] 原始裁图持久化未启用（{type(exc).__name__}）；"
+                  "裁图证据仅内存，重启不可回看")
+    if semantic_runtime_enabled:
+        try:
+            l2_runtime = _build_l2_runtime(
+                l2_cfg, l1_store, [c["id"] for c in cams], l3_cfg=l3_cfg,
+                persist_dir=os.path.join(
+                    os.path.dirname(os.path.abspath(args.db)),
+                    "understanding"),
+                crop_worker=crop_worker, db_path=args.db)
+            l2_runtime.start()
+            if state is not None:
+                state.l2 = l2_runtime
+                if crop_worker is not None:
+                    state.crop_service = crop_worker
+            note = ("；L2→L3 路径已启用（真实多帧，质量未验证）"
+                    if l3_cfg.get("enabled") else "")
+            print("[NVR] L2 关系阶段已启用（显式开关；独立线程，"
+                  "不阻塞快系统/L1；关系分数未经校准）" + note)
+        except Exception as exc:
+            print(f"[NVR] L2 关系阶段启用失败（{type(exc).__name__}）；"
+                  "其余链路照常，未回退假模型")
 
     # 补账后台续跑（工作包 B）：有界批次 + 周期机会，直到积压清零；
     # 待补数写入 state.backfill 供工作台健康面如实显示。
@@ -603,7 +1005,10 @@ def main(argv=None, *, edition=None):
             target=_run_camera,
             args=(cam, zones_by_cam[cam["id"]], args.db, stop_event, state,
                   (health_registry.camera(cam["id"])
-                   if health_registry is not None else None)),
+                   if health_registry is not None else None),
+                  camera_pipelines.get(cam["id"]),
+                  l1_store if product.key == "win11" else None,
+                  l2_runtime if product.key == "win11" else None),
             daemon=True)
         t.start()
         threads.append(t)
@@ -611,6 +1016,16 @@ def main(argv=None, *, edition=None):
     if server is not None:
         threading.Thread(target=server.serve_forever, daemon=True).start()
         print(f"[NVR] 工作台: http://{args.host}:{args.port}")
+        # HTTP 入口已监听：仅此含义，不代表相机/模型就绪。
+        _lifecycle("http_ready", host=args.host, port=args.port)
+
+    # 事实性就绪上报：只报可核实项。**模型就绪当前无证据源 → 明确 unknown**，
+    # 不得由 HTTP 就绪或等待时长推断。
+    _lifecycle("runtime_state", cameras=len(cams),
+               camera_health_source=("health_registry"
+                                     if health_registry is not None
+                                     else "unavailable"),
+               models="unknown")
 
     # 宽限窗结束后做一次性遗留收口（Linux 零宽限时快照为空，不会起线程）。
     _schedule_pending_recovery(args.db, pending_recovery,
@@ -624,6 +1039,11 @@ def main(argv=None, *, edition=None):
             pass
     except KeyboardInterrupt:
         stop_event.set()
+    _lifecycle("stopping")
+    # 停机未完成项：能在本段**可靠观察**的组件才计入；无法可靠观察的组件
+    # （recorders/notify_hub/semantic_updater 的返回状态未被本段使用）保持
+    # **unknown/未验证**，不因"调用过 stop"就宣称完成。
+    incomplete: list[str] = []
     if server is not None:
         server.shutdown()
     if recorders is not None:
@@ -632,14 +1052,59 @@ def main(argv=None, *, edition=None):
         if not slow_worker.stop(timeout=10.0):
             print("[NVR] 慢系统 worker 关机超时（未完成事实留在水位，"
                   "下次启动续跑）")
+            incomplete.append("慢系统 worker（关机超时，未完成事实留在水位）")
     if notify_hub is not None:
         notify_hub.stop(timeout=5.0)
-    for t in threads:
+    for index, t in enumerate(threads):
         t.join(timeout=5)
+        if t.is_alive():                    # join 后仍存活 → 未完成收尾
+            incomplete.append(f"相机线程#{index}（join 后仍存活）")
+    # L1 worker 在全部提交方（相机线程）join 之后停机（合同 C-132 F10）。
+    incomplete.extend(_stop_l1_components(l1_groups, l1_store))
+    if l2_runtime is not None and not l2_runtime.stop(timeout=5.0):
+        # C154-R1：停机未完成必须按**事实**分列，不再一律写成
+        # "L2 消费线程未退出"（材料池/模型在途/backend 关闭各自独立）。
+        _reasons = []
+        try:
+            _st = l2_runtime.execution_status()
+            if isinstance(_st, dict):
+                _sched = _st.get("scheduler") or {}
+                if not _sched.get("stopped", True):
+                    _reasons.append("消费线程未退出")
+                _unfinished = _st.get("executions_unfinished") or {}
+                if _unfinished.get("count"):
+                    _reasons.append(
+                        f"模型调用仍在途({_unfinished.get('count')})")
+                _close = _st.get("resources_close_incomplete") or {}
+                if _close.get("incomplete"):
+                    _reasons.append("backend 关闭未完成")
+        except Exception:
+            pass
+        try:
+            _pool = l2_runtime.material_pool_status()
+            if isinstance(_pool, dict) and _pool.get("available") \
+                    and not _pool.get("complete", True):
+                _reasons.append("材料池未完成")
+        except Exception:
+            pass
+        incomplete.append("L2 关系阶段（" + (
+            "、".join(_reasons) if _reasons else "原因未分类") + "）")
+    if crop_worker is not None:
+        crop_worker.close(timeout_s=5.0)
+        if not crop_worker.join(timeout_s=5.0):
+            incomplete.append("原始裁图工作者（线程未退出）")
     if semantic_updater is not None:
         semantic_updater.stop(timeout=5)
-    print("[NVR] 已停机")
-    return 0
+    if incomplete:
+        print("[NVR] 停机未完成（以下组件线程仍在运行，资源未完全释放）："
+              + "；".join(incomplete))
+    else:
+        print("[NVR] 已停机")
+    # 事实性收尾上报：incomplete 非空即"已停止但未完成"，壳不得当正常完成。
+    # 退出码与握手一致地表示"是否未完成"：未完成 → 3，完整停止 → 0。
+    exit_code = 3 if incomplete else 0
+    _lifecycle("stopped", incomplete=list(incomplete), exit_code=exit_code)
+    return exit_code
 
 
 if __name__ == "__main__":

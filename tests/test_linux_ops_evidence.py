@@ -588,10 +588,19 @@ def test_frozen_contract_constants():
         "release_gate_passed": None}
 
 
-def test_tool_version_matches_pyproject():
+def test_tool_and_product_versions_are_semver():
+    """测量工具版本独立于产品版本；两者都必须是三段数字 semver。
+
+    历史断言曾要求工具版本与产品版本字符串完全相等——两者语义不同
+    （工具是报告格式版本，产品是包版本），该等式不成立且会阻塞正常发版。
+    """
+    import re
     text = (Path(__file__).resolve().parents[1]
             / "pyproject.toml").read_text(encoding="utf-8")
-    assert f'version = "{ops.TOOL_VERSION}"' in text
+    match = re.search(r'^version = "(\d+\.\d+\.\d+)"$', text, re.M)
+    assert match, "pyproject 版本必须是 MAJOR.MINOR.PATCH"
+    assert re.fullmatch(r"\d+\.\d+\.\d+", ops.TOOL_VERSION), \
+        "工具版本必须是 MAJOR.MINOR.PATCH"
 
 
 # ---------- 组3：输入合同拒绝面 ----------

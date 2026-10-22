@@ -33,6 +33,12 @@ def main(argv=None):
     if "--help" in args or "-h" in args:
         return run_runtime(args, edition=WIN11_WORKSTATION.key)
 
+    # C152：桌面壳模式——由外壳持有窗口；后端只讲 stdio 协议，不打开浏览器。
+    if "--desktop" in args:
+        from .win11_desktop import desktop_main
+        return desktop_main([a for a in args if a != "--desktop"],
+                            edition=WIN11_WORKSTATION.key)
+
     # 回环边界（本产品入口层，先于数据库/相机/工作台）：Win11 工作台只在本机
     # 回环上监听，任何其它 --host 取值一律拒绝——不依赖 Linux 侧改造，也不引入
     # 鉴权系统。重复或混用写法同样拒绝：否则入口校验的值与运行时最终采用的

@@ -10,7 +10,7 @@ A budget-aware semantic video event runtime for Linux NVR and Windows 11
 
 [![CI](https://github.com/CommitStrip/semantic-camera/actions/workflows/ci.yml/badge.svg)](https://github.com/CommitStrip/semantic-camera/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-1379%20passed%2C%2016%20skipped-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-2507%20passed%2C%2019%20skipped-brightgreen)](tests/)
 
 [**简体中文**](README-CN.md) · [**English**](README.md)
 
@@ -65,6 +65,13 @@ python scripts/fetch_models.py --list                              # 清单与�
 python scripts/fetch_models.py --model nanodet                     # 哈希冻结后下载校验入位
 python scripts/fetch_models.py --verify-local <路径> --expect <sha256>   # 自行导出的权重校验
 ```
+
+可选的本地语义模型（L2 关系模型、L3 视觉语言模型）**不随本仓库分发**，
+需自行提供并遵守其上游许可：InternVL3.5（Apache-2.0）、RelateAnything
+（AGPL-3.0 及其模型条款）。模型路径必须显式配置，程序不内置任何默认路径。
+
+相机配置从 [`cameras.example.json`](cameras.example.json) 起步——复制为
+`cameras.json` 后替换占位来源。真实 `cameras.json` 已被 Git 忽略，不得提交。
 
 ### Linux NVR
 
