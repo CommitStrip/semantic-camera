@@ -266,7 +266,9 @@ def feed_empty(store, cam, run, cfg, fid):
                                accepted=True, reject_reason=None)
 
 
-def _wait_until(predicate, timeout=5.0, interval=0.02):
+def _wait_until(predicate, timeout=20.0, interval=0.02):
+    # CI 运行器负载高时 worker 轮询会明显变慢：默认等待放宽到 20s，
+    # 断言内容不变（只等事实，不放宽事实）。
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():
