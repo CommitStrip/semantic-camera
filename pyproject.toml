@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scam"
-version = "0.2.0"
+version = "0.1.0"
 description = "语义摄像头 v2 —— Linux NVR / Windows 11 上的场所语义值守层（唯一上游：VUS）"
 requires-python = ">=3.10"
 dependencies = [
@@ -31,3 +31,4 @@ include = ["scam*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["slow: optional resource-intensive tests requiring explicit local opt-in"]

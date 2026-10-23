@@ -16,6 +16,7 @@ import gzip
 import hashlib
 import io
 import os
+import stat as statmod
 import sys
 import tarfile
 from pathlib import Path
@@ -38,6 +39,45 @@ def _safe_path(raw):
 # include 白名单（顶层）：只有这些能进包
 INCLUDE_TOPS = ("scam", "deploy", "scripts", "tests", "pyproject.toml",
                 "README.md", "README-CN.md", "LICENSE", "RELEASE_NOTES.md")
+WINDOWS_INCLUDE_TOPS = INCLUDE_TOPS + (
+    "packaging", "desktop", "docs/windows-user-guide.md",
+    "docs/logo.svg", "cameras.example.json")
+WINDOWS_REQUIRED_PATHS = (
+    "packaging/build_win11_full_backend.py",
+    "packaging/build_win11.py",
+    "packaging/runtime_hook_deps.py",
+    "packaging/win11_exe_entry.py",
+    "packaging/THIRD-PARTY-NOTICES.txt",
+    "packaging/windows/semantic-camera.iss",
+    "packaging/windows/README.md",
+    "packaging/win11-上手说明.md",
+    "desktop/win11/BackendSession.cs",
+    "desktop/win11/MainWindow.cs",
+    "desktop/win11/Program.cs",
+    "desktop/win11/UserPaths.cs",
+    "desktop/win11/SemanticCamera.Desktop.csproj",
+    "desktop/win11/app.manifest",
+    "desktop/win11/README.md",
+    "docs/windows-user-guide.md",
+    "docs/logo.svg",
+    "cameras.example.json",
+)
+WINDOWS_EXCLUDED_DIRS = ("bin", "obj", "publish")
+WINDOWS_FORBIDDEN_ARTIFACTS = (
+    ".exe", ".dll", ".pdb", ".zip", ".7z", ".log",
+    "ebwebview", "user data", "cookies", ".pyc",
+)
+
+
+def _reparse_point(path):
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    if statmod.S_ISLNK(info.st_mode):
+        return True
+    return bool(int(getattr(info, "st_file_attributes", 0))
+                & int(getattr(statmod, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)))
 
 # 敏感模式（任一命中=拒绝）：凭据/私有上下文/权重/运行时产物/历史
 SENSITIVE_PATTERNS = (
@@ -68,21 +108,38 @@ def version():
         return "0.0.0"
 
 
-def _collect():
+def _collect(profile="linux"):
     """白名单收集 + 敏感双闸；返回相对路径列表（POSIX）。"""
     files = []
-    for top in INCLUDE_TOPS:
+    tops = WINDOWS_INCLUDE_TOPS if profile == "windows-source" else INCLUDE_TOPS
+    for top in tops:
         path = os.path.join(REPO, top)
         if not os.path.exists(path):
             continue
+        if profile == "windows-source" and _reparse_point(path):
+            raise ValueError("windows_source_reparse_point:" + top)
         if os.path.isfile(path):
             files.append(top)
             continue
         for root, dirs, names in os.walk(path):
             dirs[:] = [d for d in dirs if d not in
                        ("__pycache__", ".pytest_cache", ".mimosa")]
+            if top == "desktop":
+                dirs[:] = [d for d in dirs if d not in WINDOWS_EXCLUDED_DIRS]
+            if profile == "windows-source":
+                for name in dirs:
+                    child = os.path.join(root, name)
+                    if _reparse_point(child):
+                        raise ValueError(
+                            "windows_source_reparse_point:"
+                            + os.path.relpath(child, REPO).replace(os.sep, "/"))
             for name in names:
                 rel = os.path.relpath(os.path.join(root, name), REPO)
+                if profile == "windows-source" and _reparse_point(
+                        os.path.join(root, name)):
+                    raise ValueError(
+                        "windows_source_reparse_point:"
+                        + rel.replace(os.sep, "/"))
                 files.append(rel.replace(os.sep, "/"))
     blocked = []
     for rel in files:
@@ -92,17 +149,31 @@ def _collect():
     if blocked:
         raise ValueError("敏感文件命中打包闸（拒绝打包）: "
                          + ", ".join(sorted(blocked)[:10]))
-    return sorted(files)
+    files = sorted(files)
+    if profile == "windows-source":
+        forbidden = [
+            path for path in files
+            if any(marker in path.lower()
+                   for marker in WINDOWS_FORBIDDEN_ARTIFACTS)
+        ]
+        if forbidden:
+            raise ValueError("windows_source_forbidden_artifact: "
+                             + ", ".join(sorted(forbidden)[:10]))
+        missing = sorted(set(WINDOWS_REQUIRED_PATHS) - set(files))
+        if missing:
+            raise ValueError("windows_source_missing_required: "
+                             + ", ".join(missing))
+    return files
 
 
-def build(output=None):
+def build(output=None, profile="linux"):
     """打包：归一化元数据 + 固定头 gzip → 可复现 tar.gz。
 
     tar 成员归一化（mtime=0/uid=gid=0/无名）之外，gzip 头的 mtime 与
     文件名也必须固定——否则两次打包哈希必不同。
     """
     ver = version()
-    files = _collect()
+    files = _collect(profile)
     out = _safe_path(output or os.path.join(REPO, "dist",
                                             f"scam-{ver}.tar.gz"))
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
@@ -145,6 +216,8 @@ def check(archive):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="发布打包（敏感面防护）")
     ap.add_argument("--dry-run", action="store_true", help="只列文件不落盘")
+    ap.add_argument("--profile", choices=("linux", "windows-source"),
+                    default="linux", help="source package profile")
     ap.add_argument("--output", help="输出路径（缺省 dist/scam-<ver>.tar.gz）")
     ap.add_argument("--check", metavar="ARCHIVE", help="扫描既有包敏感面")
     args = ap.parse_args(argv)
@@ -163,7 +236,7 @@ def main(argv=None):
         print("[OK] 未发现敏感文件")
         return 0
     try:
-        files = _collect()
+        files = _collect(args.profile)
     except ValueError as exc:
         print(f"[FAIL] {exc}")
         return 1
@@ -172,7 +245,7 @@ def main(argv=None):
             print(rel)
         print(f"-- 共 {len(files)} 个文件（未落盘）")
         return 0
-    path, digest, count = build(args.output)
+    path, digest, count = build(args.output, profile=args.profile)
     print(f"[OK] {path}")
     print(f"     files={count} sha256={digest}")
     print(f"     敏感面自查: python scripts/package_release.py "

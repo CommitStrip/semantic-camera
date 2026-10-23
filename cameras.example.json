@@ -6,7 +6,8 @@
     {
       "id": "front-door",
       "name": "前门",
-      "source": "rtsp://user:password@camera.example:554/Streaming/Channels/102",
+      "enabled": false,
+      "source": "rtsp://camera.invalid:554/Streaming/Channels/102",
       "source_kind": "rtsp",
       "grid": {
         "rows": 18,
@@ -23,9 +24,7 @@
       }
     }
   ],
-  "semantic_models": {
-    "channel": "local",
-    "model_path": "",
-    "timeout": 90
+  "l3": {
+    "enabled": false
   }
 }

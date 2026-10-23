@@ -442,10 +442,6 @@ def test_out_of_vocabulary_uncertainty_is_rejected(tmp_path):
     assert versions == [], versions
 
 
-@pytest.mark.xfail(
-    strict=False, run=True,
-    reason="依赖本机可用 L3 模型与低负载 worker 时序：CI 干净环境（无本地模型缓存/高负载）"
-           "下 worker 未落地，已知限制见 RELEASE_NOTES")
 def test_real_entry_scenarios(tmp_path):
     """真实生产入口场景（默认 nvr builder + 真实 Monitor/桥/worker/详情）。"""
     failed = {}
@@ -602,6 +598,12 @@ class _ScriptedSource:
         return None
 
     def read(self):
+        # The simulated capture clock must not race ahead while the previous
+        # scripted detection is still queued/running on a real worker thread.
+        # This is a source-fixture barrier, not a production scheduling wait.
+        before_read = getattr(type(self), "before_read", None)
+        if before_read is not None:
+            before_read()
         frames = type(self).frames
         dt = type(self).dt
         if self._i < len(frames):
@@ -658,11 +660,23 @@ class _RealEntry:
         self.fusions = []                  # 真实 submit 过的 fusion payload
         self.thread = None
         self._saved_source = None
-        _ScriptedSource.frames = [np.full((240, 320, 3), 40, dtype=np.uint8)
-                                  for _ in frames]
-        _ScriptedSource.dt = dt
-        _ScriptedSource.pace_s = pace_s
-        _ScriptedSource.ts = 1000.0
+        # Each scenario owns its frame sequence and simulated clock.  A previous
+        # camera thread can never read a later scenario's reset class state.
+        self.source_type = type("EntryScriptedSource", (_ScriptedSource,), {
+            "frames": [np.full((240, 320, 3), 40, dtype=np.uint8)
+                       for _ in frames],
+            "dt": dt, "pace_s": pace_s, "ts": 1000.0,
+            "before_read": staticmethod(self._await_scripted_l1),
+        })
+
+    def _await_scripted_l1(self):
+        deadline = _time.monotonic() + 5.0
+        while self.pipeline.oldest_unfinished_age_ms(REAL_CAM) is not None:
+            if self.stop_event.is_set():
+                return
+            if _time.monotonic() >= deadline:
+                raise AssertionError("scripted L1 computation did not finish")
+            self.stop_event.wait(0.001)
 
     # ------------------------------------------------------------------ 接线
     def start(self):
@@ -692,7 +706,7 @@ class _RealEntry:
         bridge.record_conclusion = record
         self.store.attach_result = attach
         self._saved_source = _nvr.CameraSource
-        _nvr.CameraSource = _ScriptedSource
+        _nvr.CameraSource = self.source_type
         self.pipeline.start()
         self.runtime.start()
         cam_cfg = {"id": REAL_CAM, "source": "c146-scripted",

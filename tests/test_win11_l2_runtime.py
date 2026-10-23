@@ -266,9 +266,8 @@ def feed_empty(store, cam, run, cfg, fid):
                                accepted=True, reject_reason=None)
 
 
-def _wait_until(predicate, timeout=20.0, interval=0.02):
-    # CI 运行器负载高时 worker 轮询会明显变慢：默认等待放宽到 20s，
-    # 断言内容不变（只等事实，不放宽事实）。
+def _wait_until(predicate, timeout=5.0, interval=0.02):
+    # Bounded guard only: predicates still wait for the exact asserted fact.
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():
@@ -591,9 +590,6 @@ def test_terminal_queue_eviction_settles_once_and_reports_missing_to_l4():
     runtime.stop()
 
 
-@pytest.mark.xfail(
-    strict=False, run=True,
-    reason="CI Windows 运行器的线程调度差异导致 worker 就绪等待超时；本机同平台稳定通过，已知限制见 RELEASE_NOTES")
 def test_terminal_dequeue_reject_old_config_continues_worker():
     """旧 config 任务在 dequeue 门禁拒收并结算该分支——worker 不退出，
     后续新 config 任务照常完成（C-138 §5 退出修复）。"""
@@ -610,18 +606,34 @@ def test_terminal_dequeue_reject_old_config_continues_worker():
         "cam", _stub_pkg(), window_key=window_key,
         task=_make_l3_task("cam", "r1", 1, handle.window_id)) is True
     runtime.set_camera_identity("cam", "r1", 2)   # 区域切换：旧 config 失效
+    stale_settled = threading.Event()
+    new_completed = threading.Event()
+    original_process = runtime._l3_process_entry
+
+    def process(task, context):
+        try:
+            return original_process(task, context)
+        finally:
+            config = task.window.config_version
+            if config == 1:
+                stale_settled.set()
+            elif config == 2:
+                new_completed.set()
+
+    runtime._l3_process_entry = process
     runtime.start()
     try:
-        assert _wait_until(lambda: runtime.snapshot()
-                           ["cameras"]["cam"]["settled_stale_identity"] == 1)
+        assert stale_settled.wait(timeout=10), "旧 config 分支未通过计数屏障收口"
+        assert runtime.snapshot()["cameras"]["cam"][
+            "settled_stale_identity"] == 1
         assert runtime._l3_thread.is_alive(), "拒收不是 worker 退出理由"
         assert runtime.history("cam", "l3") == [], "旧结果不入有效理解"
         # 封口 cfg1 窗口（全终态 → settled），新 config 窗口照常完成
         assert handle.release() is True
         assert runtime._seal_window(window_key) is True
         feed_ok(store, "cam", "r1", 2, 2, [])
-        assert _wait_until(lambda: runtime.snapshot()
-                           ["cameras"]["cam"]["l3_completed"] == 1)
+        assert new_completed.wait(timeout=10), "新 config 结果未通过计数屏障提交"
+        assert runtime.snapshot()["cameras"]["cam"]["l3_completed"] == 1
         l3_rows = runtime.history("cam", "l3")
         assert l3_rows[-1]["window_key"][2] == 2
         assert window_key not in runtime._open_windows
@@ -758,9 +770,6 @@ def test_terminal_stop_cancels_queue_and_open_windows():
 
 # ---- 4. 推理中 config 1→2：旧结果拒收，config=2 完成；另一相机继续 -----------
 
-@pytest.mark.xfail(
-    strict=False, run=True,
-    reason="CI Windows 运行器的线程调度差异导致 worker 就绪等待超时；本机同平台稳定通过，已知限制见 RELEASE_NOTES")
 def test_config_switch_mid_infer_old_rejected_new_completes():
     clock = FakeClock()
     store = MaterialsStore(clock=clock)
@@ -782,19 +791,40 @@ def test_config_switch_mid_infer_old_rejected_new_completes():
         runtime.set_camera_identity(cam, "r1", 1)
     feed_ok(store, "a", "r1", 1, 1, [])
     feed_ok(store, "b", "r1", 1, 1, [])
+    b_completed = threading.Event()
+    a_stale = threading.Event()
+    a_completed = threading.Event()
+    original_process = runtime._l3_process_entry
+
+    def process(task, context):
+        try:
+            return original_process(task, context)
+        finally:
+            camera = task.window.camera_id
+            config = task.window.config_version
+            if camera == "b":
+                b_completed.set()
+            elif camera == "a" and config == 1:
+                a_stale.set()
+            elif camera == "a" and config == 2:
+                a_completed.set()
+
+    runtime._l3_process_entry = process
     runtime.start()
     try:
         assert switched.wait(timeout=10), "A 的旧任务应进入推理"
         # 推理期间 B 相机照常被服务（忙相机不长期霸占）
-        assert _wait_until(lambda: runtime.snapshot()
-                           ["cameras"]["b"]["l3_completed"] == 1)
-        assert _wait_until(lambda: runtime.snapshot()
-                           ["cameras"]["a"]["settled_stale_identity"] == 1), \
+        assert b_completed.wait(timeout=10), "B 相机未通过完成计数屏障"
+        assert runtime.snapshot()["cameras"]["b"]["l3_completed"] == 1
+        assert a_stale.wait(timeout=10), \
             "推理后拒收：旧 config 结果不得发布"
+        assert runtime.snapshot()["cameras"]["a"][
+            "settled_stale_identity"] == 1
         # config=2 的新任务照常生产并完成
         feed_ok(store, "a", "r1", 2, 2, [])
-        assert _wait_until(lambda: runtime.snapshot()
-                           ["cameras"]["a"]["l3_completed"] == 1)
+        assert a_completed.wait(timeout=10), \
+            "A 相机新 config 未通过完成计数屏障"
+        assert runtime.snapshot()["cameras"]["a"]["l3_completed"] == 1
         a_rows = runtime.history("a", "l3")
         assert len(a_rows) == 1 and a_rows[0]["window_key"][2] == 2
         assert "旧 config 结果" not in str(a_rows)
@@ -1004,9 +1034,6 @@ def test_persist_dir_none_keeps_in_memory_history():
 
 # ---- C-137 既有语义保持 ------------------------------------------------------
 
-@pytest.mark.xfail(
-    strict=False, run=True,
-    reason="CI Windows 运行器的线程调度差异导致 worker 就绪等待超时；本机同平台稳定通过，已知限制见 RELEASE_NOTES")
 def test_single_package_exception_does_not_kill_worker(tmp_path):
     """M1：单包异常结构化记录后 worker 继续服务后续包。"""
     monitor = _make_monitor(tmp_path)
@@ -1031,10 +1058,24 @@ def test_single_package_exception_does_not_kill_worker(tmp_path):
                             [{"cls": "person", "conf": 0.9,
                               "bbox": [0.1, 0.1, 0.2, 0.2], "trackId": 1}],
                             accepted=True, reject_reason=None)
+    failed_and_settled = threading.Event()
+    original_process_handle = runtime._process_handle
+
+    def process_handle(handle):
+        try:
+            return original_process_handle(handle)
+        finally:
+            with runtime._lock:
+                counts = dict(runtime._counts.get("cam", {}))
+            if (counts.get("failed", 0) >= 2
+                    and counts.get("windows_settled", 0) >= 1):
+                failed_and_settled.set()
+
+    runtime._process_handle = process_handle
     runtime.start()
     try:
-        assert _wait_until(lambda: runtime.snapshot()
-                           ["cameras"]["cam"]["failed"] >= 2, timeout=30.0)
+        assert failed_and_settled.wait(timeout=10), \
+            "两次包异常及窗口收口未通过执行屏障"
         assert runtime._thread.is_alive(), "包异常不得杀死 worker"
         assert runtime.snapshot()["cameras"]["cam"]["failed"] == 2
         assert runtime.snapshot()["cameras"]["cam"]["windows_settled"] >= 1
@@ -1387,9 +1428,6 @@ def test_fusion_input_coord_space_derived_from_material_not_constant():
     runtime.stop()
 
 
-@pytest.mark.xfail(
-    strict=False, run=True,
-    reason="CI Windows 运行器的线程调度差异导致 worker 就绪等待超时；本机同平台稳定通过，已知限制见 RELEASE_NOTES")
 def test_fusion_input_frame_refs_carry_each_branch_actual_frames():
     """frame_refs 含每个分支实际使用的帧：全景=三帧（固定序位帧 ID）、
     局部=同区域三帧切片各自绑定的帧 ID（真实时间值+时间类型，缺帧序位
@@ -1558,7 +1596,7 @@ def test_stop_commit_between_gate_and_adjudication_refuses_branch_ok():
 
     def _probe():
         entered.set()
-        assert release.wait(timeout=30.0), "测试卡点：等待 stop 提交超时"
+        assert release.wait(timeout=10.0), "测试卡点：等待 stop 提交超时"
 
     runtime._publish_gate_probe = _probe
     result = {}
@@ -1571,7 +1609,7 @@ def test_stop_commit_between_gate_and_adjudication_refuses_branch_ok():
     publisher = threading.Thread(target=_publish, name="publisher")
     publisher.start()
     try:
-        assert entered.wait(timeout=30.0), "发布门禁初检应先行通过"
+        assert entered.wait(timeout=10.0), "发布门禁初检应先行通过"
         # 另一线程提交 stop（冻结 §1：stop 调用方显式提交通知路径，
         # 与 stop() 内部同一提交点）
         runtime._stop.set()
@@ -1579,7 +1617,7 @@ def test_stop_commit_between_gate_and_adjudication_refuses_branch_ok():
         assert runtime.snapshot()["l3"]["stop_commits"] >= 1, \
             "stop_commit 计数应 ≥1"
         release.set()                      # 释放裁决卡点
-        publisher.join(timeout=30.0)
+        publisher.join(timeout=10.0)
         assert not publisher.is_alive()
         payload, reject = result["r"]
         assert payload is None, "stop 提交后不得返回成功 payload"
@@ -1590,7 +1628,7 @@ def test_stop_commit_between_gate_and_adjudication_refuses_branch_ok():
     finally:
         release.set()
         runtime._publish_gate_probe = None
-        publisher.join(timeout=30.0)
+        publisher.join(timeout=10.0)
         runtime.stop()
 
 
@@ -1616,16 +1654,16 @@ def test_stop_commit_racing_worker_publish_refuses_branch_ok():
 
     def _probe():
         gate_passed.set()
-        assert release.wait(timeout=30.0), "测试卡点：等待 stop 提交超时"
+        assert release.wait(timeout=10.0), "测试卡点：等待 stop 提交超时"
 
     runtime._publish_gate_probe = _probe
     runtime.start()
     stopper = None
     stop_result = {}
     try:
-        assert gate_passed.wait(timeout=30.0), "发布门禁初检应先行通过"
+        assert gate_passed.wait(timeout=10.0), "发布门禁初检应先行通过"
         stopper = threading.Thread(
-            target=lambda: stop_result.update(ok=runtime.stop(timeout=30.0)),
+            target=lambda: stop_result.update(ok=runtime.stop(timeout=10.0)),
             name="stopper")
         stopper.start()
         # stop 提交（commit_epoch 锁内递增）先于释放卡点：确定性先后；
@@ -1668,7 +1706,7 @@ def test_identity_update_not_blocked_by_slow_disk_append():
 
     def _slow_append(camera, kind, record):
         append_entered.set()
-        assert disk_release.wait(timeout=30.0), "慢磁盘卡点超时"
+        assert disk_release.wait(timeout=10.0), "慢磁盘卡点超时"
         return real_append(camera, kind, record)
 
     runtime.understanding.append = _slow_append
@@ -1678,7 +1716,7 @@ def test_identity_update_not_blocked_by_slow_disk_append():
         name="slow-disk")
     slow.start()
     try:
-        assert append_entered.wait(timeout=30.0), "慢磁盘 append 应已进入"
+        assert append_entered.wait(timeout=10.0), "慢磁盘 append 应已进入"
         identity_done = threading.Event()
 
         def _update_identity():
@@ -1694,7 +1732,7 @@ def test_identity_update_not_blocked_by_slow_disk_append():
         assert runtime._registry["cam"] == ("r1", 1)
     finally:
         disk_release.set()
-        slow.join(timeout=30.0)
+        slow.join(timeout=10.0)
         runtime.stop()
 
 
@@ -1741,7 +1779,7 @@ def test_publish_age_exceeded_in_final_lock_rejects_expired():
 
     def _probe():
         gate_passed.set()
-        assert release_probe.wait(timeout=30.0), "测试卡点超时"
+        assert release_probe.wait(timeout=10.0), "测试卡点超时"
 
     runtime._publish_gate_probe = _probe
     result = {}
@@ -1755,14 +1793,14 @@ def test_publish_age_exceeded_in_final_lock_rejects_expired():
     publisher.start()
     locked = False
     try:
-        assert gate_passed.wait(timeout=30.0), "发布初检应先行通过（未过期）"
-        locked = runtime._l3_lock.acquire(timeout=30.0)
+        assert gate_passed.wait(timeout=10.0), "发布初检应先行通过（未过期）"
+        locked = runtime._l3_lock.acquire(timeout=10.0)
         assert locked, "测试线程应取得 _l3_lock 阻塞最终裁决"
         clock.advance(2.0)            # 锁等待期间越过发布时效（1.0s 上限）
         runtime._l3_lock.release()
         locked = False
         release_probe.set()           # 发布线程走向 _l3_lock（此刻无竞争）
-        publisher.join(timeout=30.0)
+        publisher.join(timeout=10.0)
         assert not publisher.is_alive()
         payload, reject = result["r"]
         assert payload is None, "锁内过期不得返回成功 payload"
@@ -1785,7 +1823,7 @@ def test_publish_age_exceeded_in_final_lock_rejects_expired():
             runtime._l3_lock.release()
         release_probe.set()
         runtime._publish_gate_probe = None
-        publisher.join(timeout=30.0)
+        publisher.join(timeout=10.0)
         runtime.stop()
 
 
@@ -1810,7 +1848,7 @@ def test_publish_age_recheck_in_lock_grants_fresh_success_real_path():
 
     def _probe():
         gate_passed.set()
-        assert release_probe.wait(timeout=30.0), "测试卡点超时"
+        assert release_probe.wait(timeout=10.0), "测试卡点超时"
 
     runtime._publish_gate_probe = _probe
     bucket = {}
@@ -1818,15 +1856,15 @@ def test_publish_age_recheck_in_lock_grants_fresh_success_real_path():
     worker = _spawn_l3_worker(runtime, bucket, done)
     locked = False
     try:
-        assert gate_passed.wait(timeout=30.0), "发布初检应先行通过"
-        locked = runtime._l3_lock.acquire(timeout=30.0)
+        assert gate_passed.wait(timeout=10.0), "发布初检应先行通过"
+        locked = runtime._l3_lock.acquire(timeout=10.0)
         assert locked
         clock.advance(1.0)            # 锁等待期间老化但未越过 5.0s 上限
         runtime._l3_lock.release()
         locked = False
         release_probe.set()
-        assert done.wait(timeout=30.0)
-        worker.join(timeout=30.0)
+        assert done.wait(timeout=10.0)
+        worker.join(timeout=10.0)
         assert "error" not in bucket, bucket.get("error")
         assert runtime._open_windows[window_key][
             "branches"][branch_key] == "branch_ok", "未过期应正常授予"
@@ -1842,8 +1880,8 @@ def test_publish_age_recheck_in_lock_grants_fresh_success_real_path():
             runtime._l3_lock.release()
         release_probe.set()
         runtime._publish_gate_probe = None
-        done.wait(timeout=30.0)
-        worker.join(timeout=30.0)
+        done.wait(timeout=10.0)
+        worker.join(timeout=10.0)
         runtime.stop()
 
 
@@ -1870,18 +1908,18 @@ def test_publish_age_expires_in_lock_real_path_settles_expired_once():
 
     def _probe():
         gate_passed.set()
-        assert release_probe.wait(timeout=30.0), "测试卡点超时"
+        assert release_probe.wait(timeout=10.0), "测试卡点超时"
 
     runtime._publish_gate_probe = _probe
     bucket = {}
     done = threading.Event()
     worker = _spawn_l3_worker(runtime, bucket, done)
     try:
-        assert gate_passed.wait(timeout=30.0), "发布初检应先行通过（未过期）"
+        assert gate_passed.wait(timeout=10.0), "发布初检应先行通过（未过期）"
         clock.advance(2.0)            # 卡点期间越过发布时效（1.0s 上限）
         release_probe.set()
-        assert done.wait(timeout=30.0)
-        worker.join(timeout=30.0)
+        assert done.wait(timeout=10.0)
+        worker.join(timeout=10.0)
         assert "error" not in bucket, bucket.get("error")
         counts = runtime.snapshot()["cameras"]["cam"]
         assert runtime._open_windows[window_key][
@@ -1899,8 +1937,8 @@ def test_publish_age_expires_in_lock_real_path_settles_expired_once():
     finally:
         release_probe.set()
         runtime._publish_gate_probe = None
-        done.wait(timeout=30.0)
-        worker.join(timeout=30.0)
+        done.wait(timeout=10.0)
+        worker.join(timeout=10.0)
         runtime.stop()
 
 
@@ -1927,20 +1965,20 @@ def test_l3_publish_stop_commits_first_no_success_grant():
 
     def _probe():
         gate_passed.set()
-        assert release_probe.wait(timeout=30.0), "测试卡点超时"
+        assert release_probe.wait(timeout=10.0), "测试卡点超时"
 
     runtime._publish_gate_probe = _probe
     bucket = {}
     done = threading.Event()
     worker = _spawn_l3_worker(runtime, bucket, done)
     try:
-        assert gate_passed.wait(timeout=30.0), "发布初检应先行通过"
+        assert gate_passed.wait(timeout=10.0), "发布初检应先行通过"
         runtime._stop.set()
         runtime._commit_stop()        # stop 先提交（锁内递增 commit_epoch）
         assert runtime.snapshot()["l3"]["stop_commits"] >= 1
         release_probe.set()
-        assert done.wait(timeout=30.0)
-        worker.join(timeout=30.0)
+        assert done.wait(timeout=10.0)
+        worker.join(timeout=10.0)
         assert "error" not in bucket, bucket.get("error")
         counts = runtime.snapshot()["cameras"]["cam"]
         assert runtime._open_windows[window_key][
@@ -1958,8 +1996,8 @@ def test_l3_publish_stop_commits_first_no_success_grant():
     finally:
         release_probe.set()
         runtime._publish_gate_probe = None
-        done.wait(timeout=30.0)
-        worker.join(timeout=30.0)
+        done.wait(timeout=10.0)
+        worker.join(timeout=10.0)
         runtime.stop()
 
 
@@ -1984,7 +2022,7 @@ def test_l3_publish_granted_then_stop_keeps_history_settles_once():
     def _gated_append(camera, kind, record):
         if kind == "l3":
             append_started.set()
-            assert allow_append.wait(timeout=30.0), "append 卡点超时"
+            assert allow_append.wait(timeout=10.0), "append 卡点超时"
         return real_append(camera, kind, record)
 
     runtime.understanding.append = _gated_append
@@ -1992,13 +2030,13 @@ def test_l3_publish_granted_then_stop_keeps_history_settles_once():
     done = threading.Event()
     worker = _spawn_l3_worker(runtime, bucket, done)
     try:
-        assert append_started.wait(timeout=30.0), "L3 应进入锁外保存"
+        assert append_started.wait(timeout=10.0), "L3 应进入锁外保存"
         branch_key = window_key + ("panorama", None, 11)
         assert runtime._open_windows[window_key][
             "branches"][branch_key] == "branch_ok", "发布先授予"
         allow_append.set()            # 保存完成后再提交 stop（确定性先后）
-        assert done.wait(timeout=30.0)
-        worker.join(timeout=30.0)
+        assert done.wait(timeout=10.0)
+        worker.join(timeout=10.0)
         assert "error" not in bucket, bucket.get("error")
         rows = runtime.history("cam", "l3")
         assert len(rows) == 1, "完整身份历史可保存"
@@ -2017,8 +2055,8 @@ def test_l3_publish_granted_then_stop_keeps_history_settles_once():
         assert len(runtime.history("cam", "l4")) == 1
     finally:
         allow_append.set()
-        done.wait(timeout=30.0)
-        worker.join(timeout=30.0)
+        done.wait(timeout=10.0)
+        worker.join(timeout=10.0)
         runtime.stop()
 
 
@@ -2045,7 +2083,7 @@ def test_l3_granted_slow_save_identity_update_not_blocked():
     def _slow_append(camera, kind, record):
         if kind == "l3" and camera == "a":
             append_entered.set()
-            assert disk_release.wait(timeout=30.0), "慢磁盘卡点超时"
+            assert disk_release.wait(timeout=10.0), "慢磁盘卡点超时"
         return real_append(camera, kind, record)
 
     runtime.understanding.append = _slow_append
@@ -2053,7 +2091,7 @@ def test_l3_granted_slow_save_identity_update_not_blocked():
     done = threading.Event()
     worker = _spawn_l3_worker(runtime, bucket, done)
     try:
-        assert append_entered.wait(timeout=30.0), "已授予的 L3 应进入保存"
+        assert append_entered.wait(timeout=10.0), "已授予的 L3 应进入保存"
         identity_done = threading.Event()
 
         def _update_identity():
@@ -2070,8 +2108,8 @@ def test_l3_granted_slow_save_identity_update_not_blocked():
         assert runtime._registry["a"] == ("r1", 1)
         assert runtime._registry["b"] == ("r1", 2)
         disk_release.set()
-        assert done.wait(timeout=30.0)
-        worker.join(timeout=30.0)
+        assert done.wait(timeout=10.0)
+        worker.join(timeout=10.0)
         assert "error" not in bucket, bucket.get("error")
         rows = runtime.history("a", "l3")
         assert len(rows) == 1, "释放后保存完成"
@@ -2079,8 +2117,8 @@ def test_l3_granted_slow_save_identity_update_not_blocked():
             "a 身份未变 → L4 照常产出"
     finally:
         disk_release.set()
-        done.wait(timeout=30.0)
-        worker.join(timeout=30.0)
+        done.wait(timeout=10.0)
+        worker.join(timeout=10.0)
         runtime.stop()
 
 
@@ -2106,7 +2144,7 @@ def test_l3_save_config_switch_keeps_old_identity_and_blocks_l4():
     def _gated_append(camera, kind, record):
         if kind == "l3":
             append_started.set()
-            assert allow_append.wait(timeout=30.0), "append 卡点超时"
+            assert allow_append.wait(timeout=10.0), "append 卡点超时"
         return real_append(camera, kind, record)
 
     runtime.understanding.append = _gated_append
@@ -2114,12 +2152,12 @@ def test_l3_save_config_switch_keeps_old_identity_and_blocks_l4():
     done = threading.Event()
     worker = _spawn_l3_worker(runtime, bucket, done)
     try:
-        assert append_started.wait(timeout=30.0), "L3 应进入锁外保存"
+        assert append_started.wait(timeout=10.0), "L3 应进入锁外保存"
         runtime.update_camera_identity("cam", "r1", 2)   # 保存期间切配置
         assert runtime._registry["cam"] == ("r1", 2)
         allow_append.set()
-        assert done.wait(timeout=30.0)
-        worker.join(timeout=30.0)
+        assert done.wait(timeout=10.0)
+        worker.join(timeout=10.0)
         assert "error" not in bucket, bucket.get("error")
         rows = runtime.history("cam", "l3")
         assert len(rows) == 1
@@ -2153,8 +2191,8 @@ def test_l3_save_config_switch_keeps_old_identity_and_blocks_l4():
         assert runtime._seal_window(window_key2) is True
     finally:
         allow_append.set()
-        done.wait(timeout=30.0)
-        worker.join(timeout=30.0)
+        done.wait(timeout=10.0)
+        worker.join(timeout=10.0)
         runtime.stop()
 
 
@@ -2464,19 +2502,19 @@ def test_l4_auth_identity_change_between_check_and_authorize_rejects():
 
     def _auth_probe():
         probe_entered.set()
-        assert release_probe.wait(timeout=30.0), "授权卡点超时"
+        assert release_probe.wait(timeout=10.0), "授权卡点超时"
 
     runtime._l4_auth_gate_probe = _auth_probe
     bucket = {}
     done = threading.Event()
     worker = _spawn_l3_worker(runtime, bucket, done)
     try:
-        assert probe_entered.wait(timeout=30.0), \
+        assert probe_entered.wait(timeout=10.0), \
             "L4 应走到授权前卡点（检查已过、授权未做）"
         runtime.update_camera_identity("cam", "r1", 2)   # 检查→授权之间
         release_probe.set()
-        assert done.wait(timeout=30.0)
-        worker.join(timeout=30.0)
+        assert done.wait(timeout=10.0)
+        worker.join(timeout=10.0)
         assert "error" not in bucket, bucket.get("error")
         counts = runtime.snapshot()["cameras"]["cam"]
         assert counts["l4_versions"] == 0
@@ -2487,8 +2525,8 @@ def test_l4_auth_identity_change_between_check_and_authorize_rejects():
     finally:
         release_probe.set()
         runtime._l4_auth_gate_probe = None
-        done.wait(timeout=30.0)
-        worker.join(timeout=30.0)
+        done.wait(timeout=10.0)
+        worker.join(timeout=10.0)
         runtime.stop()
 
 
@@ -2513,7 +2551,7 @@ def test_l4_auth_grant_then_identity_switch_write_completes_old_identity():
     def _gated_append(camera, kind, record):
         if kind == "l4":
             append_started.set()   # 程序顺序：进入 append ⇒ 授权已通过
-            assert release_append.wait(timeout=30.0), "慢盘卡点超时"
+            assert release_append.wait(timeout=10.0), "慢盘卡点超时"
         return real_append(camera, kind, record)
 
     runtime.understanding.append = _gated_append
@@ -2521,11 +2559,11 @@ def test_l4_auth_grant_then_identity_switch_write_completes_old_identity():
     done = threading.Event()
     worker = _spawn_l3_worker(runtime, bucket, done)
     try:
-        assert append_started.wait(timeout=30.0), "L4 应已授权并进入锁外写盘"
+        assert append_started.wait(timeout=10.0), "L4 应已授权并进入锁外写盘"
         runtime.update_camera_identity("cam", "r1", 2)   # 写入期间切配置
         release_append.set()
-        assert done.wait(timeout=30.0)
-        worker.join(timeout=30.0)
+        assert done.wait(timeout=10.0)
+        worker.join(timeout=10.0)
         assert "error" not in bucket, bucket.get("error")
         rows = runtime.history("cam", "l4")
         assert len(rows) == 1, "已授权版本写入照常完成（不追回）"
@@ -2536,8 +2574,8 @@ def test_l4_auth_grant_then_identity_switch_write_completes_old_identity():
         assert counts["l4_auth_rejected"] == 0
     finally:
         release_append.set()
-        done.wait(timeout=30.0)
-        worker.join(timeout=30.0)
+        done.wait(timeout=10.0)
+        worker.join(timeout=10.0)
         runtime.stop()
 
 
@@ -2565,7 +2603,7 @@ def test_l4_auth_stop_committed_allows_authorized_version_completion():
     def _gated_append(camera, kind, record):
         if kind == "l4":
             append_started.set()   # 进入 append ⇒ 授权已通过（先于 stop）
-            assert release_append.wait(timeout=30.0), "慢盘卡点超时"
+            assert release_append.wait(timeout=10.0), "慢盘卡点超时"
         return real_append(camera, kind, record)
 
     runtime.understanding.append = _gated_append
@@ -2573,14 +2611,14 @@ def test_l4_auth_stop_committed_allows_authorized_version_completion():
     done = threading.Event()
     worker = _spawn_l3_worker(runtime, bucket, done)
     try:
-        assert append_started.wait(timeout=30.0)
+        assert append_started.wait(timeout=10.0)
         runtime._stop.set()
         runtime._commit_stop()   # stop 在授权之后提交（不追回）
         assert _wait_until(lambda: runtime.snapshot()
                            ["l3"]["stop_commits"] >= 1)
         release_append.set()
-        assert done.wait(timeout=30.0)
-        worker.join(timeout=30.0)
+        assert done.wait(timeout=10.0)
+        worker.join(timeout=10.0)
         assert "error" not in bucket, bucket.get("error")
         rows = runtime.history("cam", "l4")
         assert len(rows) == 1, "stop 前已授权的最后一个版本允许完成"
@@ -2591,8 +2629,8 @@ def test_l4_auth_stop_committed_allows_authorized_version_completion():
         assert counts["l4_versions"] == 1
     finally:
         release_append.set()
-        done.wait(timeout=30.0)
-        worker.join(timeout=30.0)
+        done.wait(timeout=10.0)
+        worker.join(timeout=10.0)
         runtime.stop()
 
 
@@ -2617,7 +2655,7 @@ def test_l4_auth_lock_not_held_during_slow_disk_write():
     def _slow_append(camera, kind, record):
         if kind == "l4":
             append_started.set()
-            assert release_append.wait(timeout=30.0), "慢磁盘卡点超时"
+            assert release_append.wait(timeout=10.0), "慢磁盘卡点超时"
         return real_append(camera, kind, record)
 
     runtime.understanding.append = _slow_append
@@ -2625,7 +2663,7 @@ def test_l4_auth_lock_not_held_during_slow_disk_write():
     done = threading.Event()
     worker = _spawn_l3_worker(runtime, bucket, done)
     try:
-        assert append_started.wait(timeout=30.0), "L4 应进入锁外写盘"
+        assert append_started.wait(timeout=10.0), "L4 应进入锁外写盘"
         locked = runtime._l4_auth_lock.acquire(timeout=5.0)
         assert locked, "授权短锁不得被慢磁盘持住（锁内零磁盘 I/O）"
         runtime._l4_auth_lock.release()
@@ -2642,16 +2680,16 @@ def test_l4_auth_lock_not_held_during_slow_disk_write():
             "慢磁盘期间身份更新不得被授权锁/磁盘锁阻塞"
         assert identity_done.is_set()
         release_append.set()
-        assert done.wait(timeout=30.0)
-        worker.join(timeout=30.0)
+        assert done.wait(timeout=10.0)
+        worker.join(timeout=10.0)
         assert "error" not in bucket, bucket.get("error")
         rows = runtime.history("cam", "l4")
         assert len(rows) == 1, "授权先于身份变化（append 先进入）→ 照常完成"
         assert rows[0]["config_version"] == 1
     finally:
         release_append.set()
-        done.wait(timeout=30.0)
-        worker.join(timeout=30.0)
+        done.wait(timeout=10.0)
+        worker.join(timeout=10.0)
         runtime.stop()
 
 
@@ -2739,7 +2777,7 @@ def test_real_stop_interleaves_authorized_append_saves_once_no_new_grant(
     def _gated_append(camera, kind, record):
         if kind == "l3":
             append_started.set()
-            assert release_append.wait(timeout=30.0), "append 卡点超时"
+            assert release_append.wait(timeout=10.0), "append 卡点超时"
         return real_append(camera, kind, record)
 
     runtime.understanding.append = _gated_append
@@ -2747,7 +2785,7 @@ def test_real_stop_interleaves_authorized_append_saves_once_no_new_grant(
     done = threading.Event()
     worker = _spawn_l3_worker(runtime, bucket, done)
     try:
-        assert append_started.wait(timeout=30.0), \
+        assert append_started.wait(timeout=10.0), \
             "branch_ok 已授权、进入锁外保存"
         branch_key = window_key + ("panorama", None, 11)
         assert runtime._open_windows[window_key][
@@ -2758,8 +2796,8 @@ def test_real_stop_interleaves_authorized_append_saves_once_no_new_grant(
         assert _wait_until(lambda: runtime.snapshot()
                            ["l3"]["stop_commits"] >= 1)
         release_append.set()
-        assert done.wait(timeout=30.0)
-        worker.join(timeout=30.0)
+        assert done.wait(timeout=10.0)
+        worker.join(timeout=10.0)
         assert not worker.is_alive(), "工作线程有界收束"
         assert "error" not in bucket, bucket.get("error")
         # 授权历史恰好保存一次（真实 store 落盘；不重复终态）
@@ -2785,8 +2823,8 @@ def test_real_stop_interleaves_authorized_append_saves_once_no_new_grant(
         assert runtime._open_windows == {}
     finally:
         release_append.set()
-        done.wait(timeout=30.0)
-        worker.join(timeout=30.0)
+        done.wait(timeout=10.0)
+        worker.join(timeout=10.0)
         runtime.stop()
 
 
@@ -2902,10 +2940,6 @@ def test_understanding_summary_matches_summary_line_and_analyzing(tmp_path):
     assert runtime.stop() is True
 
 
-@pytest.mark.xfail(
-    strict=False, run=True,
-    reason="顺序相关的偶发失败：单独运行通过、全量套件中偶发（模块级全局钩子），"
-           "已知限制见 RELEASE_NOTES")
 def test_source_capture_hook_receives_real_frames_via_l2_path():
     """C-142 主会话钩子：source_capture 注入后在原始全帧在手位置触发。
 
@@ -3135,9 +3169,6 @@ def test_c147_trace_default_zero_behavior():
     assert probe.counts()["l3_enqueued"] >= 1
 
 
-@pytest.mark.xfail(
-    strict=False, run=True,
-    reason="CI Windows 运行器的线程调度差异导致 worker 就绪等待超时；本机同平台稳定通过，已知限制见 RELEASE_NOTES")
 def test_c147_trace_sink_covers_lifecycle_json_safe():
     """注入 sink：生命周期事件全覆盖、mono_ns 单调、JSON-safe、字段受控。"""
     import json as _json

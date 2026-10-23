@@ -5,11 +5,12 @@
 - URL 三层校验：协议白名单 + 主机边界 + 解析后 IP 阻断私网/环回/链路本地/保留段；
 - 本地通道（数据不出 NVR）允许环回与私网；云端通道强制 https+公网（SSRF 防线）；
 - urllib 默认跟随重定向——用不跟随重定向的 opener 防重定向绕过 SSRF；
-- 所有调用带超时；故障返回 None（上层降级模板占位，不阻塞快路径）。
+- 所有调用带超时；本地通道故障可返回 None，云端故障显式给出脱敏错误。
 """
 
 import json
 import os
+import re
 import socket
 import threading
 import time
@@ -86,6 +87,21 @@ def _extract_json(text):
         return None
 
 
+class CloudProviderError(RuntimeError):
+    """Structured cloud error without original transport details."""
+
+    def __init__(self, code, *, status=None, detail=None):
+        self.code = str(code)
+        self.status = status
+        self.detail = detail
+        message = self.code
+        if status is not None:
+            message += f":{status}"
+        if detail is not None:
+            message += f":{detail}"
+        super().__init__(message)
+
+
 class LocalOllama:
     """本地 ollama（OpenAI 兼容端点）。数据不出 NVR——仅允许环回/私网。"""
 
@@ -153,12 +169,45 @@ class CloudOpenAICompat:
         u = urlsplit(base)
         if u.scheme != "https":
             raise ValueError("云端通道必须 https")
+        if u.username is not None or u.password is not None:
+            raise ValueError("云端通道禁止 URL 凭据")
+        if u.query or u.fragment:
+            raise ValueError("云端通道禁止 URL 查询参数或片段")
         # 解析 DNS 后逐 IP 阻断私网/环回/链路本地（不只查字面 IP）
         self.host, _ = validate_base(base, allow_local=False, allow_public=True)
         self.base = base.rstrip("/")
         self.model = model
-        self.key = os.environ.get(key_env, "")
+        key = os.environ.get(key_env, "")
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError("云端通道缺少密钥")
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in key):
+            raise ValueError("云端通道密钥包含控制字符")
+        self.key = key
         self.timeout = timeout
+
+    @staticmethod
+    def _context_text(context):
+        """Serialize context to deterministic chat text."""
+        if context is None:
+            return ""
+        if isinstance(context, str):
+            return context
+        try:
+            return json.dumps(context, ensure_ascii=False, sort_keys=True)
+        except (TypeError, ValueError):
+            return str(context)
+
+    @staticmethod
+    def _safe_status(exc):
+        status = getattr(exc, "code", None)
+        if type(status) is int and 100 <= status <= 599:
+            return status
+        try:
+            text = str(exc)
+        except Exception:
+            return None
+        match = re.search(r"\bHTTP\s+([1-5]\d\d)\b", text, re.IGNORECASE)
+        return int(match.group(1)) if match else None
 
     def understand(self, prompt, frames_b64, context=None):
         content = [{"type": "text", "text": prompt}]
@@ -169,13 +218,21 @@ class CloudOpenAICompat:
         body = {"model": self.model, "stream": False, "temperature": 0,
                 "messages": [{"role": "system", "content": self._context_text(context)},
                              {"role": "user", "content": content}]}
-        headers = {"Authorization": f"Bearer {self.key}"} if self.key else None
+        headers = {"Authorization": f"Bearer {self.key}"}
         try:
             resp = _post_json(self.base + "/v1/chat/completions", body,
                               self.timeout, headers)
+        except Exception as exc:
+            status = self._safe_status(exc)
+            if status is not None:
+                raise CloudProviderError("cloud_http_error", status=status) from None
+            raise CloudProviderError(
+                "cloud_transport_failed", detail=type(exc).__name__) from None
+        try:
             content = resp["choices"][0]["message"]["content"]
-        except Exception:
-            return None
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            raise CloudProviderError(
+                "cloud_bad_response", detail=type(exc).__name__) from None
         return _extract_json(content)
 
 

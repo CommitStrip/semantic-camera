@@ -30,7 +30,7 @@ A budget-aware semantic video event runtime for Linux NVR and Windows 11
 - **快慢分层**——T0 门控逐帧 0.4ms → T1 检测运动触发 → 告警路径零模型时延；慢系统在预算内工作
 - **网格圈选**——方格点选，管理员画格子定义重点管理区域
 - **自定义报警模板**——结构条件实时比对
-- **双模型通道**——本地 ollama（数据不出本机）/ 云端 OpenAI 兼容 API，每次调用显式确认
+- **可选图片理解**——Windows 可选择本地模型或显式配置云端图片 API；云端需同意外发采样图片与提示，并可能产生服务费用。启用后运行时按配置请求，不是每次另弹确认。
 - **首次环境基线（Win11）**——向导式版本化场景基线，原始画面哈希核验；识别绝不自动运行、绝不自动变成规则
 - **事件即用即归档**——SQLite 全程可审计；工作台仅监听本机回环
 
@@ -39,11 +39,11 @@ A budget-aware semantic video event runtime for Linux NVR and Windows 11
 | 版本 | 独立入口 | 产品重点 | 发布门禁 |
 |---|---|---|---|
 | Linux NVR 版 | `python -m scam.linux_nvr` | 常驻服务、多相机、录像、远程运维、24h 稳态 | Linux CI + systemd + 真机浸泡 |
-| Win11 值守工作站版 | `python -m scam.win11` | 本机交互、首次环境基线、事件/确认链、交付打包 | Windows CI + 原生 Win11 验收（文件源闭环已通过；真实 RTSP 待验证） |
+| Win11 值守工作站版 | `python -m scam.win11` | 本机交互、首次设置、事件/证据审查、桌面打包 | 开发用途；安装身份、长稳、再分发条件与语义质量须针对具体包验收 |
 
 两版共享 `scam` 领域核心，但入口、默认值、部署链和验收报告分别维护。`python -m scam.nvr` 仅为旧部署兼容入口。
 
-运维（安装 / 升级 / 回滚 / 备份恢复）见[运维 Runbook](docs/linux-operations-runbook.md)。
+Linux 运维见[运维 Runbook](docs/linux-operations-runbook.md)。Windows 安装、备份、卸载与云端隐私见[Windows 使用说明](docs/windows-user-guide.md)。
 
 ## 🚀 快速开始
 
@@ -100,7 +100,10 @@ powershell -ExecutionPolicy Bypass -File deploy\install-win11.ps1
 deploy\start-win11.bat
 ```
 
-等价入口：`python -m scam.win11`。
+源码等价入口：`python -m scam.win11`。
+
+桌面包请先读[Windows 使用说明](docs/windows-user-guide.md)与[安装器构建说明](packaging/windows/README.md)，核对包名、版本和 SHA-256。源码修改不会自动更新已有二进制包；应以对应包的能力说明和验证范围为准。
+[配置示例](cameras.example.json)不含凭据且默认禁用相机；需替换地址、准备模型资源并启用相机后使用，真实配置不要提交到 Git。
 
 ## 🏗️ 架构
 
@@ -141,7 +144,7 @@ CI 三个作业（[工作流](.github/workflows/ci.yml)）：
 - **test（Linux，Python 3.10 与 3.12）**——部署脚本语法（`bash -n`）、systemd unit 单一真值渲染 + `systemd-analyze verify`、全量测试（含 Linux 服务级 smoke）、Linux NVR 版本契约、发布打包门（敏感面双闸 + 可复现打包自检）
 - **test-windows**——全量测试（服务级 smoke 自动跳过）、发布打包 dry-run、平台层 smoke（UTF-8 输出与数据目录）、Win11 入口 smoke、部署脚本 PowerShell 5.1 与 7 双解析
 
-`main` 最近一次 CI：#61（2026-09-23）三作业全绿；本发布提交推送后将重跑同一工作流。
+历史 CI 结果不代表当前源码或二进制包的状态；应针对实际使用的版本执行检查。
 
 ## 📁 项目结构
 
@@ -187,7 +190,7 @@ docs/                    运维 Runbook
 
 ## ⚠️ 已知限制（诚实清单——v0.1.0-beta）
 
-- **真实 RTSP 摄像头尚未验证**：Win11 全部闭环证据来自录像素材回放。实机摄像头验收需要授权的 RTSP 输入，是下一里程碑；
+- **完整实机语义闭环尚未验收**：取流、对象检测和关系推理已有分项证据，但不能据此宣称当前包的模型质量或完整用户闭环通过；上表历史 79 事件结果来自录像回放；
 - **语义描述质量未验证**：5 条模型输出的人工帧级比对中 1 条忠实、4 条有错（场景误识别、时间戳编造、过度自信标注）。界面因此把每个模型版本呈现为未核实补充；模型文本永远不能关闭事件、压制提醒或解除告警；
 - Linux 原生运维链路、24 小时浸泡与隐私网络审计**未验证**；双相机与长时间运行证据待补；
 - 录像**默认关闭**；需要片段证据时按相机显式开启；
@@ -204,4 +207,4 @@ docs/                    运维 Runbook
 
 ## License
 
-MIT，见 [LICENSE](LICENSE)。
+项目代码采用 MIT，见 [LICENSE](LICENSE)。第三方代码、模型权重和其他资产分别适用其条款；项目许可证不代表整包第三方资产均可无条件再分发。

@@ -59,6 +59,8 @@ jobs:
           pip install -e ".[detect,vision]" pytest transformers tokenizers safetensors
       - name: Run tests (服务级 smoke 在 Windows 自动跳过)
         run: python -m pytest tests/ -v
+      - name: Windows source package completeness
+        run: python scripts/package_release.py --profile windows-source --dry-run
       - name: Release packaging dry-run (敏感面闸跨平台)
         shell: bash
         run: |

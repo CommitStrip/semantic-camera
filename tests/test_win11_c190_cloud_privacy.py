@@ -1,7 +1,7 @@
 """C190 offline cloud privacy contract tests.
 
-No live HTTP client reaches the network. Legacy-provider defects remain frozen
-as strict xfails. The independent win11_l3_cloud interface is now exercised
+No live HTTP client reaches the network. Legacy-provider privacy contracts and
+the independent win11_l3_cloud interface are exercised
 directly with injected transports.
 """
 
@@ -69,10 +69,6 @@ def test_cloud_http_base_rejected_without_dns(monkeypatch):
         models.CloudOpenAICompat("http://api.example.test", "m")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="current CloudOpenAICompat accepts an empty key instead of rejecting",
-)
 def test_current_cloud_missing_key_must_reject(monkeypatch):
     _public_dns(monkeypatch)
     monkeypatch.setenv("C190_KEY", "")
@@ -82,10 +78,6 @@ def test_current_cloud_missing_key_must_reject(monkeypatch):
         )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="current CloudOpenAICompat calls undefined _context_text and swallows it",
-)
 def test_current_cloud_context_method_must_exist(monkeypatch):
     _public_dns(monkeypatch)
     monkeypatch.setenv("C190_KEY", "test-only")
@@ -95,10 +87,6 @@ def test_current_cloud_context_method_must_exist(monkeypatch):
     assert callable(getattr(provider, "_context_text", None))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="current CloudOpenAICompat retains userinfo/query secrets in base",
-)
 def test_current_cloud_rejects_userinfo_and_query_secret(monkeypatch):
     _public_dns(monkeypatch)
     with pytest.raises(ValueError):
@@ -109,10 +97,6 @@ def test_current_cloud_rejects_userinfo_and_query_secret(monkeypatch):
         )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="current CloudOpenAICompat swallows transport exceptions as None",
-)
 def test_current_cloud_transport_error_must_be_visible(monkeypatch):
     _public_dns(monkeypatch)
     monkeypatch.setenv("C190_KEY", "test-only")
@@ -414,7 +398,7 @@ class _CallableTransport:
 
 
 def test_new_cloud_timeout_in_flight_and_close_are_not_faked_zero(
-        new_cloud_env):
+        new_cloud_env, monkeypatch):
     class BlockingTransport:
         def __init__(self):
             self.started = threading.Event()
@@ -438,21 +422,58 @@ def test_new_cloud_timeout_in_flight_and_close_are_not_faked_zero(
         infer_timeout_s=0.05,
         load_timeout_s=1.0,
     )
+    # This test targets the inference wait, not provider first-load timing.
+    backend._ensure_loaded()
+    assert backend.diagnostic()["phase"] == "ready"
     frames = np.zeros((4, 6, 3), dtype=np.uint8)
-    with pytest.raises(TimeoutError):
-        backend.understand_frames(
-            "prompt", [frames], [{"position": 0}]
-        )
-    assert transport.started.is_set()
-    diagnostic = backend.diagnostic()
-    assert diagnostic["pending_calls"] == 1
-    assert diagnostic["executor_threads_alive"] == 1
-    incomplete = backend.close(timeout_s=0.01)
-    assert incomplete["closed"] is False
-    assert incomplete["close_incomplete"] is True
-    assert incomplete["pending_calls"] >= 1
+    import concurrent.futures
+    import scam.win11_l3_backend as l3_backend_module
 
-    transport.release.set()
+    preprocess_entered = threading.Event()
+    preprocess_release = threading.Event()
+
+    def gated_encode(_frame):
+        preprocess_entered.set()
+        if not preprocess_release.wait(2.0):
+            raise AssertionError("preprocess release barrier timed out")
+        return "AAAA"
+
+    original_result = concurrent.futures.Future.result
+
+    def result_after_transport_started(future, timeout=None):
+        # Scheduling and BGR->JPEG preprocessing precede transport. Wait for
+        # that positive signal before applying the production timeout budget;
+        # the preprocess gate makes the former race deterministic.
+        if not preprocess_entered.wait(2.0):
+            raise AssertionError("worker did not reach preprocessing")
+        preprocess_release.set()
+        if not transport.started.wait(2.0):
+            raise AssertionError("worker did not reach blocking transport")
+        return original_result(future, timeout=timeout)
+
+    monkeypatch.setattr(
+        l3_backend_module, "_encode_jpeg_b64", gated_encode
+    )
+    monkeypatch.setattr(
+        concurrent.futures.Future, "result", result_after_transport_started
+    )
+    try:
+        with pytest.raises(TimeoutError):
+            backend.understand_frames(
+                "prompt", [frames], [{"position": 0}]
+            )
+        assert transport.started.is_set()
+        diagnostic = backend.diagnostic()
+        assert diagnostic["pending_calls"] == 1
+        assert diagnostic["executor_threads_alive"] == 1
+        incomplete = backend.close(timeout_s=0.01)
+        assert incomplete["closed"] is False
+        assert incomplete["close_incomplete"] is True
+        assert incomplete["pending_calls"] >= 1
+    finally:
+        preprocess_release.set()
+        transport.release.set()
+
     deadline = time.monotonic() + 2.0
     while backend.diagnostic()["pending_calls"] and time.monotonic() < deadline:
         time.sleep(0.01)

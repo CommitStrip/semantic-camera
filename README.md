@@ -28,7 +28,7 @@ Core idea: **events are first-class; uncertain models are wrapped in determinist
 - **Fast/slow layering** — T0 gating 0.4ms per frame → T1 detection on motion → the alarm path has zero model latency; the slow system works within a bounded budget
 - **Grid zone selection** — the admin paints cells on the frame to define managed areas
 - **Custom alarm templates** — structural conditions evaluated in real time
-- **Dual model channels** — local ollama (data never leaves the machine) or a cloud OpenAI-compatible API, each call explicitly confirmed
+- **Optional image understanding** — Windows supports local models or an explicitly configured cloud image API. Cloud use requires consent to send sampled images and prompts and may incur provider charges; enabled requests do not require a separate confirmation dialog each time.
 - **First-use environment baseline (Win11)** — a guided, versioned scene baseline with hash-verified raw frames; recognition never auto-runs and never becomes a rule
 - **Events archived as they happen** — SQLite stays fully auditable; the workbench is loopback-only
 
@@ -37,12 +37,13 @@ Core idea: **events are first-class; uncertain models are wrapped in determinist
 | Edition | Dedicated entry point | Product focus | Release gate |
 |---|---|---|---|
 | Linux NVR | `python -m scam.linux_nvr` | Always-on service, multi-camera, recording, remote operations, 24h soak | Linux CI + systemd + on-device soak |
-| Windows 11 Workstation | `python -m scam.win11` | Local interactive use, first-use baseline, event/confirmation chain, delivery packaging | Windows CI + native Windows 11 acceptance (file-source closed loop passed; real RTSP pending) |
+| Windows 11 Workstation | `python -m scam.win11` | Local interactive use, first-use setup, event/evidence review, desktop packaging | Development use; installer identity, long-running operation, redistribution conditions and semantic quality require acceptance for the specific package |
 
 Both editions share the `scam` domain core, while entry points, defaults, deployment chains and acceptance reports are maintained separately. `python -m scam.nvr` is kept for legacy deployments only.
 
-Operations (install / upgrade / rollback / backup and restore) are covered by the
-[operations runbook](docs/linux-operations-runbook.md).
+Linux operations are covered by the [operations runbook](docs/linux-operations-runbook.md).
+Windows setup, backup, uninstall and cloud privacy are covered by the
+[Windows user guide (Chinese)](docs/windows-user-guide.md).
 
 ## 🚀 Quick start
 
@@ -104,7 +105,15 @@ powershell -ExecutionPolicy Bypass -File deploy\install-win11.ps1
 deploy\start-win11.bat
 ```
 
-Equivalent entry point: `python -m scam.win11`.
+Equivalent source entry point: `python -m scam.win11`.
+
+For desktop packages, read the [Windows user guide (Chinese)](docs/windows-user-guide.md)
+and [installer build notes](packaging/windows/README.md). Verify the package name,
+version and SHA-256 before use. Source changes do not update an existing binary
+package; use only that package's documented capabilities and verification scope.
+The [example configuration](cameras.example.json) contains no credentials and
+starts with its camera disabled. Replace the address, prepare the model resources
+and enable the camera before use; keep your real configuration out of Git.
 
 ## 🏗️ Architecture
 
@@ -145,8 +154,8 @@ CI runs three jobs ([workflow](.github/workflows/ci.yml)):
 - **test (Linux, Python 3.10 and 3.12)** — deploy script syntax (`bash -n`), single-source systemd unit rendering + `systemd-analyze verify`, full test suite (including Linux service-level smoke), Linux NVR edition contract, release packaging gate (sensitive-surface double gate + reproducible packaging self-check)
 - **test-windows** — full test suite (service-level smoke skips automatically), release packaging dry-run, platform-layer smoke (UTF-8 output and data directory), Win11 entry smoke, deploy scripts parsed by both PowerShell 5.1 and 7
 
-Most recent CI run on `main`: #61 (2026-09-23), all three jobs green; this
-release commit re-runs the same workflows.
+Historical CI results do not establish the status of this source or binary
+package; run the checks against the exact version being used.
 
 ## 📁 Repository layout
 
@@ -198,10 +207,10 @@ checked, rebuildable).
 
 ## ⚠️ Known limitations (honest list — v0.1.0-beta)
 
-- **Real RTSP cameras are not yet verified.** All Win11 closed-loop evidence
-  (the 79-event chain above) was produced on recorded clips replayed as a
-  camera stream. Real-camera acceptance needs an authorized RTSP source and is
-  the next milestone.
+- **A complete real-camera semantic workflow is not yet accepted.** Camera
+  access, object detection and relation inference have component-level evidence;
+  these do not establish current-package model quality or a complete user workflow.
+  The historical 79-event result above used a recorded clip.
 - **Semantic description quality is not verified.** In a 5-sample frame-level
   human review, 1 output was faithful and 4 contained errors (scene
   misidentification, fabricated timestamps, overconfident labels). The UI
@@ -228,4 +237,6 @@ checked, rebuildable).
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+Project code: MIT, see [LICENSE](LICENSE). Third-party code, model weights and
+other assets retain their respective terms; the project license does not grant
+blanket permission to redistribute a bundled package.

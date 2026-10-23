@@ -1,6 +1,8 @@
 import hashlib
 import io
 import json
+import os
+import subprocess
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 
@@ -316,10 +318,6 @@ def test_schema_label_must_match_provenance_shape(tmp_path, schema, meta):
         CropEvidenceStore(tmp_path).read(asset)
 
 
-@pytest.mark.xfail(
-    strict=False, run=True,
-    reason="符号链接权限语义随平台/运行器变化：CI Windows 运行器可创建目录符号链接，"
-           "但重解析点判定路径不同；本机通过，已知限制见 RELEASE_NOTES")
 def test_index_directory_is_reserved_not_evidence(tmp_path):
     # The worker's persistent-index directory must not break the strict root
     # scan, must not count as an asset, and a symlink posing as it is still
@@ -332,12 +330,32 @@ def test_index_directory_is_reserved_not_evidence(tmp_path):
     other["frame_id"] = 9
     store.save(pixels(), other)
     assert len(list(tmp_path.glob("*.crop"))) == 2
-    (tmp_path / "index").rmdir()
-    import os as _os
-    if _os.symlink is not None:
-        try:
-            (tmp_path / "index").symlink_to(tmp_path, target_is_directory=True)
-        except OSError:
-            return  # platform without symlink privilege: nothing more to prove
+
+
+def test_index_reparse_entry_is_rejected(tmp_path):
+    """A symlink/junction named index must fail closed, never be skipped."""
+    store = CropEvidenceStore(tmp_path)
+    store.save(pixels(), provenance())
+    other = provenance()
+    other["frame_id"] = 9
+    link = tmp_path / "index"
+    try:
+        link.symlink_to(tmp_path, target_is_directory=True)
+    except (NotImplementedError, OSError):
+        if os.name != "nt":
+            pytest.skip("filesystem symlinks unavailable in this environment")
+        completed = subprocess.run(
+            ["cmd", "/d", "/c", "mklink", "/J", str(link), str(tmp_path)],
+            capture_output=True,
+            shell=False,
+        )
+        if completed.returncode != 0:
+            pytest.skip("filesystem symlink and directory junction unavailable")
+    try:
         with pytest.raises(CropEvidenceError, match="unsafe_root"):
             store.save(pixels(), other)
+    finally:
+        try:
+            link.unlink()
+        except OSError:
+            os.rmdir(link)

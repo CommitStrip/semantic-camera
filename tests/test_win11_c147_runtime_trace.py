@@ -4,20 +4,16 @@ import pytest
 from test_win11_l2_runtime import _R2Probe, _person
 
 
-@pytest.mark.xfail(
-    strict=False, run=True,
-    reason="时序敏感：低负载本机稳定通过；CI 运行器负载下单次 pump 内 L3 可能未完成，"
-           "已知限制见 RELEASE_NOTES")
 def test_slow_observer_does_not_block_actual_business():
     entered, release = threading.Event(), threading.Event()
     def observer(record):
         entered.set()
-        assert release.wait(3)
+        assert release.wait(10), "trace observer release barrier timed out"
     probe = _R2Probe(trace_sink=observer)
     try:
         probe.feed(change_boxes=[dict(x=120, y=90, w=40, h=60)], detections=_person(.4))
         assert probe.pump()
-        assert entered.wait(1)
+        assert entered.wait(10), "trace worker did not enter the blocking observer"
         probe.drain()
         assert probe.counts()["l3_completed"] > 0
         assert not probe.runtime._close_trace(.01)
